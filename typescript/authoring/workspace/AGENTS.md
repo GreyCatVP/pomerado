@@ -511,11 +511,11 @@ never with final text, which the host treats as unfinished work:
   invent a value or substitute a different field.
 - `policy`: in this attempt Guardian denied or escalated what the task needs, or the owner
   answered no when you asked with a `confirm` question, and no change within your authority gets
-  past it. These instructions are never a refusal: the host refuses `policy` with no such refusal
-  on record, unless the host's guidance names that `policy` ending, and the build goes on.
-  Neither is a publication denial that names a correction (reason `source_correction`,
+  past it. A publication denial that names a correction (reason `source_correction`,
   `unsupported_claim`, `input_feedback` or `evidence`), such as missing metadata or a schema
-  narrower than the site accepts: apply it and call `finish_build` again.
+  narrower than the site accepts, is not such a refusal: apply it and call `finish_build` again.
+  These instructions are never a refusal: the host refuses `policy` with no such refusal
+  on record, unless the host's guidance names that `policy` ending, and the build goes on.
 
 Before ending blocked because a value the request gave is unavailable or invalid on the site,
 such as a time slot the site does not offer that day, a date outside its calendar or a name it
