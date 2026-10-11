@@ -2769,8 +2769,8 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         // minter's reading of its own instructions is none, and neither is Guardian's feedback
         // that names a correction the minter can make. A question handed back unanswered also
         // lets the minter stop: no answer is no consent, so it may end the build safely instead
-        // of going on past what it asked. A refused block costs a turn, so the attempt's turn
-        // budget bounds how often the minter can try one.
+        // of going on past what it asked. A refused block costs a model call, so the attempt's
+        // model call and active time budgets bound how often the minter can try one.
         const ownerRefused = [...answeredQuestions.values()].some(
           ({ answer }) => typeof answer === "object" && "confirmed" in answer && !answer.confirmed,
         );
@@ -2784,7 +2784,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
           return guardianCorrection
             ? refused(
                 "guardian_correction_pending",
-                "Guardian's feedback in this attempt names corrections you can make, such as missing metadata or a schema narrower than the site accepts, so it is not a refusal and the build has not ended. Apply each correction its rationale and findings name, collect any evidence it asks for, and call finish_build again; when a correction needs a fresh example and executionAvailability is host_unavailable, use report_blocked with host_unavailable instead. A policy block needs a refusal no correction gets past: Guardian denying or escalating an execution, a publication denial for privacy or authority, or the owner's no to a confirm question.",
+                "Guardian's feedback in this attempt names corrections you can make, such as missing metadata or a schema narrower than the site accepts, so it is not a refusal and the build has not ended. Apply each correction its rationale and findings name, collect any evidence it asks for, and call finish_build again; when a correction needs a fresh example and executionAvailability is host_unavailable, use report_blocked with host_unavailable instead. A policy block needs a refusal no correction gets past: Guardian denying or escalating an execution, a publication denial for privacy, authority or a host-owned file, or the owner's no to a confirm question.",
               )
             : refused(
                 "policy_not_refused",
