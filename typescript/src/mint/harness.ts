@@ -56,6 +56,7 @@ import {
   withOwnWords,
 } from "./contracts.js";
 import { answersForReview, type AnsweredQuestion } from "../guardian/question.js";
+import { correctablePublicationReason } from "../guardian/review-contracts.js";
 import type { PublicationFinding } from "../guardian/review-contracts.js";
 import {
   taskUpdateForReview,
@@ -1001,8 +1002,16 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         error.code === "ReviewDenied" ||
         error.review !== undefined ||
         error.execution !== undefined;
-      /** Guardian denied or escalated an execution, or denied a publication, in this attempt. */
+      /**
+       * Guardian denied or escalated an execution, or denied a publication for a reason no
+       * correction gets past, in this attempt.
+       */
       let guardianRefused = recovered?.guardianRefused === true;
+      /**
+       * Guardian denied a publication in this attempt with feedback the minter can correct
+       * (`correctablePublicationReason`): never a refusal a `policy` block stands on.
+       */
+      let guardianCorrection = recovered?.guardianCorrection === true;
       /** Unanswered questions handed back to the minter in this build, up to the limit. */
       let noAnswerHandBacks = recovered?.noAnswerHandBacks ?? 0;
       /**
@@ -2757,9 +2766,11 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
           );
         // A policy block stands on a refusal on record: Guardian's deny or escalation, or the
         // owner's no to a confirm question, unless the host's own guidance names the ending. The
-        // minter's reading of its own instructions is none. A question handed back unanswered
-        // also lets the minter stop: no answer is no consent, so it may end the build safely
-        // instead of going on past what it asked.
+        // minter's reading of its own instructions is none, and neither is Guardian's feedback
+        // that names a correction the minter can make. A question handed back unanswered also
+        // lets the minter stop: no answer is no consent, so it may end the build safely instead
+        // of going on past what it asked. A refused block costs a turn, so the attempt's turn
+        // budget bounds how often the minter can try one.
         const ownerRefused = [...answeredQuestions.values()].some(
           ({ answer }) => typeof answer === "object" && "confirmed" in answer && !answer.confirmed,
         );
@@ -2770,7 +2781,12 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
           noAnswerHandBacks === 0 &&
           dependencies.policyBlockAllowed?.(screenedExplanation) !== true
         )
-          return refused(
+          return guardianCorrection
+            ? refused(
+                "guardian_correction_pending",
+                "Guardian's feedback in this attempt names corrections you can make, such as missing metadata or a schema narrower than the site accepts, so it is not a refusal and the build has not ended. Apply each correction its rationale and findings name, collect any evidence it asks for, and call finish_build again. A policy block needs a refusal no correction gets past: Guardian denying or escalating an execution, a publication denial for privacy or authority, or the owner's no to a confirm question.",
+              )
+            : refused(
             "policy_not_refused",
             "Nothing in this attempt refused this: Guardian denied or escalated nothing, and the owner answered no to nothing. Your instructions are not a refusal, so the build has not ended. Continue through the page's own controls. Ask the owner with request_input when only they can decide; their no to a confirm question is a refusal. Use site_lacks_capability only when the site does not offer what the task needs.",
           );
@@ -4062,8 +4078,11 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
               }
               const denial = publication._tag === "Left" ? publication.left.review : undefined;
               const deniedCategory = denial?.findings?.[0]?.category;
-              if (publication._tag === "Left" && publication.left.code === "ReviewDenied")
-                guardianRefused = true;
+              if (publication._tag === "Left" && publication.left.code === "ReviewDenied") {
+                if (correctablePublicationReason(publication.left.review?.reason))
+                  guardianCorrection = true;
+                else guardianRefused = true;
+              }
               publicationDenial =
                 publication._tag === "Left" && publication.left.code === "ReviewDenied"
                   ? {
@@ -5242,6 +5261,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         ...(invalidOutcomes === 0 ? {} : { invalidOutcomes }),
         ...(blockedReviewUnavailable ? { blockedReviewUnavailable: true as const } : {}),
         ...(guardianRefused ? { guardianRefused: true as const } : {}),
+        ...(guardianCorrection ? { guardianCorrection: true as const } : {}),
         ...(noAnswerHandBacks === 0 ? {} : { noAnswerHandBacks }),
         ...(loginHeld ? { loginHeld: true as const } : {}),
         destinationEvidenceRefusals,

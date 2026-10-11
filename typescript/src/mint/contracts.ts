@@ -941,8 +941,9 @@ export type PublicationRequest = typeof PublicationRequest.Type;
  * `site_lacks_capability`, the site does not offer what the task needs; `policy`, Guardian
  * denied or escalated something in this attempt, or the owner answered no or left a question
  * unanswered, and nothing within authority gets past it. The host refuses `policy` without such a
- * refusal or unanswered question on record. A target on
- * another registrable domain is never a reason by itself: Guardian reviews such work.
+ * refusal or unanswered question on record, and Guardian feedback that names a correction the
+ * minter can make is none. A target on another registrable domain is never a reason by itself:
+ * Guardian reviews such work.
  */
 export const blockedExplanationLimit = 500;
 export const BuildBlocked = Schema.Struct({
@@ -1469,10 +1470,16 @@ export interface MintHarnessSnapshot {
    */
   readonly blockedReviewUnavailable?: true;
   /**
-   * Guardian denied or escalated an execution, or denied a publication, in this attempt: the
-   * refusal a `policy` block needs unless the owner answered no.
+   * Guardian denied or escalated an execution, or denied a publication for a reason no correction
+   * gets past, in this attempt: the refusal a `policy` block needs unless the owner answered no.
    */
   readonly guardianRefused?: true;
+  /**
+   * Guardian denied a publication in this attempt with feedback the minter can correct, which a
+   * `policy` block cannot rest on. Optional, so a rollout's old and new workers each restore the
+   * other's checkpoint.
+   */
+  readonly guardianCorrection?: true;
   /**
    * Unanswered questions handed back to the minter as no answer in this build, which a `policy`
    * block also stands on. Optional so a rollout's old and new workers each restore the other's
@@ -1623,6 +1630,7 @@ export const MintHarnessSnapshot: Schema.Schema<MintHarnessSnapshot> = Schema.St
   invalidOutcomes: Schema.optionalWith(Schema.NonNegativeInt, { exact: true }),
   blockedReviewUnavailable: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   guardianRefused: Schema.optionalWith(Schema.Literal(true), { exact: true }),
+  guardianCorrection: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   noAnswerHandBacks: Schema.optionalWith(Schema.NonNegativeInt, { exact: true }),
   loginHeld: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   destinationEvidenceRefusals: Schema.NonNegativeInt,

@@ -511,6 +511,90 @@ it("ends a policy block once Guardian denied an execution in the attempt", async
   });
 });
 
+/** A publication review that refuses for `reason`, its rationale naming what to fix. */
+const publicationRefusal = (reason: "source_correction" | "authority", rationale: string) =>
+  new MintFailure({
+    code: "ReviewDenied",
+    review: {
+      outcome: "deny",
+      reason,
+      reviewId: `review_${reason}`,
+      rationale,
+      findings: [
+        {
+          path: "publication/definition.json",
+          byteStart: 0,
+          byteEnd: 1,
+          category: "schema_mismatch",
+          explanation: rationale,
+        },
+      ],
+    },
+  });
+
+// Guardian feedback that names a fix is not a refusal of the task: a policy block resting on it
+// alone is refused, and the minter applies the correction and publishes in the same attempt.
+it("refuses a policy block resting only on correctable Guardian feedback, then publishes the correction", async () => {
+  let publications = 0;
+  const f = await fixture(
+    (_request, index) =>
+      [
+        call("execute", execution),
+        call("finish_build", publication, "first_publication"),
+        call(
+          "report_blocked",
+          { reason: "policy", explanation: "Guardian refused the tool's currency input." },
+          "blocked",
+        ),
+        call("finish_build", publication, "corrected_publication"),
+      ][index] ?? prose(),
+    {
+      publish: () =>
+        Effect.suspend(() =>
+          ++publications === 1
+            ? Effect.fail(
+                publicationRefusal(
+                  "source_correction",
+                  "Accept any ISO currency code the site offers, not only one.",
+                ),
+              )
+            : Effect.succeed({ publicationRef: "published_revision", diagnostics: [] }),
+        ),
+    },
+  );
+  const outcome = await f.run();
+  expect(outcome).toMatchObject({ build: "published", publicationRef: "published_revision" });
+  expect(outcome.blocked).toBeUndefined();
+  expect(toolResult(f.requests[3], "blocked")).toMatchObject({
+    status: "blocked_refused",
+    reason: "guardian_correction_pending",
+  });
+  expect(publications).toBe(2);
+});
+
+// A refusal no correction gets past still ends the build as blocked.
+it("ends a policy block once Guardian refused a publication for want of authority", async () => {
+  const explanation = "Guardian found the task needs authority the request does not give.";
+  const f = await fixture(
+    (_request, index) =>
+      [
+        call("execute", execution),
+        call("finish_build", publication),
+        call("report_blocked", { reason: "policy", explanation }),
+      ][index] ?? prose("Stopping."),
+    {
+      publish: () =>
+        Effect.fail(
+          publicationRefusal("authority", "Nothing in the request authorizes this change."),
+        ),
+    },
+  );
+  expect(await f.run()).toMatchObject({
+    build: "incomplete",
+    blocked: { reason: "policy", explanation },
+  });
+});
+
 it("ends a policy block once the owner answered no", async () => {
   const explanation = "The owner declined the only way to finish this task.";
   const f = await fixture(

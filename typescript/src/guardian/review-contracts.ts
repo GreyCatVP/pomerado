@@ -65,6 +65,22 @@ export const publicationReasons = [
   // Every finding is in a host-written file, which no source or metadata edit can fix.
   "host_owned",
 ] as const;
+/**
+ * Publication reasons whose denial names a fix the minter can make itself: a source, schema or
+ * metadata correction, a narrower claim, input feedback, or evidence it can collect. Such a
+ * denial is feedback, never a refusal of the task, so a `policy` block cannot rest on it alone.
+ * `privacy`, `authority` and `host_owned` are not: no edit within the minter's authority gets
+ * past them.
+ */
+export const correctablePublicationReasons = [
+  "source_correction",
+  "unsupported_claim",
+  "input_feedback",
+  "evidence",
+] as const satisfies readonly (typeof publicationReasons)[number][];
+/** Whether a publication denial's reason names a fix the minter can make; see above. */
+export const correctablePublicationReason = (reason: string | undefined): boolean =>
+  (correctablePublicationReasons as readonly (string | undefined)[]).includes(reason);
 
 /** The parts of one route in a host-generated routes.json that a finding can point at. */
 export const routePointerParts = [
