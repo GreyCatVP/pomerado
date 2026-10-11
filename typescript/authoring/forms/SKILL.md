@@ -216,7 +216,8 @@ observed, read back the saved state (the record, its quantity or status) instead
 Once that check or read-back matches the request, call the context's `verified()` with no
 argument just before returning, so the run reports the write as landed, whether it read the
 site's confirmation for this submission or the saved state. Without it the write stays a
-possible effect. Never call it for a status code without the page's error check, or a
+possible effect. Never call it for a status code without the page's error check (a 201
+whose Location names the new record needs none), or a
 missing confirmation, and make no execute call after it: a
 later call makes the effect possible again. Missing confirmation preserves uncertainty; it
 does not authorize another submit.

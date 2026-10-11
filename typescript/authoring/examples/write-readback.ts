@@ -3,18 +3,14 @@ import { defineOperation, timeoutDefaults } from "../../src/browser/index.js";
 
 const SavedTask = Schema.Struct({
   id: Schema.NonEmptyString.annotations({ description: "ID the site gave the saved task" }),
-  title: Schema.NonEmptyString.annotations({ description: "Title the saved task shows" }),
-  assignee: Schema.NonEmptyString.annotations({ description: "Assignee the saved task shows" }),
 });
 const Outcome = Schema.Union(
-  Schema.Struct({ saved: SavedTask, location: Schema.String }),
-  Schema.Struct({
-    failure: Schema.Literal("form_changed", "not_submitted", "not_saved", "readback_missing"),
-  }),
+  Schema.Struct({ id: Schema.NonEmptyString }),
+  Schema.Struct({ failure: Schema.Literal("form_changed", "not_submitted", "not_saved") }),
 );
 
 // Observed contract: this authenticated account's form stages edits without autosave;
-// POST /tasks returns 201 + Location; the page opens that server-rendered detail.
+// POST /tasks returns 201 + Location /tasks/<id> naming the new task.
 // The host has authorized creation and signed in. Adapt from site evidence.
 export default defineOperation(
   {
@@ -26,8 +22,8 @@ export default defineOperation(
       }),
     }),
     output: SavedTask,
-    // The create request's own 201 with its Location confirms the write. The page the commit
-    // opens, that task's detail, shows every output field, so nothing opens another page.
+    // The create request's own 201 with its Location confirms the write and names the new task,
+    // so no page is read for the output.
     write: { confirmation: "readback", commits: ["create-task"] },
   },
   async ({
@@ -93,30 +89,26 @@ export default defineOperation(
             return request.method() === "POST" && request.url() === current.origin + "/tasks" &&
               fields.get("title") === title && fields.get("assignee") === assignee;
           }, { timeout: Math.min(35000, available) }),
-          form.getByRole("button", { name: "Create task", exact: true }).click({ timeout: Math.min(${timeoutDefaults.answerCap}, available - 1000) }),
+          form.getByRole("button", { name: "Create task", exact: true }).click({ noWaitAfter: true, timeout: Math.min(${timeoutDefaults.answerCap}, available - 1000) }),
         ]);
         if (submission.status === "rejected") throw submission.reason;
         if (receipt.status === "rejected") throw receipt.reason;
         const response = receipt.value;
-        const location = response.headers()["location"] ?? "";
-        if (response.status() !== 201 || !location.startsWith("/tasks/")) return { failure: "not_saved" };
-        // The 201 with its Location confirmed the write. Read the output from the page it opens,
-        // the record that Location names, and only the fields the output promises.
-        await page.waitForURL(current.origin + location, { timeout: 10000 });
-        const detail = page.getByRole("region", { name: "Saved task", exact: true });
-        if (!(await detail.isVisible())) return { failure: "readback_missing" };
-        const read = (label) => detail.getByLabel(label, { exact: true }).inputValue({ timeout: ${timeoutDefaults.action} });
-        return {
-          location,
-          saved: { id: await read("Task ID"), title: await read("Title"), assignee: await read("Assignee") },
-        };
+        const posted = new URL(response.url());
+        const location = new URL(response.headers()["location"] ?? "", posted);
+        const id = location.pathname.startsWith("/tasks/") ? location.pathname.slice("/tasks/".length) : "";
+        if (response.status() !== 201 || location.origin !== posted.origin || !/^[^/]+$/.test(id))
+          return { failure: "not_saved" };
+        // The 201 with its Location confirmed the write and gave the new task's id. Return now:
+        // the page it opens may still be loading, and nothing here waits for it.
+        return { id };
       `,
     });
     // A failure after the click leaves the write uncertain. Never resubmit here.
     if (!answer.success)
       throw new errors.OperationFailure(String(answer.error), { stderr: answer.stderr });
     const result = Schema.decodeUnknownSync(Outcome)(answer.result);
-    if ("failure" in result && result.failure !== "readback_missing")
+    if ("failure" in result)
       throw new errors.OperationFailure(result.failure, {
         dispatch:
           result.failure === "form_changed" || result.failure === "not_submitted"
@@ -125,19 +117,6 @@ export default defineOperation(
       });
     // The 201 with its Location confirmed the write. Record it now, with no further call.
     verified();
-    // A page left from before the write can show another task, and one that has not loaded
-    // shows none. The write still landed; only its output is missing.
-    const fold = (text: string) =>
-      text.normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
-    if (
-      "failure" in result ||
-      result.location !== `/tasks/${result.saved.id}` ||
-      fold(result.saved.title) !== fold(input.title) ||
-      fold(result.saved.assignee) !== fold(input.assignee)
-    )
-      throw new errors.OperationFailure("The saved task did not show on the page the commit opened", {
-        dispatch: "sent",
-      });
-    return result.saved;
+    return { id: result.id };
   },
 );

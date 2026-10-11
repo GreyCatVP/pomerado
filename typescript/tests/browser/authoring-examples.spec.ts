@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { expect, test } from "@playwright/test";
-import type { Page } from "playwright";
+import type { Page, Route } from "playwright";
 import { Effect, Either, Exit, Schema, Scope } from "effect";
 import authEntry from "../../authoring/examples/auth-entry.js";
 import chooseAirport from "../../authoring/examples/custom-selection.js";
@@ -1054,69 +1054,162 @@ for (const mode of ["ambiguous", "no_commit"] as const)
     await expect(page.getByRole("textbox", { name: "Selected catalog key" })).toHaveValue("A");
   });
 
-for (const confirmation of ["saved", "folded", "missing", "stale-id"] as const)
-  test(`write example submits once and waits for its own response: ${confirmation}`, async ({
+/**
+ * The task site the write example was written against: the form posts the task, the site answers
+ * `status` with `location`, if any, and the page then opens that location, answered as `detail`
+ * says.
+ */
+const taskSite = async (
+  page: Page,
+  origin: string,
+  answer: { readonly status: number; readonly location?: string },
+  detail: (route: Route) => Promise<void>,
+) => {
+  let submissions = 0;
+  await page.route(`${origin}/**`, async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      submissions += 1;
+      await route.fulfill({
+        status: answer.status,
+        headers: answer.location === undefined ? {} : { location: answer.location },
+      });
+      return;
+    }
+    if (request.url() === `${origin}/tasks/new`) {
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<form aria-label="New task" method="post" action="/tasks">
+          <label>Title<input name="title"></label><label>Assignee<input name="assignee"></label>
+          <button>Create task</button>
+        </form><script>
+          document.querySelector("form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const response = await fetch("/tasks", { method: "POST", body: new URLSearchParams(new FormData(event.target)) });
+            location.href = response.headers.get("location");
+          });
+        </script>`,
+      });
+      return;
+    }
+    await detail(route);
+  });
+  await page.goto(`${origin}/tasks/new`);
+  return { submissions: () => submissions };
+};
+
+// The create request's 201 and its Location give the output, so the detail page the save opens
+// never matters: one showing another task, one that is missing, or one still loading when the run
+// ends all leave the same verified write and output.
+for (const detail of ["shown", "stale", "missing", "slow"] as const)
+  test(`write example takes its output from its own 201, with no page read-back: ${detail}`, async ({
     page,
   }) => {
     const origin = "https://tasks.example.invalid";
     const requested = { title: "Review draft", assignee: "demo-user" };
-    // The page may show the saved values in its own case and accents.
-    const shown =
-      confirmation === "folded" ? { title: "REVIEW DRAFT", assignee: "démo-user" } : requested;
-    let submissions = 0;
-    await page.route(`${origin}/**`, async (route) => {
-      const request = route.request();
-      if (request.method() === "POST") {
-        submissions += 1;
-        await route.fulfill({ status: 201, headers: { location: "/tasks/task-123" } });
-        return;
-      }
-      if (request.url() === `${origin}/tasks/new`) {
-        await route.fulfill({
-          contentType: "text/html",
-          body: `<form aria-label="New task" method="post" action="/tasks">
-            <label>Title<input name="title"></label><label>Assignee<input name="assignee"></label>
-            <button>Create task</button>
-          </form><script>
-            document.querySelector("form").addEventListener("submit", async (event) => {
-              event.preventDefault();
-              const response = await fetch("/tasks", { method: "POST", body: new URLSearchParams(new FormData(event.target)) });
-              location.href = response.headers.get("location");
-            });
-          </script>`,
-        });
-        return;
-      }
-      await route.fulfill({
-        contentType: "text/html; charset=utf-8",
-        body:
-          confirmation === "missing"
-            ? "<p>Task saved</p>"
-            : `<section role="region" aria-label="Saved task">
-                <label>Task ID<input readonly value="${confirmation === "stale-id" ? "old-task" : "task-123"}"></label>
-                <label>Title<input readonly value="${shown.title}"></label>
-                <label>Assignee<input readonly value="${shown.assignee}"></label>
-              </section>`,
-      });
+    let runEnded = () => {};
+    const ended = new Promise<void>((resolve) => {
+      runEnded = resolve;
     });
-    await page.goto(`${origin}/tasks/new`);
+    const site = await taskSite(
+      page,
+      origin,
+      { status: 201, location: "/tasks/task-123" },
+      async (route) => {
+        // A slow detail page answers only after the run has returned.
+        if (detail === "slow") await ended;
+        const shown =
+          detail === "stale"
+            ? { id: "old-task", title: "Other task", assignee: "someone-else" }
+            : { id: "task-123", ...requested };
+        await route
+          .fulfill(
+            detail === "missing"
+              ? { status: 404, contentType: "text/html", body: "<p>Not found</p>" }
+              : {
+                  contentType: "text/html; charset=utf-8",
+                  body: `<section role="region" aria-label="Saved task">
+                    <label>Task ID<input readonly value="${shown.id}"></label>
+                    <label>Title<input readonly value="${shown.title}"></label>
+                    <label>Assignee<input readonly value="${shown.assignee}"></label>
+                  </section>`,
+                },
+          )
+          .catch(() => {});
+      },
+    );
     const { result, calls, effect, ...recorded } = await runExample(page, createTask, requested, {
       siteOrigin: origin,
     });
-    expect(submissions).toBe(1);
+    runEnded();
+    expect(site.submissions()).toBe(1);
     expect(calls).toHaveLength(1);
     expect(createTask.write).toEqual({ confirmation: "readback", commits: ["create-task"] });
-    // The 201 with its Location records the write as landed, whether or not the page it opens
-    // shows the saved task; the one submission entered its commit mark.
+    // The 201 with its Location records the write as landed; the one submission entered its
+    // commit mark.
     expect({ effect, ...recorded }).toEqual({
       effect: "verified",
       confirmation: "readback",
       commits: [{ name: "create-task", state: "confirmed" }],
     });
-    // A missing or stale detail page leaves only the output missing, never the write uncertain.
-    if (confirmation === "saved" || confirmation === "folded")
-      expect(result).toEqual(Either.right({ id: "task-123", ...shown }));
-    else expect(failure(result)).toMatchObject({ _tag: "OperationFailure", dispatch: "sent" });
+    // The output is the id from the Location alone, with no echo of the input.
+    expect(result).toEqual(Either.right({ id: "task-123" }));
+  });
+
+// Sites often send Location as an absolute URL. One on the response's own origin names the task
+// as a path does.
+test("write example takes its id from an absolute Location on its own origin", async ({ page }) => {
+  const origin = "https://tasks.example.invalid";
+  const site = await taskSite(
+    page,
+    origin,
+    { status: 201, location: `${origin}/tasks/task-123` },
+    (route) => route.fulfill({ contentType: "text/html", body: "<p>Task saved</p>" }),
+  );
+  const { result, calls, effect } = await runExample(
+    page,
+    createTask,
+    { title: "Review draft", assignee: "demo-user" },
+    { siteOrigin: origin },
+  );
+  expect(site.submissions()).toBe(1);
+  expect(calls).toHaveLength(1);
+  expect(effect).toBe("verified");
+  expect(result).toEqual(Either.right({ id: "task-123" }));
+});
+
+// A create that did not answer 201 with a Location naming the new task on the response's own
+// origin confirms nothing: the run fails as sent, without recording the write as landed.
+for (const [label, answer] of [
+  ["a 200", { status: 200, location: "/tasks/task-123" }],
+  ["a 4xx", { status: 422, location: "/tasks/task-123" }],
+  ["no Location", { status: 201 }],
+  ["a Location naming no task", { status: 201, location: "/tasks/" }],
+  ["a Location with a trailing slash", { status: 201, location: "/tasks/123/" }],
+  [
+    "a Location on another origin",
+    { status: 201, location: "https://other.example.invalid/tasks/task-123" },
+  ],
+] as const)
+  test(`write example fails as not_saved on ${label}`, async ({ page }) => {
+    const origin = "https://tasks.example.invalid";
+    const site = await taskSite(page, origin, answer, (route) =>
+      route.fulfill({ contentType: "text/html", body: "<p>Tasks</p>" }),
+    );
+    const { result, calls, effect } = await runExample(
+      page,
+      createTask,
+      { title: "Review draft", assignee: "demo-user" },
+      { siteOrigin: origin },
+    );
+    expect(site.submissions()).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(failure(result)).toMatchObject({
+      _tag: "OperationFailure",
+      message: "not_saved",
+      dispatch: "sent",
+    });
+    expect(effect).not.toBe("verified");
   });
 
 test("write example waits for a delayed submit control and its own receipt before returning", async ({
@@ -1163,7 +1256,7 @@ test("write example waits for a delayed submit control and its own receipt befor
     siteOrigin: origin,
     deadlineMs: 25_000,
   });
-  expect(result).toEqual(Either.right({ id: "task-123", ...requested }));
+  expect(result).toEqual(Either.right({ id: "task-123" }));
   expect(submissions).toBe(1);
   expect(calls).toHaveLength(1);
 });

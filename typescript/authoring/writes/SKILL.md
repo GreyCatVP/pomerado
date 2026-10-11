@@ -127,7 +127,9 @@ too. Run each step with `execute` purpose `act`, target `liveBrowser`.
   shows the caller's values, as `references/write-readback.ts` does. Wait too for every way
   the page can answer with `waitForOutcome`, listing the site's error or validation message
   first. The write went through when that response is 2xx or 3xx, a body the call can read
-  shows no error, and the page shows no error or validation message after it. A 200 whose
+  shows no error, and the page shows no error or validation message after it. A 201 whose
+  Location names the new record went through as soon as it arrives, with no wait for the
+  page. A 200 whose
   body reports an error, as GraphQL can, did not go through. A 202, or a 2xx whose body says
   the work is queued, went through too; return the site's own status word for it in the
   output. Then read what the output promises from that response or from the page the commit
@@ -304,7 +306,7 @@ A script that throws `errors.InvalidInput` (core skill) fails as the caller's in
 mark is entered, the run reports that it changed nothing.
 
 See `references/write-session.ts` for two steps and the composed script, and
-`references/write-readback.ts` for a read-back confirmation tied to its submission.
+`references/write-readback.ts` for a write confirmed from its own commit request.
 <!-- pomerado:section writes.completion:start
 
 ## Standalone write completion
