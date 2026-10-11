@@ -1,6 +1,6 @@
 ---
 name: http-mcp
-description: Build a read's faster HTTP version: find where the page gets its data, request it the same way, parse it and test it until it matches. Read right after the first Playwright example passes.
+description: Build a read's faster HTTP version, which may ship alone: find where the page gets its data, request it the same way, parse it and test it until it passes. Read right after the first Playwright example passes.
 ---
 
 # The HTTP version of a read
@@ -10,7 +10,9 @@ are faster. Most sites that render server-side, or call a JSON API from the page
 ones included: requests ride the browser's own cookies, TLS fingerprint and proxy. The HTTP version
 is tested as its Playwright version is, by what the tool is now: a read signed out on several
 inputs, a signed-in read once against its example, and a write once, by replaying its act session
-offline (Test it, below).
+offline (Test it, below). A read whose HTTP version passes and whose example ran on it may ship
+`http` alone, even when its Playwright version is incomplete or fails a case (What publishes and
+runs, below).
 
 ## Request rules (check every request)
 
@@ -286,7 +288,12 @@ The host decides from its own records, never from your claims:
   first, with the Kernel script as its fallback. After a run falls back (on its entry
   page with the cookies and site storage the run started with), maintenance repairs the HTTP
   version.
-- A read whose example itself ran `src/tool-http.mjs` publishes `http` alone.
+- A read whose example itself ran `src/tool-http.mjs` publishes `http` alone. That is a normal
+  way to finish a read, not a fallback: once the HTTP version passes its tests (Test it, above),
+  run the example on it and publish, even while the Playwright version is incomplete or fails a
+  case, and stop fixing a Playwright version you will not ship. Keep `src/tool.mjs` loading, since
+  the HTTP version imports its contract. A version that does not ship is neither recorded nor
+  judged; the HTTP version still reads each input back from the answer.
 - Try the HTTP version while you build, before the final example, so the example still runs
   last, after every edit, and finish_build's ask is only a backstop.
 - For a read without a passing HTTP test of the current file, finish_build asks once:
@@ -303,8 +310,12 @@ The host decides from its own records, never from your claims:
   retry.
 
 In maintenance of a read whose HTTP version served runs, repair `src/tool-http.mjs` with the rest
-of the tool and test it live again, whatever broke. Failure code `HttpImplementationFailed` means
-the HTTP version failed in a run; its Playwright fallback may already have answered the caller.
+of the tool and test it live again, whatever broke. A repair of any read may also finish with
+`http` alone, as a build may, including one whose tool shipped only its Playwright version: when
+the HTTP version passes its tests and the repair's example ran on it, publish that, and leave a
+Playwright version that still fails unrepaired. The repair still keeps the tool's inputs and
+every output it returns. Failure code `HttpImplementationFailed` means the HTTP version failed in
+a run; its Playwright fallback may already have answered the caller.
 Read the original attempt's HTTP answer (its relay capture, or the saved head and tail the
 observations name) before you change it. Drop it only for a signal under "When it can't port",
 named in `httpVersion`. A site refusal of the caller's value is `InvalidInput`, never a reason to

@@ -48,23 +48,28 @@ inputs use (see "Apply and read back").
 
 ## Apply and read back
 
-On every run, set each input the site has a control for through that control, never by filtering
-the returned rows, then read it back from the site's committed state: the applied-filter chips,
-the selected sort, an option the site shows selected, or the results header. A URL naming the
-input does not show it applied. When a filter did not apply, the tool throws `OperationFailure`
-naming it, so the run fails and the tool gets repaired; it never returns unfiltered results as
-filtered.
+On every run, set each input the site has a control for through that control, or through the URL
+or data request the site itself uses for it when the control is unreliable (testing skill), never
+by filtering the returned rows, then read it back from the site's committed state: the
+applied-filter chips, the selected sort, an option the site shows selected, or the results header.
+A URL naming the input does not show it applied. When a filter did not apply, the tool throws
+`OperationFailure` naming it, so the run fails and the tool gets repaired; it never returns
+unfiltered results as filtered.
 An HTTP version reads each input back from the answer instead: the echoed query, sort, filters
 and store or location in its own state.
 
-Open only the groups the caller's inputs use. For a control inside a drawer or collapsed group,
-open the group first and wait for its panel to show and any loading overlay to clear; click the
-visible label or option, never a hidden input; when choosing reloads or navigates the results,
-wait for the new results, then read the choice back where the page shows it: an applied chip, the
-selected sort, the results header, or the reopened panel when nothing else shows it. A follow-up
-choice that will reload the results anyway can wait for that reload instead. Close a drawer or
-panel you opened with its own close control or Escape, and check it closed. After the last
-change, wait for the rows you return with `waitForChange`, as the core skill says.
+When setting one control reloads the result list, order matters: set that control, commonly a
+location or store, before the filters and sorts its reload would drop. Open only the groups the
+caller's inputs use. For a control inside a drawer or collapsed group, open the group first and
+wait for its panel to show and any loading overlay to clear; click the visible label or option,
+never a hidden input; when choosing reloads or navigates the results, wait for that reload to
+finish: the row identifiers or the results header changed and then settled (`waitForChange` on
+them), never every card's value holding still, since values that load lazily may never settle.
+Then read the choice back where the page shows it: an applied chip, the selected sort, the results
+header, or the reopened panel when nothing else shows it. A follow-up choice that will reload the
+results anyway can wait for that reload instead. Close a drawer or panel you opened with its own
+close control or Escape, and check it closed. After the last change, wait for the rows you return
+with `waitForChange`, as the core skill says.
 
 ## Location
 
