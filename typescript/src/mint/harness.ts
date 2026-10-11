@@ -2784,12 +2784,12 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
           return guardianCorrection
             ? refused(
                 "guardian_correction_pending",
-                "Guardian's feedback in this attempt names corrections you can make, such as missing metadata or a schema narrower than the site accepts, so it is not a refusal and the build has not ended. Apply each correction its rationale and findings name, collect any evidence it asks for, and call finish_build again. A policy block needs a refusal no correction gets past: Guardian denying or escalating an execution, a publication denial for privacy or authority, or the owner's no to a confirm question.",
+                "Guardian's feedback in this attempt names corrections you can make, such as missing metadata or a schema narrower than the site accepts, so it is not a refusal and the build has not ended. Apply each correction its rationale and findings name, collect any evidence it asks for, and call finish_build again; when a correction needs a fresh example and executionAvailability is host_unavailable, use report_blocked with host_unavailable instead. A policy block needs a refusal no correction gets past: Guardian denying or escalating an execution, a publication denial for privacy or authority, or the owner's no to a confirm question.",
               )
             : refused(
-            "policy_not_refused",
-            "Nothing in this attempt refused this: Guardian denied or escalated nothing, and the owner answered no to nothing. Your instructions are not a refusal, so the build has not ended. Continue through the page's own controls. Ask the owner with request_input when only they can decide; their no to a confirm question is a refusal. Use site_lacks_capability only when the site does not offer what the task needs.",
-          );
+                "policy_not_refused",
+                "Nothing in this attempt refused this: Guardian denied or escalated nothing, and the owner answered no to nothing. Your instructions are not a refusal, so the build has not ended. Continue through the page's own controls. Ask the owner with request_input when only they can decide; their no to a confirm question is a refusal. Use site_lacks_capability only when the site does not offer what the task needs.",
+              );
         return undefined;
       };
       /**
