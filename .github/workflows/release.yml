@@ -173,7 +173,7 @@ jobs:
     timeout-minutes: 10
     environment: npm-release
     permissions:
-      contents: write
+      contents: read
       id-token: write
     defaults:
       run:
@@ -258,6 +258,17 @@ jobs:
             exit 1
           fi
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      # Request only this repository's contents permission. The App bypasses tag creation,
+      # while the separate immutable-tag ruleset still blocks updates and deletions.
+      - name: Authenticate GitHub release writes
+        id: release-app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.PUBLIC_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: pomerado
+          permission-contents: write
       # npm dist-tag authenticates through trusted publishing (OIDC) from npm 11.21.0. Node 24.21.0
       # ships npm 11.19.0, whose dist-tag never asks for an OIDC token and so has no credentials.
       # This step alone runs npm 11.21.0. Keep that version pinned exactly, since this job can push
@@ -293,13 +304,14 @@ jobs:
             exit 1
           fi
           echo "latest moved from $previous to $VERSION." >> "$GITHUB_STEP_SUMMARY"
-      # Two tag rulesets cover v* tags. One lets only GitHub Actions tokens, such as this job's,
-      # create them. The other lets no one move or delete them, so a promotion after a rollback finds its
+      # Two tag rulesets cover v* tags. One lets only the release App create them.
+      # The other lets no one move or delete them, so a promotion after a rollback finds its
       # tag and release already there. A tag that is already there must point to the commit the
       # provenance names. docs/RELEASING.md describes both rulesets.
       - name: Tag the commit and create the GitHub Release
         env:
           COMMIT: ${{ steps.published.outputs.commit }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
         run: |
           tag="v$VERSION"
           if ref="$(gh api "repos/$REPOSITORY/git/ref/tags/$tag" 2>/dev/null)"; then
@@ -317,7 +329,7 @@ jobs:
             fi
           else
             if ! gh api "repos/$REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$COMMIT" --silent; then
-              echo "::error::Couldn't create tag $tag. If a tag ruleset refused it, check that GitHub Actions may bypass the release tag creation ruleset, as docs/RELEASING.md describes."
+              echo "::error::Couldn't create tag $tag. If a tag ruleset refused it, check that the release App may bypass the release tag creation ruleset, as docs/RELEASING.md describes."
               exit 1
             fi
           fi

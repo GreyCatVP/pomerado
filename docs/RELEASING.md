@@ -33,17 +33,20 @@ The promote job:
    - Its subject is `pkg:npm/pomerado@<version>`, with a sha512 digest equal to that integrity.
    - It was built by `.github/workflows/release.yml` in this repository, from `refs/heads/main`, on a GitHub-hosted runner. A release from the retired tag workflow, 0.2.0 or earlier, may name its own `v<version>` tag instead of `main`.
    - The commit it names is on `main`.
-3. Moves `latest` to the version, unless it already names it, and reads `latest` back. It reads `latest` from the registry's dist-tags endpoint, which the registry serves uncached. `npm view` reads the package document, which npm's CDN caches for up to five minutes, so it can show the old `latest` for that long after a move.
-4. Tags that commit `v<version>` and creates the GitHub Release with generated notes, unless a rollback finds them already there. A tag that is already there must point to that commit.
+3. Authenticates the release GitHub App for this repository with only `Contents: write`, before changing npm. The pinned token action revokes its short lived installation token when the job finishes. Only the tag and GitHub Release step uses it; the workflow's own token stays read-only and npm keeps using OIDC.
+4. Moves `latest` to the version, unless it already names it, and reads `latest` back. It reads `latest` from the registry's dist-tags endpoint, which the registry serves uncached. `npm view` reads the package document, which npm's CDN caches for up to five minutes, so it can show the old `latest` for that long after a move.
+5. Tags that commit `v<version>` and creates the GitHub Release with generated notes, unless a rollback finds them already there. A tag that is already there must point to that commit.
 
 Each step checks before it writes, so re-running a promotion for the version `latest` already names succeeds and changes nothing.
 
-Two tag rulesets cover `v*` tags:
+Configure two tag rulesets for `v*` tags:
 
 - `release tags` blocks updating, force-pushing and deleting a `v*` tag, with no bypass.
-- `release tag creation` blocks creating a `v*` tag. GitHub Actions bypasses it, so the promote job can tag with the workflow's own token, while maintainers can't push a release tag by hand. The bypass covers any workflow token with `contents: write`, and in this repository only the promote job has that.
+- `release tag creation` blocks creating a `v*` tag. Only the organization-owned release GitHub App bypasses it, so the promote job can tag with that App's installation token, while maintainers and ordinary workflow tokens can't push a release tag by hand.
 
-The creation rule sits in its own ruleset because a bypass covers every rule in its ruleset, and nothing may move or delete a release tag.
+The creation rule sits in its own ruleset because a bypass covers every rule in its ruleset, and nothing may move or delete a release tag. The immutable-tag ruleset must not also block creation without this bypass: all applicable rulesets are enforced together. GitHub's built-in Actions integration is not a substitute for the installed release App in this bypass list.
+
+Before promotion, configure the organization-owned release App with `Contents: write` and install it on this repository. In the `npm-release` environment, set the variable `PUBLIC_RELEASE_APP_ID` to its App ID and the encrypted secret `PUBLIC_RELEASE_APP_PRIVATE_KEY` to its private key. Keep that environment restricted to `main`. Use the App ID as the creation-only ruleset's `Integration` actor; do not add the App to the immutable-tag ruleset. The workflow narrows each installation token to this repository and `Contents: write`, and never stores it in Git credentials or a build artifact. App credentials and rulesets are configured separately from this source change.
 
 To promote by hand, a maintainer runs:
 
