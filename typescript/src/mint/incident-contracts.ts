@@ -57,7 +57,7 @@ export interface RecorderIncident {
     | "request_unseen";
   /** A lost socket or a target left attached at stop is ordinary; any other gap is a bug. */
   readonly hostBug: boolean;
-  readonly severity: "info" | "critical";
+  readonly severity: "info" | "high" | "critical";
   readonly websiteEffect: "may_have_dispatched";
   readonly targetType?: "page" | "iframe" | "worker" | "shared_worker" | "service_worker";
   readonly detail: FailureDetail;
@@ -108,7 +108,7 @@ export const MintIncident = Schema.Union(
       "request_unseen",
     ),
     hostBug: Schema.Boolean,
-    severity: Schema.Literal("info", "critical"),
+    severity: Schema.Literal("info", "high", "critical"),
     websiteEffect: Schema.Literal("may_have_dispatched"),
     targetType: Schema.optionalWith(
       Schema.Literal("page", "iframe", "worker", "shared_worker", "service_worker"),
