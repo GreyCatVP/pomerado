@@ -67,7 +67,11 @@ export const oneTimeLoginUrlParameters = (loginUrl: string): readonly string[] =
     }
   };
   inspect(rawParameters(url.search.slice(1)));
-  if (url.hash.length > 1) inspect(rawParameters(url.hash.slice(1)));
+  if (url.hash.length > 1) {
+    const fragment = url.hash.slice(1);
+    const query = fragment.includes("?") ? fragment.slice(fragment.indexOf("?") + 1) : fragment;
+    inspect(rawParameters(query));
+  }
   return [...names].sort();
 };
 

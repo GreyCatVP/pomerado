@@ -23,6 +23,19 @@ it.each([
   { url: `${idp}?state=ab12+cd34/ef56gh78==`, names: ["state"] },
   { url: `${idp}?nonce=ab12%2Bcd34%2Fef56gh78%3D`, names: ["nonce"] },
   { url: `${idp}#state=ab12+cd34+ef56gh78`, names: ["state"] },
+  // Hash-routed URLs carrying one-time parameters in their route query.
+  {
+    url: "https://example.com/#/oauth/callback?code_challenge=xyz123",
+    names: ["code_challenge"],
+  },
+  {
+    url: "https://example.com/#/oauth/callback?code_challenge=xyz123&code_verifier=abc",
+    names: ["code_challenge", "code_verifier"],
+  },
+  {
+    url: "https://example.com/#/oauth/callback?state=ab12+cd34+ef56gh78",
+    names: ["state"],
+  },
   // An identity provider's authorize endpoint is one authorization request, one-time values or not.
   {
     url: "https://acme.okta.com/oauth2/default/v1/authorize?client_id=portal&response_type=code",
@@ -56,6 +69,9 @@ it.each([
   "https://member.example.com/authorized-users",
   "https://member.example.com/account/auth",
   "https://member.example.com/authorize/help/faq",
+  // Hash routes without one-time parameters.
+  "https://member.example.com/#/dashboard?lang=en",
+  "https://member.example.com/#/oauth/callback",
   "not a url",
 ])("finds nothing one-time in %s", (url) => {
   expect(oneTimeLoginUrlParameters(url)).toEqual([]);
