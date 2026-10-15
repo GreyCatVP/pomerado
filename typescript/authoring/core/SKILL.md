@@ -434,10 +434,11 @@ description says what each name adds and what it costs.
 inputs. Scope the row locator to the main list, and leave out related, recommended, recently
 viewed and "others also" sections; with `include: ["related"]` return them in their own `related`
 list of the same row shape, never mixed into the results and never counted toward a limit. A
-sponsored or promoted row inside the main list stays where it is, marked as such. A card that
-stands for a group, such as one product in several flavours or sizes, a hotel with several room
-types or a building with several units for rent, is one result marked as a group (for example
-`kind: "group"`), with the options or count the card shows, never presented as one of its members.
+sponsored or promoted row inside the main list stays where it is, marked by a `sponsored` boolean
+every row carries (search skill). A card that stands for a group, such as one product in several
+flavours or sizes, a hotel with several room types or a building with several units for rent, is
+one result marked as a group (for example `kind: "group"`), with the options or count the card
+shows, never presented as one of its members.
 
 Then, for every field:
 - Prefer parsing what the page shows into typed fields over returning a result row, card or
@@ -452,6 +453,13 @@ Then, for every field:
   placeholder, a label or another record's value in its place.
 - One field per fact, as the page states it, and variants as the dimensions and values the page
   lists.
+- When a page shows more than one price for an item, name each field for its role, each in minor
+  units with its `currency` as above: the price a buyer pays now (`price_minor`), a
+  struck-through list, "was" or typical price (`list_price_minor`, null when the page shows
+  none), a per-unit price with its unit, and other offers, such as used, refurbished or another
+  seller's, as their own labeled fields or records. A $129.99 price beside a struck-through
+  $149.99 is `price_minor` 12999 and `list_price_minor` 14999. Never return an unlabeled list of
+  amounts the caller must guess between.
 - Prefer numbers for amounts and counts, ISO 8601 for dates and times and minutes for durations;
   type a date-only value as the runtime's `CalendarDate` (forms skill). A value that does not
   parse cleanly may be the site's own text.

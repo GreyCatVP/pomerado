@@ -101,7 +101,13 @@ is nullable and null exactly on the cards that don't. Read the results once the 
 have their key fields, filled in and holding still (`waitForRows`). When the site marks results
 as suggestions rather than matches, such as "no exact matches, showing similar items", return
 that. Keep the matches apart from related items, recommendations and sponsored carousels, which
-go in their own list or are left out, never mixed into the results, and return each item once. A
+go in their own list or are left out, never mixed into the results, and return each item once.
+Every result in the main list carries a `sponsored` boolean, true exactly on the results the site
+labels sponsored, promoted or an ad, which stay in place. Its link is the item's own page: the
+site's own link to it or the record's identifier route the site itself uses, such as the
+canonical link its page declares (`AGENTS.md`, "Work through the page's own controls"), never an
+ad or click-tracking redirect, nor a redirect with its query cut off, which is a guessed link.
+Return a redirect only in its own field, such as `ad_url`, when a caller could use it. A
 card that stands for a group of variants, such as "6 flavors" or "3 colors", says so in its own
 fields, such as a variant count, and that its link opens one member of the group. Check that the
 page's echo of the query, such as a results heading, matches it normalized, or for a proper noun
