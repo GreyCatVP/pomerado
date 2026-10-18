@@ -299,6 +299,105 @@ describe("a host's own trust of sign-in addresses", () => {
   });
 });
 
+// An identifier-first sign-in types the identifier on one screen, then the site hands off to a
+// password screen on a host no inspection judged before typing. The host learns, by origin alone,
+// each host its own predicate trusted (`trustedSignInOrigins`), since its refusal evidence still
+// names such a host `other`. Credentials still go only to the site, its configured sign-in origins
+// and what the predicate trusts within core's floor.
+describe("a sign-in host first reached after typing", () => {
+  const passwordStep: AutofillStep = {
+    fields: [{ selector: "#password", slot: "password" }],
+    submit: "#sign-in",
+  };
+  const afterTyping = { step: passwordStep, judgedBeforeTyping: [site] };
+
+  it("names, by origin, the password screen's host the predicate trusted after typing", async () => {
+    const host = predicate();
+    const report = await inspect(`${signInHost}/u/password?state=synthetic`, {
+      ...afterTyping,
+      actions: [`${signInHost}/session`],
+      trustSignInUrl: host.trustSignInUrl,
+    });
+    expect(report).not.toHaveProperty("outcome");
+    expect(report).toMatchObject({ trustedSignInOrigins: [signInHost] });
+    expect(host.asked).toContain(`${signInHost}/u/password?state=synthetic`);
+  });
+
+  it("refuses that screen without a predicate, as before, naming its host other", async () => {
+    const report = await inspect(`${signInHost}/u/password`, {
+      ...afterTyping,
+      actions: [`${signInHost}/session`],
+    });
+    expect(report).toMatchObject({ outcome: "refused", reason: "credential_target_refused" });
+    expect(refusedCheck(report)).toMatchObject({
+      check: "destination",
+      part: "frame",
+      frameOrigin: "other",
+    });
+    expect(report).not.toHaveProperty("trustedSignInOrigins");
+  });
+
+  it.each([
+    ["plain http", "http://login.example.net/u/password"],
+    ["an IP address", "https://203.0.113.7/u/password"],
+    ["a private network name", "https://login.corp.local/u/password"],
+    ["localhost", "https://localhost/u/password"],
+  ])(
+    "refuses a password screen on %s after typing whatever the predicate trusts",
+    async (_, frameUrl) => {
+      const host = predicate();
+      const report = await inspect(frameUrl, {
+        ...afterTyping,
+        trustSignInUrl: host.trustSignInUrl,
+      });
+      expect(report).toMatchObject({ outcome: "refused", reason: "credential_target_refused" });
+      expect(refusedCheck(report)).toMatchObject({ check: "destination", frameOrigin: "other" });
+      expect(report).not.toHaveProperty("trustedSignInOrigins");
+      expect(host.asked).toEqual([]);
+    },
+  );
+
+  it("names only what the predicate trusted, never the site or a configured sign-in origin", async () => {
+    const popupStep: AutofillStep = {
+      ...passwordStep,
+      popup: { opener: "primary", origin: "https://popup.example.com" },
+    };
+    const report = await inspect(`${signInHost}/u/password`, {
+      ...afterTyping,
+      step: popupStep,
+      actions: [`${site}/session`, `${otherHost}/session`],
+      authenticationOrigins: [signInHost],
+      trustSignInUrl: predicate().trustSignInUrl,
+    });
+    expect(report).toMatchObject({
+      trustedSignInOrigins: ["https://auth.example.org", "https://popup.example.com"],
+    });
+  });
+
+  it("names nothing when the predicate trusted nothing", async () => {
+    const report = await inspect(`${signInHost}/u/password`, {
+      ...afterTyping,
+      authenticationOrigins: [signInHost],
+      trustSignInUrl: predicate().trustSignInUrl,
+    });
+    expect(report).not.toHaveProperty("outcome");
+    expect(report).not.toHaveProperty("trustedSignInOrigins");
+  });
+
+  it("names nothing a predicate that throws was asked about", async () => {
+    const report = await inspect(`${signInHost}/u/password`, {
+      ...afterTyping,
+      actions: [`${otherHost}/session`],
+      trustSignInUrl: (url) => {
+        if (url.origin === signInHost) return true;
+        throw new Error("synthetic predicate failure");
+      },
+    });
+    expect(report).toMatchObject({ outcome: "refused", reason: "credential_target_refused" });
+    expect(report).not.toHaveProperty("trustedSignInOrigins");
+  });
+});
+
 describe("card fields when the host trusts more sign-in addresses", () => {
   const host = predicate();
   const trust = {
@@ -447,9 +546,20 @@ describe("the fill's judgment when a control moves", () => {
       authenticationOrigins: [],
       trustSignInUrl: host.trustSignInUrl,
     });
-    expect(await report).toMatchObject({ outcome: "filled" });
+    expect(await report).toMatchObject({ outcome: "filled", trustedSignInOrigins: [otherHost] });
     expect(typed).toEqual([password]);
     expect(host.asked).toContain(`${otherHost}/password`);
+  });
+
+  it("names nothing when the page moved the field within what the inspection trusted", async () => {
+    const { report, typed } = fillMoved(
+      { authenticationOrigins: [signInHost], trustSignInUrl: predicate().trustSignInUrl },
+      `${signInHost}/password`,
+    );
+    const filled = await report;
+    expect(filled).toMatchObject({ outcome: "filled" });
+    expect(filled).not.toHaveProperty("trustedSignInOrigins");
+    expect(typed).toEqual([password]);
   });
 
   it.each([

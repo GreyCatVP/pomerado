@@ -265,6 +265,13 @@ export interface AutofillInspection {
    * each fill call asks again.
    */
   readonly trustSignInUrl?: ((url: URL) => boolean) | undefined;
+  /**
+   * Host-only: the origin, scheme, host and port alone, of each address `trustSignInUrl` trusted
+   * for this inspection, sorted, each once; absent when it trusted none. Each is within core's
+   * floor (`trustableSignInUrl`), since the predicate is asked about nothing else, and none is on
+   * the site or an `authenticationOrigins` entry, which it is never asked about.
+   */
+  readonly trustedSignInOrigins?: readonly string[] | undefined;
   /** The payment frame origins a card field may also sit in, for a card-fill step only. */
   readonly paymentFrameOrigins?: readonly string[] | undefined;
   readonly screen: {
@@ -333,6 +340,11 @@ export type AutofillStepReport =
       /** Host-only: a value reached the page, even one a field no longer holds. */
       readonly typed?: true;
       /**
+       * Host-only: the origins `trustSignInUrl` trusted when the fill judged again a control the
+       * page moved, as `AutofillInspection.trustedSignInOrigins` names them.
+       */
+      readonly trustedSignInOrigins?: readonly string[];
+      /**
        * Host-only: the page's controls once a clicked submit settled, never a value, with names as
        * the page has them. The host screens them, shortens them (`presentControls`) and saves them
        * to a workspace file for the minter (`afterSubmitPath`) rather than showing them inline.
@@ -344,6 +356,8 @@ export type AutofillStepReport =
       readonly reason: "fill_call_failed";
       /** Host-only: a value may have reached the page. */
       readonly typed?: true;
+      /** Host-only: as a filled report's. */
+      readonly trustedSignInOrigins?: readonly string[];
       /**
        * Host diagnostics only; finite facts alone when the failed call held a value, a date's or a
        * typing call's. A typing call's has the phase `typing` (`lostTyping`): the host never
@@ -404,6 +418,22 @@ const hostTrusts = (predicate: ((url: URL) => boolean) | undefined, value: strin
     return false;
   }
 };
+
+/**
+ * `predicate`, which also adds to `trusted` the origin of each address it trusts; undefined
+ * without one. An address it does not trust, or throws on, adds nothing.
+ */
+export const notingHostTrust = (
+  predicate: ((url: URL) => boolean) | undefined,
+  trusted: Set<string>,
+) =>
+  predicate === undefined
+    ? undefined
+    : (url: URL) => {
+        const trusts = predicate(url) === true;
+        if (trusts) trusted.add(url.origin);
+        return trusts;
+      };
 
 /**
  * The first control that sits or submits off the site and its configured sign-in origins, or a
@@ -497,7 +527,8 @@ export const untrustedTarget = (
  * document is on the site, and its card fields may sit in a frame on `paymentFrameOrigins`.
  * `trustSignInUrl` lets a sign-in step's controls and popup also sit on an address the host's own
  * predicate trusts, asked only about one core's own floor allows; the inspection keeps it, so each
- * fill call judges again by the same rule. Evidence names origins as before.
+ * fill call judges again by the same rule, and names the origin of each address it trusted
+ * (`trustedSignInOrigins`). Evidence names origins as before.
  */
 export const inspectAutofillStep = (input: {
   readonly step: AutofillStep<FillSlot>;
@@ -517,16 +548,25 @@ export const inspectAutofillStep = (input: {
    * about addresses the page shaped, which may hold what was typed: the host must never log, keep
    * or forward a URL it is asked about, and answers from the URL alone. A predicate that throws
    * trusts nothing. Unset, only the site and `authenticationOrigins`.
+   *
+   * An inspection that passes names the origin of each address the predicate trusted
+   * (`trustedSignInOrigins`), scheme, host and port alone, on a screen first reached after typing
+   * too, where refusal evidence still names an origin no inspection judged `other`. The host chose
+   * to trust that host with the sign-in, so it may keep the origin as the record of where the
+   * sign-in went. Like any address the page shaped after typing, it may hold part of what was
+   * typed, so the host screens it as it would the page's own text before it shows or forwards it.
    */
   readonly trustSignInUrl?: ((url: URL) => boolean) | undefined;
 }): Effect.Effect<AutofillRefusal | AutofillInspection> =>
   Effect.gen(function* () {
     const { step, page, siteOrigin, authenticationOrigins } = input;
     const predicate = signInUrlTrust(input, step);
+    const trustedByHost = new Set<string>();
+    const asking = notingHostTrust(predicate, trustedByHost);
     if (
       step.popup !== undefined &&
       !trustedUrl(siteOrigin, authenticationOrigins, step.popup.origin) &&
-      !hostTrusts(predicate, step.popup.origin)
+      !hostTrusts(asking, step.popup.origin)
     )
       return withCheck(refused("credential_target_refused"), "destination", {
         part: "popup",
@@ -564,7 +604,7 @@ export const inspectAutofillStep = (input: {
       fields: found.fields.map(({ target }) => target),
       submit: found.submit === null ? null : found.submit.target,
     };
-    const untrusted = untrustedTarget(targets, step, input, 0, named);
+    const untrusted = untrustedTarget(targets, step, { ...input, trustSignInUrl: asking }, 0, named);
     if (untrusted)
       return withEvidence(
         untrusted,
@@ -582,6 +622,7 @@ export const inspectAutofillStep = (input: {
       siteOrigin,
       authenticationOrigins,
       ...(predicate === undefined ? {} : { trustSignInUrl: predicate }),
+      ...(trustedByHost.size === 0 ? {} : { trustedSignInOrigins: [...trustedByHost].sort() }),
       ...(input.paymentFrameOrigins === undefined
         ? {}
         : { paymentFrameOrigins: input.paymentFrameOrigins }),

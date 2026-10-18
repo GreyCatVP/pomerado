@@ -28,6 +28,7 @@ import {
   type FillSlot,
   type AutofillStepReport,
   LocatedError,
+  notingHostTrust,
   Targets,
   untrustedTarget,
 } from "./autofill-step.js";
@@ -147,7 +148,13 @@ interface FillProgress {
   judgment: string | undefined;
   /** The id the page keeps where it was as each field was typed under (`pageSentCode`). */
   readonly typedAt: string;
+  /** The origins `trustSignInUrl` trusted as the host judged again a control the page moved. */
+  readonly trusted: Set<string>;
 }
+
+/** The report's `trustedSignInOrigins`, when the fill's own judgments trusted any. */
+const trustedByHost = (progress: FillProgress) =>
+  progress.trusted.size === 0 ? {} : { trustedSignInOrigins: [...progress.trusted].sort() };
 
 const filledReport = (
   step: AutofillStep<FillSlot>,
@@ -167,6 +174,7 @@ const filledReport = (
   url,
   ...(refusal?.failureDetail === undefined ? {} : { failureDetail: refusal.failureDetail }),
   ...(progress.typed ? { typed: true as const } : {}),
+  ...trustedByHost(progress),
 });
 
 /** The labels a failed call that held a value keeps of its error, by their names in its context. */
@@ -217,6 +225,7 @@ const failedCall = (
         reason: "fill_call_failed",
         failureDetail: detail,
         ...(progress.typed || call.held !== undefined ? { typed: true as const } : {}),
+        ...trustedByHost(progress),
       }
     : { ...refused("page_unavailable"), failureDetail: detail };
 };
@@ -280,6 +289,8 @@ interface FillInput {
  * field still to be typed must take typing: a refusal, or undefined to call again. A form that
  * changed how or where it submits, beyond an action's query or hash, and a page that changed them
  * a third time (`changes`, counted across every call the host makes again for it) are refused.
+ * Controls judged so are ones the host may act on, so the origins `trustSignInUrl` trusted for
+ * them join the fill's (`progress.trusted`).
  */
 const rejudge = (
   input: FillInput,
@@ -292,8 +303,13 @@ const rejudge = (
   const from = call.kind === "submit" ? input.step.fields.length : call.index;
   const judged = progress.judged;
   const named = evidenceOrigins(input, progress);
-  return (
-    untrustedTarget(changed, input.step, input.inspection, from, named) ??
+  const trusted = new Set<string>();
+  const trust = {
+    ...input.inspection,
+    trustSignInUrl: notingHostTrust(input.inspection.trustSignInUrl, trusted),
+  };
+  const refusal =
+    untrustedTarget(changed, input.step, trust, from, named) ??
     resubmitted(judged, changed, named) ??
     (changes >= 3
       ? withCheck(
@@ -301,8 +317,9 @@ const rejudge = (
           "change",
           targetEvidence(target === "submit" ? changed.submit : changed.fields[target], named),
         )
-      : undefined)
-  );
+      : undefined);
+  if (refusal === undefined) for (const origin of trusted) progress.trusted.add(origin);
+  return refusal;
 };
 
 /**
@@ -585,6 +602,7 @@ export const fillAutofillStep = (input: FillInput): Effect.Effect<AutofillStepRe
       judged: input.inspection.targets,
       judgment: input.inspection.judgment,
       typedAt: randomUUID(),
+      trusted: new Set(),
     };
     for (let index = 0; index < step.fields.length; index++) {
       const ended = yield* fillField(input, progress, index);
