@@ -142,6 +142,7 @@
 
 ### Other changes
 
+- The caller-input skill tells the minter that a choice's option labels are unique within a question, like its values: when two options read the same, such as two records with one name, each label adds the details that tell them apart, such as a status, amount or date. A person or model answering the question tells options apart only by their labels.
 - A live test's `next_page` case and the list read's shape check read only the runtime's list cursor: the string input `cursor` and output `next_cursor`, as `listInputFields` and `listOutputFields` give them. `cursorPairOf` from `pomerado/core/mint/live-tests` used to also take `page_token`, `next_page_token`, `continuation` and similar names, and numbers, so a tool could keep a continuation of its own under another name; such a tool now gets `no_cursor` for a `next_page` case. The minter's `no_cursor` instruction names the list fields.
   - A recorded minter response keyed on the exact `no_cursor` instruction needs recording again.
 - The authoring guidance asks for faster tools, fewer test rounds and fewer owner questions, without weakening any check:

@@ -177,7 +177,9 @@ already asked for, or to solve a CAPTCHA.
      such probes before you ask for the card.
 2. For a choice, read the options in the execute call that reaches it and return them as
    plain JSON. Each option has a `value` the script acts on and a `label` the caller
-   reads. Values are unique within a question. Offer only options the page will accept:
+   reads. Values are unique within a question, and so are labels: when two options read
+   the same, such as two records with one name, add to each label the details that tell
+   them apart, such as a status, amount or date. Offer only options the page will accept:
    skip taken seats, disabled slots and sold-out items. The value never leaves the run;
    the caller sees only the label.
 3. Mark an option taken from the caller's own account (a saved traveler, address, card
