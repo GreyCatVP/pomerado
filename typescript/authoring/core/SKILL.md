@@ -221,7 +221,9 @@ exception: it is optional unless the task can't run without it (below).
 - Inputs are values a caller knows, such as codes, names, dates and counts, never a
   suggestion's full display text or an internal id the caller cannot know (an id the site
   shows on its own pages, such as a product number, is not internal). A closed list
-  of options stays an enum of the site's options, as above. When the options come from a
+  of options stays an enum of the site's options, as above. Use an enum for a dropdown only
+  when its options look fixed; when they vary by site or account, or new ones may be added,
+  take free text and match it against the options the page shows. When the options come from a
   query, as in a search box, autocomplete, typeahead or searchable combobox, look the value
   up the way a person would. Type the caller's value into the site's own search and read
   every suggestion or result it shows. Prefer matching names loosely, ignoring case,

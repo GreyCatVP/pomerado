@@ -142,6 +142,7 @@
 
 ### Other changes
 
+- The core skill asks for an enum for a dropdown only when its options look fixed. When they vary by site or account, or new ones may be added, the tool takes free text and matches it against the options the page shows, so a caller can send an option the site gained after the build.
 - A live test's `next_page` case and the list read's shape check read only the runtime's list cursor: the string input `cursor` and output `next_cursor`, as `listInputFields` and `listOutputFields` give them. `cursorPairOf` from `pomerado/core/mint/live-tests` used to also take `page_token`, `next_page_token`, `continuation` and similar names, and numbers, so a tool could keep a continuation of its own under another name; such a tool now gets `no_cursor` for a `next_page` case. The minter's `no_cursor` instruction names the list fields.
   - A recorded minter response keyed on the exact `no_cursor` instruction needs recording again.
 - The authoring guidance asks for faster tools, fewer test rounds and fewer owner questions, without weakening any check:
