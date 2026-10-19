@@ -122,9 +122,12 @@ owner to revise it or stop is the minter's own `request_input` question while it
 `AGENTS.md` says.
 
 Use a published input instead whenever the value is stable and the caller can supply it
-up front, such as a flight number, a date or a quantity. Never ask for a password, a
-username or any other login: the host asks for a login itself and signs in. Never ask
-for something the page shows, for permission to proceed with the operation the caller
+up front, such as a flight number, a date or a quantity. A field the page already fills,
+such as a preselected priority or today's date in a date box, is not a question when the input
+leaves it empty: keep the page's value and offer an optional input for it (core skill, the
+input schema). A costly choice still stays a required input or a declared question. Never ask
+for a password, a username or any other login: the host asks for a login itself and signs in.
+Never ask for something the page shows, for permission to proceed with the operation the caller
 already asked for, or to solve a CAPTCHA.
 
 ## Declare, read, ask

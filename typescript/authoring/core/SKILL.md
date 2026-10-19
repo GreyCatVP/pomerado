@@ -213,7 +213,7 @@ exception: it is optional unless the task can't run without it (below).
   whose description starts "By design:" is applied in the use it records, a caller's decision:
   keep that use and its description word for word, and change them only after asking the same
   design question again (the input schema, "Inputs that tailor the answer").
-- Prefer fixing the whole class of a failure over its one instance: when the page requires a control the input has no value for, prefer making every such control a declared caller question with the page's live options over throwing for it.
+- Prefer fixing the whole class of a failure over its one instance: when the page has a control the input has no value for, make every such control an input rather than throwing for it. Make it optional when filling it is not required to do the task, whether or not the page prefills it, as with a sort order, and keep the page's own value when the caller leaves it out, never picking one such as the first option; a control the task requires stays a required input, or a declared caller question with the page's live options when its value is not known up front. A costly choice is the exception: it never keeps the page's value (below).
 - Never derive a format from one sample: not an input format, an element key, a selector, a
   URL path or a label. A key the page showed for the example's value says nothing about the
   next value, as when a calendar keyed December 3 as `12-3-2026` where the tool expected `12-03-2026`. Read
@@ -222,9 +222,12 @@ exception: it is optional unless the task can't run without it (below).
   from the one you saw.
 - Inputs are values a caller knows, such as codes, names, dates and counts, never a
   suggestion's full display text or an internal id the caller cannot know (an id the site
-  shows on its own pages, such as a product number, is not internal). A closed list
-  of options stays an enum of the site's options, as above. When the options come from a
-  query, as in a search box, autocomplete, typeahead or searchable combobox, look the value
+  shows on its own pages, such as a product number, is not internal). A closed list, one
+  the site fixes for everyone, such as countries or cabin classes, stays an enum of the site's
+  options, as above. A list the account or the site can edit, such as categories, tags,
+  statuses or a dropdown the site's owner changes, is not closed: never freeze it into an
+  enum; take a string and match it at run time against the options the page lists, as below.
+  When the options come from a query, as in a search box, autocomplete, typeahead or searchable combobox, look the value
   up the way a person would. Type the caller's value into the site's own search and read
   every suggestion or result it shows. Prefer matching names loosely, ignoring case,
   accents, spacing, punctuation, apostrophe style and a location the site adds to the
@@ -366,8 +369,10 @@ exception: it is optional unless the task can't run without it (below).
   alone (`Schema.NonEmptyString.pipe(Schema.pattern(/\S/u))`, which still takes a caller's stray
   space); free text takes a `maxLength` no longer than the site's own field takes, so a blank or
   over-long value is refused before the site is touched; a date, time or code keeps its
-  `pattern`; a fixed set is a `Literal` enum. Make an input
-  optional only when the site accepts the field blank and the tool works without it.
+  `pattern`; a fixed set is a `Literal` enum. Make an input optional only when the site accepts
+  the field blank or fills it itself, and the tool works without it. Read each limit off the
+  site's own field, such as its `maxlength`, `min`, `max`, `step` or `pattern`
+  attribute or the message it shows for a value past one, never from the example's value.
 - Start each field's description with how many values it takes and what each one is, such as "One city name" or "A list of airport codes", so the input's cardinality is clear. A description that starts "By design:" keeps that marker first and puts the number of values after it, such as "By design: one postal code, …", never before it.
 - When a field takes one value and a caller might send several, say "one per call" and prefer a
   `pattern` that refuses a list, such as several codes separated by commas, while still accepting
@@ -717,9 +722,9 @@ record's markup lacks altogether, as the build saw on records without it, never 
 Never wait for rows you won't return, for the whole list to stop changing, or for the page's
 `load` event. Read image links from attributes (`src`, `srcset`) without scrolling. A page with
 an outcome is ready only when it shows that outcome: results, or the site's own empty message.
-Before acting on a control, wait until loading overlays covering it are gone and its section is
-expanded. A panel or dialog you opened does not go away by waiting: close it with its own
-control or Escape and check it closed. A click Playwright keeps reporting as intercepted by the
+Before acting on a control, wait until it is enabled, loading overlays covering it are gone and
+its section is expanded. A panel or dialog you opened does not go away by waiting: close it
+with its own control or Escape and check it closed. A click Playwright keeps reporting as intercepted by the
 same element is a page state, not slowness. After an action that navigates or re-renders, wait
 for the committed state
 (URL, selected value or header) before checking identity or reading. Use bounded retrying
@@ -739,7 +744,9 @@ readiness wait and extraction in the same Kernel execute call when possible. If 
 reports “Execution context was destroyed,” the action may already have succeeded.
 Reacquire page/frame locators, wait for readiness and retry only the read within the
 original deadline. Never repeat the click or submission as part of that recovery.
-Use observed conditions, without fixed sleeps, whole-page network-idle waits or the `load` event.
+Use observed conditions, without fixed sleeps, whole-page network-idle waits, the `load` event or
+one request you saw, such as a `waitForResponse` for a path the site may batch, cache or rename;
+a write's commit request is the exception (writes skill).
 For an unknown destination, inspect after the document transition; do not invent a
 selector or repeat the action in a follow-up read.
 Import `waitCode` from the runtime (`outcomeWaitCode` declares `waitForOutcome` alone, for code

@@ -208,11 +208,14 @@ too. Run each step with `execute` purpose `act`, target `liveBrowser`.
   the written record after the write, found by something the write produced or entered (its
   number, its own reference or the values entered), and every field the caller asked
   for that the view shows agrees (the read before the commit already checked what you
-  entered). Sites reformat what they save, such as line breaks, spaces and dates in the
-  viewer's format, so compare text after the commit normalized as before it (the core skill's
-  Confirm step): pass the caller's text through `normalizeText` from `pomerado/runtime`, as
-  `visibleText` already does with the page's. Compare a chosen option's value only where the
-  view shows that value; otherwise compare the label it shows. When the write changed state
+  entered). Sites reformat what they save: they trim and rewrap text, change its case, show
+  numbers, amounts and dates in the viewer's format and wrap rich text in their own markup.
+  Judge the saved value, not the input's exact text: compare text normalized as before the
+  commit (the core skill's Confirm step), passing the caller's text through `normalizeText`
+  from `pomerado/runtime` as `visibleText` already does with the page's, a rich-text field by
+  its visible text, and a number, amount or date by its parsed value. A difference only in the
+  site's formatting is a match, never a failed write. Compare a chosen option's value only
+  where the view shows that value; otherwise compare the label it shows. When the write changed state
   that already existed, the same read is also the after read of the before-and-after
   comparison, which runs after `verified()` ("Check the read-back"). Write each read-back step
   to check the requested fields in its own code and call `verified()` when they hold, so the

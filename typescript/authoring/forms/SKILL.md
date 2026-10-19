@@ -151,9 +151,9 @@ shows one, and otherwise with any of its controls, accept included.
 
 Decide whether each pop-up, banner or interstitial is conditional or always triggered. A
 conditional one shows only for some accounts, states or visits, such as a cookie banner, a
-one-time promotion or a membership upsell shown only to non-members: check for it, resolve it
-when it shows, and continue without error when it does not, as one outcome beside the page's
-next state. Never wait for it or require it. One the page always opens in answer to an action,
+one-time promotion, a product tour or what's-new dialog that opens by itself, or a membership
+upsell shown only to non-members: check for it, resolve it when it shows, and continue without
+error when it does not, as one outcome beside the page's next state. Never wait for it or require it. One the page always opens in answer to an action,
 such as a confirmation dialog a button always opens, may be expected. A pop-up the session met
 once is conditional unless the page shows it always follows that action.
 
