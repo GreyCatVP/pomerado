@@ -10,9 +10,12 @@ import { makeOpenAIReviewer } from "../../src/guardian/openai.js";
 import { answersForReview } from "../../src/guardian/question.js";
 import {
   guardianPublicationPolicy,
+  nativePublicationHost,
   publicationDecisionPolicy,
   publicationLiveTestsPolicy,
   publicationOutputPolicy,
+  publicationPolicyFor,
+  publicationReferencePolicy,
   publicationSafetyDefaultPolicy,
 } from "../../src/guardian/publication.js";
 import {
@@ -590,10 +593,103 @@ describe("the publication policy", () => {
   it("accepts a write confirmed from its own commit request, and refuses a loose check", () => {
     const policy = guardianPublicationPolicy;
     expect(policy).toContain(
-      "perform and return the confirmation or read-back it declares, and never resubmit or commit twice. A script that confirms from its commit request is confirming, not missing a read-back: in the same call as the final commit click it waits for the site's response on the route the session's commit used, requires a 2xx or 3xx status and no error in a body it can read, checks the page for an error or validation message (a 201 whose Location names the new record needs no page check), and only then calls verified(). It is a confirmation finding when the script accepts any request or any status, takes a 200 from an endpoint that can report errors in its body without checking that body, or skips the page's error check.",
+      "perform and return the confirmation or read-back it declares, and never resubmit or commit twice. A script that confirms from its commit request is confirming, not missing a read-back: in the same call as the final commit click it waits for the site's response on the route the session's commit used, requires a 2xx or 3xx status and no error in a body it can read, checks the page for an error or validation message (a 201 whose Location names the new record needs no page check), and only then calls verified(). A 200 whose body reports an error, as GraphQL can, did not go through. A 202, or a 2xx whose body says the work is queued, counts, with the site's own status word for it in the output. It is a confirmation finding when the script accepts any request or any status, takes a 200 from an endpoint that can report errors in its body without checking that body, or skips the page's error check.",
     );
     expect(policy).toContain(
       "'unverifiable' is valid only if the session evidence shows the site offered no commit response the script can check, no confirmation and no read-back.",
+    );
+  });
+
+  // A write may refuse before its first commit mark with a refusal its output schema declares. Every
+  // host judges it. The writes skill, not this policy, says where a check that can refuse runs.
+  it("judges a declared write refusal before its first commit mark", () => {
+    for (const policy of [
+      guardianPublicationPolicy,
+      publicationPolicyFor({ hostFiles: "Synthetic.", precheck: "Synthetic.", dataVendor: "synthetic" }),
+    ]) {
+      expect(policy).toContain(
+        "skips the page's error check. Apart from a declared refusal returned before its first commit mark (below), it is a confirmation finding when a path of the script can return before its last commit step or, unless it declares `unverifiable`, without `verified()`.",
+      );
+      expect(policy).toContain(
+        "'unverifiable' is valid only if the session evidence shows the site offered no commit response the script can check, no confirmation and no read-back. A write may declare refusals in its output schema: a branch that requires status \"refused\" and a reason from a listed set of stable lowercase codes, with the values the caller needs, such as the total and the limit it exceeded. Returned before the script enters its first commit mark, a declared refusal reports the write not applied. The script must return one only for the condition its reason names, from values it read on the page and compared with its input, and before enteringCommit; a declared refusal returned after a commit mark, for a condition the script never checks, or without the values its reason compares, is a confirmation finding, and so is a refusal returned in an output shape the schema does not declare as one. The composed script must report each confirm popup to decideDialog under the same literal step name as the session step, so runs accept the same popups without asking.",
+      );
+      expect(policy).toContain(
+        "An unavailable session output limits the claims it can support; it never calls for another run of the write.\n",
+      );
+      expect(policy).not.toContain("every check that can refuse");
+      expect(policy).not.toContain("the commit it guards");
+    }
+  });
+
+  // The input_option finding is the shared one sentence, with no further list of its own.
+  it("names what a write settles on its own as input_option", () => {
+    expect(guardianPublicationPolicy).toContain(
+      "except a safety default, which is never an input. An input_option finding, at that source or schema text, is only an add-on, a pre-selected paid option or a saved payment the composed script sets, keeps or clears on its own; an optional input left unset keeps the page's default and is no finding. On every tool,",
+    );
+  });
+
+  // Every host gets one publication policy. A host fills only the places that describe its own
+  // evidence, and each lands where it belongs.
+  it("puts each host's own text in its place in the one policy", () => {
+    const host = {
+      hostFiles: "Synthetic host files.",
+      references: "Synthetic references.",
+      precheck: "Synthetic precheck.",
+      hostFileExample: "such as a synthetic host file",
+      recordedRequests: "Synthetic recorded requests.",
+      dataVendor: "with a synthetic data-vendor rule",
+      recordedTraffic: "Synthetic recorded traffic.",
+      httpSource: "Synthetic HTTP source.",
+    };
+    const policy = publicationPolicyFor(host);
+    expect(policy.split("\n")).toHaveLength(18);
+    expect(policy).not.toContain("  ");
+    for (const placed of [
+      "together with the build metadata from which the host writes publication/definition.json. Synthetic host files. No file must be read in full:",
+      `${publicationReferencePolicy} Synthetic references.\nStart with the exact current paths,`,
+      "\nSynthetic precheck. Inspect the published files for hardcoded customer/private data,",
+      "When such a file shows a problem the minter's source causes, such as a synthetic host file, the finding keeps its ordinary reason",
+      "\nSynthetic recorded requests. The site's own page traffic is the website's behavior:",
+      "sending it to any other off-site origin escalates, with a synthetic data-vendor rule. Any other value is fine off the site",
+      "say so in the rationale. Synthetic recorded traffic. Put every finding on the source to change,",
+      `${publicationOutputPolicy} Synthetic HTTP source.\n`,
+    ])
+      expect(policy).toContain(placed);
+    const required = publicationPolicyFor({
+      hostFiles: host.hostFiles,
+      precheck: host.precheck,
+      dataVendor: host.dataVendor,
+    });
+    expect(required.split("\n")).toHaveLength(18);
+    expect(required).not.toContain("  ");
+    expect(required).toContain(`${publicationReferencePolicy}\nStart with the exact current paths,`);
+    expect(required).toContain(
+      "When such a file shows a problem the minter's source causes, the finding keeps its ordinary reason",
+    );
+    expect(required).toContain("\nThe site's own page traffic is the website's behavior:");
+    expect(required).toContain("say so in the rationale. Put every finding on the source to change,");
+    expect(required).toContain(`${publicationOutputPolicy}\n`);
+  });
+
+  // The local host's policy is the one policy with its own text, so it never names evidence only
+  // another host keeps: recorded requests, an HTTP version or an index of references.
+  it("gives the local host the one policy with only its own evidence", () => {
+    expect(guardianPublicationPolicy).toBe(publicationPolicyFor(nativePublicationHost));
+    for (const hosted of [
+      "recorded-requests.json",
+      "recorded requests",
+      "operation-http.mjs",
+      "auth-http.json",
+      "HTTP source",
+      "secretEgress",
+      "trusted_publication.references",
+    ])
+      expect(guardianPublicationPolicy).not.toContain(hosted);
+    expect(guardianPublicationPolicy).toContain(
+      "The files the host adds to the operation bundle, such as operation/operation.mjs, are within the publication's authority.",
+    );
+    expect(guardianPublicationPolicy).toContain(
+      "An option whose results the output can't carry, such as a cabin choice with only an economy fare field, is an Unapplied input finding.",
     );
   });
 });
