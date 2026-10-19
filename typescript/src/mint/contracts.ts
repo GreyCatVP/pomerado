@@ -2149,6 +2149,12 @@ export interface MintDependencies {
   readonly capabilityQuestion?: string;
   /** Host-resolved availability only. Credentials never enter the model request. */
   readonly websiteCredentialsAvailable?: boolean;
+  /**
+   * The host asks the caller which sign-in method to use together with the login it requests, or
+   * takes the one a saved login or the screen fixes: the agent lists every method a sign-in screen
+   * offers and never asks the method itself.
+   */
+  readonly signInMethodByHost?: true;
   /** See `MintTurn.autofillSignIn`. */
   readonly autofillSignIn?: true;
   /**

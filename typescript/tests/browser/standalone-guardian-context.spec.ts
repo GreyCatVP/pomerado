@@ -462,8 +462,9 @@ test("a later step reuses the owner's answer to its script's question", async ()
     later: "return { approve: await ask('approve') };",
   });
   expect(scriptAsks).toHaveLength(1);
-  // Guardian reviewed the later step's ask, and later reviews hold the owner's answer it reused.
-  expect(guardian.reviews.filter((review) => review.kind === "question")).toHaveLength(2);
+  // Nobody was asked the second time, so only the first ask was reviewed as a question; later
+  // reviews hold the owner's answer it reused.
+  expect(guardian.reviews.filter((review) => review.kind === "question")).toHaveLength(1);
   expect(authorityOf(executions(guardian.reviews).at(-1)!)["answeredQuestions"]).toEqual([
     { id: "approve", question: approvalPrompt, answer: { confirmed: true } },
   ]);
@@ -486,8 +487,8 @@ test("a step reuses the owner's answer each time its script asks the same questi
       "const first = await ask('approve'); enteringCommit('submit'); return { first, second: await ask('approve') };",
   });
   expect(scriptAsks).toHaveLength(1);
-  // Guardian reviewed each of the three asks.
-  expect(guardian.reviews.filter((review) => review.kind === "question")).toHaveLength(3);
+  // Only the one ask that reached the owner was reviewed as a question.
+  expect(guardian.reviews.filter((review) => review.kind === "question")).toHaveLength(1);
   // Both asks got the owner's yes.
   const observed: unknown = JSON.parse(String(toolResult(last, "later")?.["observations"]));
   expect(observed).toMatchObject({
@@ -495,7 +496,7 @@ test("a step reuses the owner's answer each time its script asks the same questi
   });
 });
 
-test("a later step asks the owner again once the owner answered its prompt anew", async () => {
+test("a later step reuses the owner's newer answer to the agent's same question", async () => {
   test.setTimeout(90_000);
   const { asked, scriptAsks } = await laterAsk({
     first: askThenFail,
@@ -509,11 +510,123 @@ test("a later step asks the owner again once the owner answered its prompt anew"
       ],
     ],
   });
-  expect(asked.map((request) => request.source)).toEqual(["script", "agent", "script"]);
-  expect(scriptAsks).toHaveLength(2);
+  // The agent asked the same question after the script did; the later step reuses that answer.
+  expect(asked.map((request) => request.source)).toEqual(["script", "agent"]);
+  expect(scriptAsks).toHaveLength(1);
 });
 
-test("a script's question after a task update asks the owner again", async () => {
+/**
+ * Mints a read whose agent asks `agentQuestion` first, then runs a step whose script declares
+ * `scriptQuestion` and asks it; the owner answers each request with `answer`.
+ */
+const decisionAsk = async (steps: {
+  readonly agentQuestion: Readonly<Record<string, unknown>>;
+  readonly scriptQuestion: string;
+  readonly ask: string;
+  readonly answer: (request: { readonly source: string }) => Record<string, unknown>;
+  readonly decideQuestion?: (review: RecordedReview) => "allow_business" | "reword";
+}) => {
+  const site = await startSite((_request, response) =>
+    html(response, "<title>Fixture</title><h1>Public fixture</h1>"),
+  );
+  const guardian = recordingGuardian(
+    steps.decideQuestion === undefined ? {} : { decideQuestion: steps.decideQuestion },
+  );
+  try {
+    const minted = await mint({
+      effect: "read",
+      url: site.url,
+      guardian,
+      answer: steps.answer,
+      turns: [
+        () => [
+          call("request_input", {
+            intent: "Ask the caller about the booking",
+            questions: [steps.agentQuestion],
+          }),
+        ],
+        () =>
+          patch({
+            "explore/ask.mjs": `import { Schema } from "effect";
+import { defineOperation } from "../runtime/index.js";
+export default defineOperation({name:"ask_booking",input:Schema.Unknown,output:Schema.Unknown,questions:{${steps.scriptQuestion}}},
+async ({ ask, askOne }) => (${steps.ask}));`,
+          }),
+        () => [call("execute", execution("explore", "explore/ask.mjs"), "ask")],
+      ],
+    });
+    const result = toolResult(minted.last, "ask");
+    const observed: unknown =
+      result?.["status"] === "completed" ? JSON.parse(String(result["observations"])) : undefined;
+    const questions = guardian.reviews.filter((review) => review.kind === "question");
+    return { ...minted, result, observed, questions };
+  } finally {
+    await site.close();
+  }
+};
+const cabinQuestion = {
+  id: "cabin",
+  type: "choice",
+  prompt: "Which cabin should the booking use?",
+  options: [
+    { id: "economy", label: "Economy" },
+    { id: "business", label: "Business" },
+  ],
+};
+const pageCabin = `seat:{type:"choice",prompt:"Which cabin?",decision:"cabin"}`;
+const askPageCabin = `{ seat: await askOne("seat", { options: [{ label: "Business", value: "B" }, { label: "Economy", value: "E" }] }) }`;
+
+test("a script's question that names the agent's earlier choice takes the owner's answer once Guardian agrees", async () => {
+  test.setTimeout(90_000);
+  const { asked, observed, questions } = await decisionAsk({
+    agentQuestion: cabinQuestion,
+    scriptQuestion: pageCabin,
+    ask: askPageCabin,
+    answer: () => ({ cabin: "economy" }),
+  });
+  expect(asked.map((request) => request.source)).toEqual(["agent"]);
+  expect(observed).toMatchObject({ output: { seat: "E" } });
+  // Guardian judged the script's wording against the question the owner answered.
+  expect(questions).toHaveLength(2);
+  expect(questions[1]?.input["question_review"]).toMatchObject({
+    scriptAsk: true,
+    request: { questions: [{ id: "seat", prompt: "Which cabin?" }] },
+    reusedAnswers: [
+      { id: "seat", answered: { question: cabinQuestion.prompt, answer: "Economy" } },
+    ],
+  });
+});
+
+test("a script's question that names the agent's earlier choice asks the owner when Guardian does not agree", async () => {
+  test.setTimeout(90_000);
+  const { asked, observed } = await decisionAsk({
+    agentQuestion: cabinQuestion,
+    scriptQuestion: pageCabin,
+    ask: askPageCabin,
+    answer: (request) => (request.source === "agent" ? { cabin: "economy" } : { seat: "o1" }),
+    decideQuestion: (review) =>
+      "reusedAnswers" in (review.input["question_review"] as object)
+        ? "reword"
+        : "allow_business",
+  });
+  expect(asked.map((request) => request.source)).toEqual(["agent", "script"]);
+  expect(observed).toMatchObject({ output: { seat: "B" } });
+});
+
+test("a script's confirm that names the agent's earlier confirm is refused before it runs", async () => {
+  test.setTimeout(90_000);
+  // The owner's yes stands only for the prompt they saw, so a confirm can name no decision.
+  const { asked, result } = await decisionAsk({
+    agentQuestion: { id: "terms", type: "confirm", prompt: approvalPrompt },
+    scriptQuestion: `accept:{type:"confirm",prompt:"Accept the terms shown?",decision:"terms"}`,
+    ask: `{ accept: await ask("accept") }`,
+    answer: () => ({ terms: { confirmed: true } }),
+  });
+  expect(asked.map((request) => request.source)).toEqual(["agent"]);
+  expect(JSON.stringify(result)).toContain("Invalid script questions");
+});
+
+test("a script's question after a task update reuses the owner's answer", async () => {
   test.setTimeout(90_000);
   const site = await startSite((_request, response) =>
     html(response, "<title>Fixture</title><h1>Public fixture</h1>"),
@@ -542,7 +655,7 @@ async ({ ask }) => ({ approve: await ask("approve") }));`,
     });
     expect(toolResult(last, "update")).toMatchObject({ status: "updated" });
     expect(toolResult(last, "after")).toMatchObject({ status: "completed" });
-    expect(asked.map((request) => request.source)).toEqual(["script", "agent", "script"]);
+    expect(asked.map((request) => request.source)).toEqual(["script", "agent"]);
   } finally {
     await site.close();
   }
@@ -815,7 +928,7 @@ test("a read build that ran its live example becomes a write and runs the write"
   }
 });
 
-test("a confirmed site change moves the build to the other site", async () => {
+test("a confirmed site change moves the build to the other site, where its script asks the owner again", async () => {
   test.setTimeout(90_000);
   const original = await startSite((_request, response) =>
     html(response, "<title>Original</title><h1>Original</h1>"),
@@ -825,14 +938,23 @@ test("a confirmed site change moves the build to the other site", async () => {
   );
   const guardian = recordingGuardian();
   try {
-    const { last } = await mint({
+    const { last, asked } = await mint({
       effect: "read",
       url: original.url,
       guardian,
-      answer: () => ({ site: "move" }),
+      answer: (request) =>
+        request.source === "script" ? { approve: { confirmed: true } } : { site: "move" },
       turns: [
-        () => patch({ "src/look.mjs": probe() }),
+        () =>
+          patch({
+            "src/look.mjs": probe(),
+            "explore/ask.mjs": `import { Schema } from "effect";
+import { defineOperation } from "../runtime/index.js";
+export default defineOperation({name:"approve_terms",input:Schema.Unknown,output:Schema.Unknown,questions:${approvalQuestions}},
+async ({ ask }) => ({ approve: await ask("approve") }));`,
+          }),
         () => [call("execute", execution("explore", "src/look.mjs"), "before")],
+        () => [call("execute", execution("explore", "explore/ask.mjs"), "approve")],
         () => [
           call(
             "request_input",
@@ -867,8 +989,11 @@ test("a confirmed site change moves the build to the other site", async () => {
           ),
         ],
         () => [call("execute", execution("explore", "src/look.mjs"), "explore")],
+        () => [call("execute", execution("explore", "explore/ask.mjs"), "approve_again")],
       ],
     });
+    // The owner's answers on the first site do not stand on the next one.
+    expect(asked.map((request) => request.source)).toEqual(["script", "agent", "script"]);
     expect(toolResult(last, "update")).toMatchObject({
       status: "updated",
       task: { revision: 1, siteOrigin: sister.origin },
@@ -877,7 +1002,7 @@ test("a confirmed site change moves the build to the other site", async () => {
     // change authorizes that site alone.
     expect(JSON.stringify(toolResult(last, "before"))).toContain("Original");
     expect(JSON.stringify(toolResult(last, "explore"))).toContain("Sister");
-    const [before, explore] = executions(guardian.reviews);
+    const [before, , explore] = executions(guardian.reviews);
     expect(authorityOf(before!)["allowedOrigins"]).toEqual([original.origin]);
     expect(authorityOf(explore!)["allowedOrigins"]).toEqual([sister.origin]);
     expect(authorityOf(explore!)["taskUpdates"]).toMatchObject([

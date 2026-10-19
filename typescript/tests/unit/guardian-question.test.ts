@@ -211,11 +211,48 @@ it("allows a question about the sign-in method when the host holds no login", as
   );
   const input = JSON.parse(userText(requests[0])) as { trusted_review: { policy: string } };
   expect(input.trusted_review.policy).toContain(
-    "When credentialsAvailable is true, the host chooses the sign-in method: reword a question asking which method to use. When it is false, a question asking which sign-in method to use, such as phone or email, is always allowed when its choices match the page, and encouraged when it is ambiguous. Never allow one offering a passkey. A question asking where a code is sent, such as text or email, is allowed when nothing the caller gave names one and its choices match the page. Reword it when it names choices the page does not show.",
+    "Otherwise, when credentialsAvailable is true, the host chooses the sign-in method: reword a question asking which method to use. When it is false, a question asking which sign-in method to use, such as phone or email, is always allowed when its choices match the page, and encouraged when it is ambiguous. Never allow one offering a passkey. A question asking where a code is sent, such as text or email, is allowed when nothing the caller gave names one and its choices match the page. Reword it when it names choices the page does not show.",
   );
   expect(input.trusted_review.policy).not.toContain(
     "reword a question asking which method to use, and never allow one offering a passkey",
   );
+});
+
+// The owner was asked the sign-in method by the minter, then for the login in a second request,
+// on a host that asks the method together with the login.
+it("tells the question review when the host asks the sign-in method with the login", async () => {
+  const requests = scripted([
+    [message({ outcome: "allow_business", rationale: "Allowed." })],
+    [message({ outcome: "allow_business", rationale: "Allowed." })],
+  ]);
+  const guardian = makeGuardian(makeOpenAIReviewer("{{ tenant_policy_config }}", false, native));
+  for (const signInMethodByHost of [true, undefined] as const) {
+    const candidate = await Effect.runPromise(
+      questionForReview(
+        {
+          questions: [
+            {
+              id: "method",
+              type: "choice",
+              prompt: "Text or email?",
+              options: [
+                { id: "sms", label: "Text" },
+                { id: "email", label: "Email" },
+              ],
+            },
+          ],
+        },
+        { credentialsAvailable: false, ...(signInMethodByHost ? { signInMethodByHost } : {}) },
+        (text) => Effect.succeed(text),
+      ),
+    );
+    await Effect.runPromise(guardian.reviewQuestion(pending, candidate, unreadable));
+  }
+  const [byHost, byAgent] = requests.map(
+    (request) => JSON.parse(userText(request)) as { question_review: object },
+  );
+  expect(byHost?.question_review).toMatchObject({ signInMethodByHost: true });
+  expect(byAgent?.question_review).not.toHaveProperty("signInMethodByHost");
 });
 
 // A repair's report that the caller's value was at fault was reworded as asking the user for

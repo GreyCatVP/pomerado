@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Effect } from "effect";
 import { questionForReview } from "../guardian/question.js";
 import {
+  isReadOrWriteChoice,
   MintFailure,
   MintServices,
   type ExecutionRequest,
@@ -28,7 +29,7 @@ import { localLiveTests } from "./mint-live-tests.js";
 import { askError, mintError } from "./errors.js";
 import { memoryPublicationDecisions } from "./publication-decisions.js";
 import { listed, signInOriginsToAsk } from "./sign-in-origin-question.js";
-import { forgetScriptAnswers } from "../mint/script-answer-reuse.js";
+import { keptScriptAnswers, scriptQuestionKeys } from "../mint/script-answer-reuse.js";
 import type { FileHandles } from "../mint/file-handles.js";
 import { secretKindsOf } from "../mint/secret-handles.js";
 /**
@@ -95,13 +96,25 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
             answers,
           ),
         ),
-        // The owner's newer answer to a prompt a script asked replaces the one it kept.
-        Effect.tap(() =>
-          Effect.forEach(candidate.questions, (question) => projection.text(question.prompt)).pipe(
-            Effect.map((prompts) => {
-              state.scriptAnswers.kept = forgetScriptAnswers(state.scriptAnswers.kept, prompts);
-            }),
-          ),
+        // The owner's answer settles the decision its question's id names, which a script's
+        // question may name to reuse it, and replaces any kept answer to the same prompt or
+        // decision. The read-or-write choice is the host's, never a script's decision.
+        Effect.tap((answers) =>
+          isReadOrWriteChoice(candidate)
+            ? Effect.void
+            : scriptQuestionKeys(
+                { ...candidate, id: ids?.requestId ?? "question", source: "agent" },
+                (text) => projection.text(text),
+              ).pipe(
+                Effect.map((keys) => {
+                  state.scriptAnswers.kept = keptScriptAnswers(
+                    state.scriptAnswers.kept,
+                    keys,
+                    answers,
+                    keys.map((key) => key?.id),
+                  );
+                }),
+              ),
         ),
         Effect.map((answers) => handles.issue(answers, secretKindsOf(candidate.questions))),
         Effect.tap((issued) => Effect.sync(() => context.askedByAgent(candidate, issued))),
@@ -113,16 +126,22 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
         Effect.map((result) => ({ ...result.decision, reviewId: result.reviewId })),
         Effect.mapError(mintError),
       ),
-    applyTaskUpdate: (application) =>
-      context.applyTaskUpdate(application, (siteOrigin) => state.rebindSite(siteOrigin)).pipe(
-        // An answer the owner gave for the task as it was never stands for the updated task.
-        Effect.tap(() =>
-          Effect.sync(() => {
-            state.scriptAnswers.kept = [];
-          }),
-        ),
-        Effect.mapError(mintError),
-      ),
+    applyTaskUpdate: (application) => {
+      // The owner's answers stand for an update on the same site, which tells the minter to ask
+      // again what it changes; on another site none of them do.
+      const { siteOrigin } = application.next;
+      const moves = siteOrigin !== undefined && siteOrigin !== context.siteOrigin;
+      return context
+        .applyTaskUpdate(application, (origin) => state.rebindSite(origin))
+        .pipe(
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              if (moves && result.outcome === "applied") state.scriptAnswers.kept = [];
+            }),
+          ),
+          Effect.mapError(mintError),
+        );
+    },
     repeatableRead: context.repeatableRead(),
     // A repeatable read's example claims nothing, so it may run again.
     claimExample: Effect.suspend(() =>

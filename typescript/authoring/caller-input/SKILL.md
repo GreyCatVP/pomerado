@@ -148,6 +148,16 @@ already asked for, or to solve a CAPTCHA.
      at least one unless `minSelections` says otherwise, at most the options offered.
    - `{ type: "text", prompt, maxLength? }`: free text.
    - `{ type: "confirm", prompt, followUp? }`: yes or no, returned as `{ confirmed }`.
+   - A choice, multi-choice or text question may also name `decision`, the id of the
+     question you already asked the owner about the same decision in this build with
+     `request_input`, as in `{ type: "choice", prompt, decision: "cabin" }`; two declared
+     questions about one decision name the same `decision`. While the build runs, the host
+     gives the `ask` the owner's latest answer to that decision instead of asking again: a
+     picked option becomes the page's option with the same label. The owner is asked when
+     the answer does not fit, such as no option with that label, or when Guardian finds it
+     does not answer the question as worded. A confirm never names one: a yes stands only
+     for the prompt the owner saw. A published tool's run asks its caller every time. Never
+     ask a decision twice in a build: once you asked it, name it here.
    - `{ type: "secret", secretKind, prompt, maxLength? }`: a code the site sent to
      confirm an action after sign-in (`one_time_code`; a code that is part of signing
      in is a `code` field of the `authenticate` step, never a question), an

@@ -78,7 +78,9 @@ the branch only when the request or input names or clearly implies it, otherwise
 
 Pick a sign-in method in this order: the one the request or caller names, the password, then a
 code or approval; when several channels remain and nothing names one, ask the caller which, and
-never prefer one yourself. Never list or pick a passkey, security key or biometric option, even
+never prefer one yourself. When `websiteAuthentication.signInMethod` says the host asks the
+method, never ask it yourself: list every method on the step, and the host asks the caller
+together with the login it requests. Never list or pick a passkey, security key or biometric option, even
 when the caller asks: the host cannot use one. When a passkey is the only way in, end with
 `report_blocked` `site_lacks_capability`.
 
@@ -187,7 +189,8 @@ attribute.
   every method the screen offers in `methods` (`sms`, `call`, `email`, `totp`, `push` or
   `recovery_code` for "use a backup code", each with
   the selector of the control that picks it) and name the one to pick now as `submit`, by the
-  method order above. The tool's runs pick again from that list. A method's selector
+  method order above; a host that asks the method itself clicks the one the caller picks. The
+  tool's runs pick again from that list. A method's selector
   publishes with the tool, so it never names the masked phone number or address the option shows
   (such as `***-1234`): use the method's own words or a stable attribute.
 - `submitKey: "Enter"`, in place of `submit`: a code or password screen whose form has no submit

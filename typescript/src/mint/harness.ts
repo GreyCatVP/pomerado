@@ -3271,7 +3271,9 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
             ? [
                 "The build now targets task.siteOrigin: the host rebound its site, sign-in and publication there. Navigate there yourself; pages, captures and sign-ins from the earlier site are evidence about that site only. Sign in with execute purpose authenticate if the task needs it there.",
               ]
-            : []),
+            : [
+                "The caller's earlier answers stand unless this update changes what one decided: ask that question again.",
+              ]),
           ...(settings.has("input")
             ? [
                 "The changed input values are the host-bound input from now on: an example or act step runs them, and the tool's input schema takes them.",
@@ -6351,6 +6353,12 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
             executionContext: yield* executionContext(),
             websiteAuthentication: {
               credentialsAvailable: dependencies.websiteCredentialsAvailable === true,
+              ...(dependencies.signInMethodByHost === true
+                ? {
+                    signInMethod:
+                      "The host asks the caller which sign-in method to use together with the login it requests, or takes the one the saved login or the screen fixes. Never ask the method with request_input: list every method a sign-in screen offers in that signInStep's methods.",
+                  }
+                : {}),
               instruction:
                 dependencies.websiteCredentialsAvailable === true
                   ? `Credential values are private host input. When the task needs the account (AGENTS.md, 'Sign in only when the task needs it'), discover the login entry, then call execute purpose authenticate with its loginUrl${dependencies.autofillSignIn ? " and a signInStep for each sign-in screen" : ""} before the business example. You cannot request credentials; if the site cannot be reached, report that instead of starting sign-in. Codes and other sign-in steps during authenticate go to the caller through the host: a text, email or authenticator code that is part of signing in is a code field of the signInStep, never a request_input question.`
