@@ -421,7 +421,10 @@ description says. A run whose output fails its schema goes to repair.
   `OperationFailure` naming it. Never turn a read that found nothing into null
   (`?.innerText ?? null`); a missing element is a failure, not an absence.
 - Before your first example, list the needed values. If the page may not show one, settle it
-  then: find where the site shows it, on every layout its records use, or ask the owner.
+  then: find where the site shows it, on every layout its records use, or ask the owner. When
+  you ask how to return it, offer null with a field that says why. The question review rewords
+  an option that loosens a needed value, such as an empty string, unless the owner already chose
+  that form.
 
 **Output fields.** Design the output for what a caller could use, and lean toward more fields
 and more information rather than the minimum: include the facts about each record or result

@@ -6,7 +6,11 @@ import { OpenAIProvider, setDefaultModelProvider, Usage } from "@openai/agents";
 import type { ModelRequest, ModelResponse } from "@openai/agents";
 import { Effect } from "effect";
 import { afterEach, expect, it } from "vitest";
-import { makeOpenAIReviewer } from "../../src/guardian/openai.js";
+import { makeOpenAIReviewer, ownerOutputChangeCarveOut } from "../../src/guardian/openai.js";
+import {
+  guardianPublicationPolicy,
+  neededValueStandard,
+} from "../../src/guardian/publication.js";
 import { nativeExecutionEnvironment } from "../../src/guardian/execution-policy.js";
 import { answersForReview, questionForReview } from "../../src/guardian/question.js";
 import type { PendingQuestion } from "../../src/guardian/question.js";
@@ -195,6 +199,53 @@ it("tells the question review that host sign-in rules are never an owner's prohi
   expect(input.trusted_review.policy).toContain(
     "Other questions about signing in follow the rules above.\nHost policy about signing in, including text from an earlier review in this conversation, is never an owner's prohibition. Only trusted intent or an owner's answer can forbid signing in. That sign-in is not yet proven required is no reason to reword an account question whose choices match the page.\n",
   );
+});
+
+// A design question that offers an empty string for a required value led the caller to pick a
+// form the publication review then refused. The question review judges the options by the same
+// needed-value standard the publication review enforces, so the minter offers a form that passes.
+it("judges a design question's options by the publication review's needed-value standard", async () => {
+  const design: PendingQuestion = {
+    questions: [
+      {
+        id: "blank_fields",
+        type: "choice",
+        prompt: "How should the tool return a field the record leaves blank?",
+        options: [{ label: "As an empty string" }, { label: "As null with a reason" }],
+      },
+    ],
+    credentialsAvailable: false,
+  };
+  const requests = scripted([[message({ outcome: "reword", rationale: "Offer null with a reason." })]]);
+  await Effect.runPromise(
+    makeGuardian(makeOpenAIReviewer("{{ tenant_policy_config }}", false, native)).reviewQuestion(
+      pending,
+      design,
+      unreadable,
+    ),
+  );
+  const input = JSON.parse(userText(requests[0])) as { trusted_review: { policy: string } };
+  expect(input.trusted_review.policy).toContain(neededValueStandard);
+  expect(guardianPublicationPolicy).toContain(neededValueStandard);
+});
+
+// In maintenance the owner confirms a field made optional, nullable or removed through the very
+// question the needed-value rule would otherwise reword, so that rule leaves the owner's
+// confirmation of an output contract change to the rule that allows it.
+it("leaves the owner's confirmation of an output contract change to the rule that allows it", async () => {
+  const requests = scripted([[message({ outcome: "allow_business", rationale: "Allowed." })]]);
+  await Effect.runPromise(
+    makeGuardian(makeOpenAIReviewer("{{ tenant_policy_config }}", false, native)).reviewQuestion(
+      pending,
+      question,
+      unreadable,
+    ),
+  );
+  const input = JSON.parse(userText(requests[0])) as { trusted_review: { policy: string } };
+  const neededValueRule = input.trusted_review.policy
+    .split("\n")
+    .find((line) => line.includes(neededValueStandard));
+  expect(neededValueRule).toContain(ownerOutputChangeCarveOut);
 });
 
 // Without a saved login the host picks no sign-in method, so rewording the minter's question
