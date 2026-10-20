@@ -1031,7 +1031,7 @@
     "tldts": "7.4.16"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.2.0",
+    "@modelcontextprotocol/client": "2.3.0",
     "@openai/agents": "0.18.0",
     "@playwright/test": "1.63.0",
     "@types/node": "24.13.4",
