@@ -14,10 +14,10 @@ import type { FillSlot, Targets } from "./autofill-step.js";
  *   decides (`fieldGet`). A field in another form or another frame (`submit` null) than a submit in
  *   a form is guarded whatever the submit's method.
  * - It refuses a submission by GET from a form that holds a guarded field, or whose controls or
- *   entries carry a filled secret, and one to an action URL that carries a filled secret no action
- *   carried at inspection (`actions`, as the page kept them, never through the host; once the page
- *   was typed into before that inspection, only the site's and configured sign-in origins
- *   themselves, since page code may have put a typed value in any path or query). A password or recovery code is found inside any text
+ *   entries carry a filled secret, and one to an action URL that carries a filled secret that same
+ *   action URL did not already carry at inspection (`actions`, as the page kept them, never through
+ *   the host; a secret some other inspected action held does not excuse a different action the page
+ *   switches to). A password or recovery code is found inside any text
  *   (`match: "within"`); a code only where no digit adjoins it, nor a letter when the code has one
  *   (`"token"`), since a short one turns up inside a timestamp by chance. A step's code fields that
  *   each hold one character are one code, their values joined in field order, so a code split into
@@ -91,9 +91,27 @@ export const submissionGuardCode = `(field, { key, call, actions, match, submit,
         return [url, decode(url)];
       }
     };
-    // A secret an action already held before typing, such as part of the site's address, is no leak.
+    // A secret this same action URL already held before typing, such as part of the site's address,
+    // is no leak. A secret that only some other inspected action held does not excuse a different
+    // action the page switches to after that inspection.
+    const sameAction = (url) => {
+      let href = null;
+      try {
+        href = new URL(url).href;
+      } catch {
+        href = null;
+      }
+      return guard.actions.filter((action) => {
+        if (action === url) return true;
+        try {
+          return href !== null && new URL(action).href === href;
+        } catch {
+          return false;
+        }
+      });
+    };
     const inUrl = (url) => {
-      const inspected = guard.actions.flatMap(readings);
+      const inspected = sameAction(url).flatMap(readings);
       return secrets().some(
         (secret) =>
           readings(url).some((read) => carriedIn(read, secret)) &&
