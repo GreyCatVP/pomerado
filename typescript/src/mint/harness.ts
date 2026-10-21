@@ -58,6 +58,7 @@ import {
   withOwnWords,
 } from "./contracts.js";
 import { answersForReview, type AnsweredQuestion } from "../guardian/question.js";
+import { rehearsalFailedInstruction } from "./rehearsal.js";
 import {
   cutToLimit,
   publicationRefusalUnfixable,
@@ -5265,6 +5266,22 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                       "Not published: the source this repair would publish is byte for byte the registered revision's, so there is nothing to publish. A new name or description alone is not a repair. The registered revision stays current and this repair ends here; do not call finish_build again.",
                   });
                 }
+                // The host's run of a write repair, set to stop just before its first save, failed
+                // short of it: the minter fixes the source and asks again, which runs it again. The
+                // failure goes out screened; its error class alone when screening is unavailable.
+                if (error.reason === "rehearsal_failed")
+                  return notPublished(
+                    error.code,
+                    error.reason,
+                    {
+                      rehearsal: yield* dependencies.projection
+                        .json(error.rehearsal ?? {})
+                        .pipe(
+                          Effect.orElseSucceed(() => ({ errorClass: error.rehearsal?.errorClass })),
+                        ),
+                    },
+                    rehearsalFailedInstruction,
+                  );
                 // Deterministic, before any review: the minter fixes the extraction, or the owner
                 // confirms a contract change. It is neither a review nor an outage.
                 if (error.reason === "output_obligation_weakened")
