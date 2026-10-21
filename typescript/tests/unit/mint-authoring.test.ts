@@ -24,6 +24,7 @@ import {
   type AuthoringOptions,
   loadAuthoringSkills,
   loadWorkspaceGuide,
+  preloadedSkills,
 } from "../../src/mint/skills.js";
 import { ExecutionContext, makeEffectJournal } from "../../src/runtime/context.js";
 import { Deadline } from "../../src/runtime/deadline.js";
@@ -42,7 +43,8 @@ it("loads modular skill references and keeps auth discovery outside managed logi
   expect(skill("writes")?.references).toHaveProperty("write-session.ts");
   expect(skill("writes")?.references).toHaveProperty("write-readback.ts");
   expect(skill("core")?.references).toHaveProperty("native-page.ts");
-  expect(skill("core")?.references).toHaveProperty("navigation.ts");
+  expect(skill("browser-code")?.references).toHaveProperty("navigation.ts");
+  expect(skill("waits")?.references).toHaveProperty("navigation.ts");
   expect(skill("auth")?.references).toHaveProperty("auth-entry.ts");
   expect(skill("forms")?.references).toHaveProperty("custom-selection.ts");
   expect(skill("forms")?.references).toHaveProperty("dialog-picker.ts");
@@ -50,6 +52,13 @@ it("loads modular skill references and keeps auth discovery outside managed logi
   // The testing skill is shared text; its capture reference is another host's.
   expect(skills.map((entry) => entry.name)).toStrictEqual([
     "core",
+    "waits",
+    "browser-code",
+    "inputs",
+    "outputs",
+    "tailoring",
+    "rejections",
+    "site-tools",
     "search",
     "auth",
     "testing",
@@ -61,6 +70,56 @@ it("loads modular skill references and keeps auth discovery outside managed logi
     "publication",
   ]);
   expect(skill("testing")?.references).toStrictEqual({});
+});
+
+/*
+ * The skill list is how the minter decides what to read, so each entry says when to read the
+ * skill, as a clause it can check against the step it is about to write, before what the skill
+ * holds. A host carries the preloaded skills in a start's first message in catalog order: the
+ * core skill first, and a new build every skill a repair gets.
+ */
+it("says when to read each skill, and preloads catalog skills by start", async () => {
+  const skills = await Effect.runPromise(loadAuthoringSkills("typescript/authoring"));
+  for (const { name, description } of skills)
+    expect(description, name).toMatch(/^Read (?:first|before|when|as soon as|on)\b[^:]*\S: \S/u);
+  const names = skills.map(({ name }) => name);
+  const build = preloadedSkills("build");
+  const repair = preloadedSkills("repair");
+  for (const preload of [build, repair]) {
+    expect(preload[0]).toBe("core");
+    expect(preload).toStrictEqual(names.filter((name) => preload.includes(name)));
+  }
+  expect(repair.filter((name) => !build.includes(name))).toStrictEqual([]);
+});
+
+/*
+ * A pointer to a named part of another file, such as (inputs skill, "Configure, then read") or
+ * (`AGENTS.md`, "Try hard, then ask"), names text that file holds, so moving a section to another
+ * skill moves the pointers to it too.
+ */
+it("points only to named parts the skill or guide it names holds", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const flat = new Map([...texts].map(([name, text]) => [name, text.replace(/\s+/g, " ")]));
+  const agents = flat.get("workspace/AGENTS.md") ?? "";
+  const citations: (readonly [string, string, string])[] = [];
+  for (const [source, text] of flat) {
+    for (const match of text.matchAll(
+      /\((?:the )?([a-z-]+) skill, "([^"]+)"|\.agents\/([a-z-]+)\/SKILL\.md,? \(?"([^"]+)"|the ([a-z-]+) skill's "([^"]+)"|"([^"]+)" in the ([a-z-]+) skill/gu,
+    )) {
+      const [, a, b, c, d, e, f, g, h] = match;
+      const [skill, part] = [a ?? c ?? e ?? h ?? "", b ?? d ?? f ?? g ?? ""];
+      citations.push([source, skill, part]);
+    }
+    for (const [, part = ""] of text.matchAll(/`?AGENTS\.md`?,? \(?"([^"]+)"/gu))
+      citations.push([source, "workspace/AGENTS.md", part]);
+  }
+  expect(citations.length).toBeGreaterThan(20);
+  expect(
+    citations.filter(([, skill, part]) => {
+      const target = skill === "workspace/AGENTS.md" ? agents : flat.get(skill);
+      return target === undefined || !target.includes(part.replace(/[,.]$/u, ""));
+    }),
+  ).toStrictEqual([]);
 });
 
 /*
@@ -205,20 +264,20 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
     "core",
     "An operation is `defineOperation({ name, input, output }, async ({ kernel, sessionId, siteOrigin, siteDomain, input, decideDialog, ask, waitPastChallenge, verified, remainingMs, errors }) => ...)`.",
   ],
-  ["core", "- Make one execute call per operation."],
-  ["core", "- The code works for every value the schema accepts."],
+  ["browser-code", "- Make one execute call per operation."],
+  ["inputs", "- The code works for every value the schema accepts."],
   [
-    "core",
+    "inputs",
     "- Match the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name, such as a name with or without its accents (Abaca for Abacá), a city alone or with its state and country, or a company with or without Ltd. or Inc. Never require an exact match. `sameText` from `pomerado/runtime` matches a name that differs only in case, accents, spacing, apostrophes, periods, commas or hyphens, or in a word the site writes short, such as St-Jean for Saint-Jean, but not one with a word added or dropped. Prefer it for confirming the pick, so the read-back agrees with the choice, but not for choosing from a list, where a short label can match a longer name it isn't, such as UK for Ukraine. When more than one option matches equally, a read takes the first in the site's order and returns the one it used, and a write lists them for the caller instead of picking one.",
   ],
-  ["core", "Take the site origin from the context's `siteOrigin`."],
+  ["browser-code", "Take the site origin from the context's `siteOrigin`."],
   ["core", "The tools and the files you may edit are in `AGENTS.md`."],
   ["core", "Read their bodies only when useful."],
   [
-    "core",
+    "auth",
     "Inspect login markup using reviewed read-only `explore` without private credential injection.",
   ],
-  ["core", "Only the host requests website credentials, and only during `authenticate`."],
+  ["auth", "Only the host requests website credentials, and only during `authenticate`."],
   ["auth", "Sign-in pages are often slow, and the next screen can take a while to show."],
   [
     "auth",
@@ -336,7 +395,7 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   // A browser version prefers the page's controls to URLs it builds, and opens a caller's URL on
   // the site unchanged.
   [
-    "core",
+    "browser-code",
     "For a detail read whose input is the record's page URL, check that it is https on the tool's site and open it unchanged.",
   ],
   [
@@ -354,54 +413,54 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   // failed, and a format read from one sample breaks on the next value, so the minter reads it
   // off the page.
   [
-    "core",
-    "never just the example's value. The example's values are one case, never limits. - Prefer keying only on what the caller asked for. A detail that changes from one listing to the next, such as a seating label or a room name, shouldn't decide whether the tool books or refuses unless the caller chose it. - Read results for every option the schema lists. When an option leads to a page with a different structure (other fields or sections), handle that layout too, and on a read signed out run it live as a test case (testing skill); an option that only reorders or filters the same rows needs no case of its own. Never return results for another option in its place. - A repair that finds a declared input broken, never applied or always reported unsupported fixes it in the same repair, whether or not a caller is waiting. Keeping a tool's contract means every input and output it declares works, not leaving a broken one as it was. An input whose description starts \"By design:\" is applied in the use it records, a caller's decision: keep that use and its description word for word, and change them only after asking the same design question again (the input schema, \"Inputs that tailor the answer\"). - Prefer fixing the whole class of a failure over its one instance: when the page requires a control the input has no value for, prefer making every such control a declared caller question with the page's live options over throwing for it. - Never derive a format from one sample: not an input format, an element key, a selector, a URL path or a label. A key the page showed for the example's value says nothing about the next value, as when a calendar keyed December 3 as `12-3-2026` where the tool expected `12-03-2026`. Read the format off the page for the value you need, such as the day cell whose visible label or accessible name is the caller's date, or a key the page itself lists, never a key rebuilt from the one you saw. - Inputs are values a caller knows",
+    "inputs",
+    "never just the example's value. The example's values are one case, never limits. - Prefer keying only on what the caller asked for. A detail that changes from one listing to the next, such as a seating label or a room name, shouldn't decide whether the tool books or refuses unless the caller chose it. - Read results for every option the schema lists. When an option leads to a page with a different structure (other fields or sections), handle that layout too, and on a read signed out run it live as a test case (testing skill); an option that only reorders or filters the same rows needs no case of its own. Never return results for another option in its place. - A repair that finds a declared input broken, never applied or always reported unsupported fixes it in the same repair, whether or not a caller is waiting. Keeping a tool's contract means every input and output it declares works, not leaving a broken one as it was. An input whose description starts \"By design:\" is applied in the use it records, a caller's decision: keep that use and its description word for word, and change them only after asking the same design question again (tailoring skill). - Prefer fixing the whole class of a failure over its one instance: when the page requires a control the input has no value for, prefer making every such control a declared caller question with the page's live options over throwing for it. - Never derive a format from one sample: not an input format, an element key, a selector, a URL path or a label. A key the page showed for the example's value says nothing about the next value, as when a calendar keyed December 3 as `12-3-2026` where the tool expected `12-03-2026`. Read the format off the page for the value you need, such as the day cell whose visible label or accessible name is the caller's date, or a key the page itself lists, never a key rebuilt from the one you saw. - Inputs are values a caller knows",
   ],
   // The minter reads the never-loosened needed values, the facts a caller could use, typed output
   // and kept rows before it writes the schema and the parser, so a fact the code could not read
   // fails the output check.
   [
-    "core",
+    "outputs",
     "**Never loosen a value the request needs.** The values the request needs are each value it names, the record's identifier as the site shows it, and the context those depend on as the page shows it, such as dates, a party size or a location. Make each one required and non-null, typed so a value the code could not read fails the output check (`Schema.NonEmptyTrimmedString` for text, `Schema.Int` for a count), never optional, nullable or plain `Schema.Number`, whatever a description says. A run whose output fails its schema goes to repair. - The owner may settle a different form for every run: in the request's own explicit words, in an answer to your design question or in a task update, such as blank fields returned as empty strings. Publication review honours that decision as stated. Build it that way, and say in the field's description what the owner chose. It never covers a value the page shows that the code failed to read, or anything personal or account-specific. - Type each output field as strictly as its value: required text is non-empty and trimmed (`Schema.NonEmptyTrimmedString`), a date or time keeps its `pattern`, and a field that reports an input's value reuses that input's enum or pattern. Make one optional or nullable only where the page may genuinely not show the value. - The one exception is a record whose own page genuinely does not show the value, such as an item that is sold out and shows no amount, or a listing that shows no date yet. Then the value may be null only together with a field that says why, such as its availability, and both descriptions say so. - Null never covers a value the page shows that the code failed to read: that throws `OperationFailure` naming it. Never turn a read that found nothing into null (`?.innerText ?? null`); a missing element is a failure, not an absence. - Before your first example, list the needed values. If the page may not show one, settle it then: find where the site shows it, on every layout its records use, or ask the owner. **Output fields.** Design the output for what a caller could use, and lean toward more fields and more information rather than the minimum: include the facts about each record or result that a caller could reasonably use to identify, choose, compare or act on it, not only the values the request names. Leave out what is unrelated to the tool's purpose or of no use to a caller. - Keep each value's full displayed text. Read the element that holds the whole value, never a shorter or secondary one. When the page splits one value across elements, such as a maker line above a linked name or an author line above a title, return each part in its own field. Never drop either part. - Prefer a separate typed field for each fact over folding it into another field's text. Never derive a value the page does not show. - A field that is not a needed value is nullable when records on this site can lack it, and it is null exactly when this record does not show it. - Never declare a field the code does not read. A field that is always null, empty or fixed is not a disclosed limit: read it from the page, or leave the field out.",
   ],
   // A list returns one page per call and a cursor to the next.
   [
-    "core",
+    "outputs",
     "- A list that can run past one page returns one page per call and a cursor to the next, as the pagination skill says.",
   ],
   // Every field is read from the page on every run and typed as the page states it.
   [
-    "core",
+    "outputs",
     "Then, for every field: - Prefer parsing what the page shows into typed fields over returning a result row, card or itinerary as one text blob or summary, and keep every result row of the main list the page shows, up to the call's `limit` (pagination skill). - Read every output from the page or response on every run, so every returned field has observable support: never a literal, a default you invented, or a constant `null`, `[]`, `false`, `0` or fixed label where the page can show the value. - Return `null` for a field that is not a needed value only when this record's page lacks it, and an empty list only when the page shows none; never throw for either. When the code cannot read a value the request needs, throw `OperationFailure` naming it; never return a placeholder, a label or another record's value in its place. - One field per fact, as the page states it, and variants as the dimensions and values the page lists. - Prefer numbers for amounts and counts, ISO 8601 for dates and times and minutes for durations; type a date-only value as the runtime's `CalendarDate` (forms skill). A value that does not parse cleanly may be the site's own text.",
   ],
   // Output a caller can filter and compare on is parsed into typed fields.
   [
     "publication",
-    'did not return is refused (`contract_output_mismatch`). Values the request needs are required and non-null: never loosen one. Only a record whose own page shows no such value may return null, together with a field saying why; a description never excuses a nullable needed value, and Guardian refuses a schema that makes one optional or nullable. No output is a constant where the page shows a value, and titles and names are returned in full (core skill, output fields). - **Typed output.** Prefer parsing what the page shows into typed fields over returning a result row, card or itinerary as one text blob or summary. Give each fact a caller would filter, sort or compare its own field (core skill, output fields). A flight card reading "XX 234, 7:00 AM-3:31 PM, Nonstop, 5h 31m" should return `{ "flight_number": "XX 234", "departure_time": "2026-11-16T07:00:00-08:00", "arrival_time": "2026-11-16T15:31:00-05:00", "stops": 0, "duration_minutes": 331 }` rather than `{ "summary": "XX 234 7:00 AM ..." }`. The site\'s own text may stand in for one value that truly does not parse, with that field\'s description saying so; a record\'s whole text is only an `include` section (core skill, optional sections). - **Clean output.** Every string is clean displayed text: no code, styles, markup, template leftovers, control labels or repeated entries. `finish_build` refuses an example whose output holds code, styles, markup or template leftovers, and gives the publication review the host\'s other output checks as leads. Check each finding against the page and fix a wrong read in source. A check can be wrong: when a flagged value is correct as returned, such as code on a tool that returns code or the page\'s own text that only resembles code, name its path and check with the reason in `finish_build`\'s `outputOverrides`; Guardian checks the reason against the captures. A field that holds code or markup on purpose may instead declare it with `contentMediaType`, such as `text/javascript`, `text/css` or `text/html`: its findings then name that type and never block, and Guardian checks that the type fits what the field holds. - **Lists.** A tool that returns a list the site can run past one page takes `limit` and `cursor` and returns one page with `next_cursor` (pagination skill), or says the site shows the whole list at once. - **Inputs.**',
+    'did not return is refused (`contract_output_mismatch`). Values the request needs are required and non-null: never loosen one. Only a record whose own page shows no such value may return null, together with a field saying why; a description never excuses a nullable needed value, and Guardian refuses a schema that makes one optional or nullable. No output is a constant where the page shows a value, and titles and names are returned in full (outputs skill, output fields). - **Typed output.** Prefer parsing what the page shows into typed fields over returning a result row, card or itinerary as one text blob or summary. Give each fact a caller would filter, sort or compare its own field (outputs skill, output fields). A flight card reading "XX 234, 7:00 AM-3:31 PM, Nonstop, 5h 31m" should return `{ "flight_number": "XX 234", "departure_time": "2026-11-16T07:00:00-08:00", "arrival_time": "2026-11-16T15:31:00-05:00", "stops": 0, "duration_minutes": 331 }` rather than `{ "summary": "XX 234 7:00 AM ..." }`. The site\'s own text may stand in for one value that truly does not parse, with that field\'s description saying so; a record\'s whole text is only an `include` section (outputs skill, optional sections). - **Clean output.** Every string is clean displayed text: no code, styles, markup, template leftovers, control labels or repeated entries. `finish_build` refuses an example whose output holds code, styles, markup or template leftovers, and gives the publication review the host\'s other output checks as leads. Check each finding against the page and fix a wrong read in source. A check can be wrong: when a flagged value is correct as returned, such as code on a tool that returns code or the page\'s own text that only resembles code, name its path and check with the reason in `finish_build`\'s `outputOverrides`; Guardian checks the reason against the captures. A field that holds code or markup on purpose may instead declare it with `contentMediaType`, such as `text/javascript`, `text/css` or `text/html`: its findings then name that type and never block, and Guardian checks that the type fits what the field holds. - **Lists.** A tool that returns a list the site can run past one page takes `limit` and `cursor` and returns one page with `next_cursor` (pagination skill), or says the site shows the whole list at once. - **Inputs.**',
   ],
   // Rows a filter has not yet applied to are read too early, so the tool waits a bounded time for
   // most rows to pass and returns what is there after that.
-  ["core", "After a search or a filter, use `waitForChange` on the rows you return"],
+  ["waits", "After a search or a filter, use `waitForChange` on the rows you return"],
   // A reload after a choice such as a city can drop the search box's suggestions, so the tool
   // types into the box again.
   [
-    "core",
+    "waits",
     "After a step that reloads the page, such as choosing a city, prefer typing into the search box again when its suggestions don't appear.",
   ],
   // A preselected option that only shares the caller's data, tracks or signs up for marketing is
   // turned off on every run, with no input and no question.
-  ["core", "- Turn safety defaults off."],
+  ["inputs", "- Turn safety defaults off."],
   // An obvious refusal settles the caller's run at once; one from the tool's own empty read never
   // claims to be obvious.
   [
-    "caller-input",
+    "rejections",
     'When the refusal is obvious, start the message with "Caller input error:" so the caller gets it at once.',
   ],
   // A record whose name differs from the caller's only in case or in a usual form of the same name
   // is still that record, so a picker's "Add new" row never creates a near-duplicate of it.
   [
     "forms",
-    'Prefer matching an existing record by a fuzzy match on its name (core skill), and prefer never picking an "Add new" row when an existing record matches.',
+    'Prefer matching an existing record by a fuzzy match on its name (inputs skill), and prefer never picking an "Add new" row when an existing record matches.',
   ],
   // A build has no question that takes a file, so a task that needs one the request doesn't carry
   // ends with a report that names the file for the next build.
@@ -639,7 +698,7 @@ it("keeps the HTTP version passages in host sections", async () => {
           expect(text.replace(/\s+/g, " "), name).not.toContain(hosted);
       const kept: readonly (readonly [string, string])[] = [
         ["core", "or designs further tests. That forbids running the write again"],
-        ["core", "or the site's own data request, to opening each record's page."],
+        ["browser-code", "or the site's own data request, to opening each record's page."],
         ["search", "it never returns unfiltered results as filtered. When setting one control"],
         ["testing", "builds no offline test suite. It still checks its composed script's read-back"],
         ["testing", "other no-results case and no edge cases. Publication review reads"],
@@ -665,7 +724,7 @@ it("keeps the HTTP version passages in host sections", async () => {
 it("leaves no heading, list or skill header of the local host's authoring empty", async () => {
   const texts = await renderedTexts("typescript/authoring");
   const core = texts.get("core") ?? "";
-  const kernelScripts = core.slice(core.indexOf("## Kernel scripts"), core.indexOf("**The input"));
+  const kernelScripts = core.slice(core.indexOf("## Kernel scripts"), core.indexOf("- After a write"));
   expect(kernelScripts.replace("## Kernel scripts", "").trim()).not.toBe("");
   expect(texts.get("workspace/AGENTS.md")).toContain("Follow these stages in order:\n\n1. ");
   expect(texts.get("writes")).toMatch(/^---\nname: writes\ndescription: \S/u);
@@ -679,11 +738,11 @@ it("leaves no heading, list or skill header of the local host's authoring empty"
 it("gives both hosts the same stale-session rule", async () => {
   const sentence =
     "A sign-in that started and was never verified is the exception: that reset clears cookies and site storage. When the page is signed out after that reset, or after a full page load your source asks about with `ensureSignedIn`, the host signs in again by itself; do not call `authenticate` for it. When the host cannot keep the site signed in, the step fails with `session_not_kept`: report that cause instead of signing in again. That source must perform the flow from its input, never rely on a page an exploration left open.";
-  const local = (await renderedTexts("typescript/authoring")).get("core") ?? "";
+  const local = (await renderedTexts("typescript/authoring")).get("browser-code") ?? "";
   expect(local.replace(/\s+/g, " ")).toContain(sentence);
   const root = await authoringCopy((_path, text) => text.replace(sectionMarker, ""));
   try {
-    const composed = (await renderedTexts(root)).get("core")?.replace(/\s+/g, " ") ?? "";
+    const composed = (await renderedTexts(root)).get("browser-code")?.replace(/\s+/g, " ") ?? "";
     expect(composed).toContain(sentence);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -738,7 +797,7 @@ it("has the minter read back a write, accept recent-search saves and look before
   const text = (name: string) =>
     (contents(skills)[skills.findIndex((skill) => skill.name === name)] ?? "").replace(/\s+/g, " ");
   expect(text("writes")).toContain(
-    "- Before committing, read back from the page what you are about to submit and check each value as the core skill's Confirm step says, against the option the tool picked when it picked one, in the session and on every branch of the composed script. Fail if one does not match, and prefer running this check before the step's commit mark, so a mismatch stops the step before it sends anything. Never read back a field filled with a secret handle.",
+    "- Before committing, read back from the page what you are about to submit and check each value as the inputs skill's Confirm step says, against the option the tool picked when it picked one, in the session and on every branch of the composed script. Fail if one does not match, and prefer running this check before the step's commit mark, so a mismatch stops the step before it sends anything. Never read back a field filled with a secret handle.",
   );
   expect(text("core")).toContain(
     "Telemetry, analytics and bot-sensor POSTs are normal and need no change. So is an anonymous recent-search, prefill or search-state save the site fires when you submit a search.",
@@ -760,7 +819,7 @@ it("has a write confirm from its first matching read-back, never from state befo
     " ",
   );
   expect(writes).toContain(
-    "- When a read-back is needed, the first one that matches confirms the write; stop there. It matches when it shows the written record after the write, found by something the write produced or entered (its number, its own reference or the values entered), and every field the caller asked for that the view shows agrees (the read before the commit already checked what you entered). Sites reformat what they save, such as line breaks, spaces and dates in the viewer's format, so compare text after the commit with `sameText`, as before it (the core skill's Confirm step). Compare a chosen option's value only where the view shows that value; otherwise compare the label it shows. When the write changed state that already existed, the same read is also the after read of the before-and-after comparison, which runs after `verified()` (\"Check the read-back\"). Write each read-back step to check the requested fields in its own code and call `verified()` when they hold, so the first one that matches is the confirming step. Read one confirmation, list or detail view: find the record there by that identity, never by its position, such as the first or newest row, and prefer finding each value in it by a stable id, its column header or a `data-` attribute over its cell's position. Read only that record, and the view's other rows only where the before-and-after check or another skill, such as the cart skill, compares them. Read another page, in that same step before `verified()`, only for a field the view did not show and the tool's output promises.",
+    "- When a read-back is needed, the first one that matches confirms the write; stop there. It matches when it shows the written record after the write, found by something the write produced or entered (its number, its own reference or the values entered), and every field the caller asked for that the view shows agrees (the read before the commit already checked what you entered). Sites reformat what they save, such as line breaks, spaces and dates in the viewer's format, so compare text after the commit with `sameText`, as before it (the inputs skill's Confirm step). Compare a chosen option's value only where the view shows that value; otherwise compare the label it shows. When the write changed state that already existed, the same read is also the after read of the before-and-after comparison, which runs after `verified()` (\"Check the read-back\"). Write each read-back step to check the requested fields in its own code and call `verified()` when they hold, so the first one that matches is the confirming step. Read one confirmation, list or detail view: find the record there by that identity, never by its position, such as the first or newest row, and prefer finding each value in it by a stable id, its column header or a `data-` attribute over its cell's position. Read only that record, and the view's other rows only where the before-and-after check or another skill, such as the cart skill, compares them. Read another page, in that same step before `verified()`, only for a field the view did not show and the tool's output promises.",
   );
   // Entered values find a record but never prove it new.
   expect(writes).toContain(
@@ -866,18 +925,25 @@ it("renders the pinned standalone authoring", async () => {
       .filter(([path]) => path !== "reference/publication-review.md")
       .map(([path, text]) => [sha256(text), `workspace/${path}`]),
   ]).toStrictEqual([
-    ["372521dfa1022e72033d202d94855e7f7f901b532b7a249b6e7373ba44341685", "core"],
-    ["9fe0598c1dc41354e5dbddd42a372c6b628eecd206cf5ea9a3cf0fcbf10a6410", "search"],
-    ["7e50c86ea30964f0e3610e090c7bd7d78aac6f59a7f644644c1ad99577d59f5f", "auth"],
-    ["9583b30a0806d90eb06d1a1003e882c492bcfea011cc9da1e4597ece0ada3e3a", "testing"],
+    ["f3cd5dd06cea70eac5a08d3b2b6ef7a6849aaefb4d1fdf92ce93e333f05e71d9", "core"],
+    ["6c0ebbb7d10e8bcaa0049988b35fc406a4531b455b1dc89a80df6ba9b4fdf639", "waits"],
+    ["ca1a1f966fdcbaee604939d475b8e1762997cf1a34846122ff0f52746a0a10e0", "browser-code"],
+    ["efdcb5184b4e979924f118c370762af1f288a7870d654872a9c8fd5bd48f11a6", "inputs"],
+    ["4b237f768980907d07aa4b390d5169904abf146187f3b595f04526bd54813d5d", "outputs"],
+    ["18ce73d1e000020c2218514c391c2d010b3d29c5d1c38779d63167ffa589b899", "tailoring"],
+    ["68950cdb4003df49ef63f8124da6c4316ddfe2c768197c1cbe69c0593076ded0", "rejections"],
+    ["c6f7788e6c07c9ec577fec0f77027150065bacb9075e5aea999951d8def82afa", "site-tools"],
+    ["7fc9099d1d7caf901350bbe17ce4e9920851c531b786b6262bb0fdfab2ee3d35", "search"],
+    ["d0bb5ef45b346e97a0b40f32cc0c60a1db97f938992c05cacc7397c9f2a726ba", "auth"],
+    ["251f10c061913d67be43812e1214938dd521c0007f84ae7ac0ed7b028f39e73f", "testing"],
     ["3cc71d02f70447f1de02e062695095682a0cabab4ed668abe1309d017bc0cf83", "pagination"],
-    ["d71e45c5b1f13bcf26c6a22bc455b1da93c1276b8e73f5d7db6ec302f62a6a04", "forms"],
-    ["14bc762731cf3b3bec15b3e0561f26847f99a279f8123abf5379db8eacf2dfd2", "writes"],
-    ["01eb1c98d8945987929ca3d8c68d4d848e64415d2042fc844166a490ca9457cb", "cart"],
-    ["b878173156d608df50612163e73637f1e9129b1eb568b72c597af27adca06df9", "caller-input"],
-    ["37b4b151995d2a3573a8a6d322800914f21c474151a73ff508fecf5c1aa9192c", "publication"],
-    ["ca25d414d25ba51222fbd7014de75173308bc46d6fc237cc527f47837b1992fc", "workspace/AGENTS.md"],
-    ["9501ae9c273d5d4db8976a544879f7aee44212c8a616b00e74263dcd3c593035", "workspace/README.md"],
+    ["e5c50d55a6e068b6cdd642d94c70f3ab19fc2d34784b56b5310dc42fd2c365c2", "forms"],
+    ["7cfbf69521c6e4257040a955ff959ad838cc4e0ba1a0bb0c8635fa9b1d419954", "writes"],
+    ["f699507941c80de5dc005d90242d9683a5eef535a323922368238ce4a6c16e83", "cart"],
+    ["aa1671b28872d52f9b1102d33b8101275094ea0f440965230d91b04b8cdcde79", "caller-input"],
+    ["87f58158ef11e684aca41ed8edf457bd5e9909acadc1e85c808058b1e7544bab", "publication"],
+    ["1a3f3f0c69f2fccab2ed3740ee05aebde734aeca6937cea21666c13c49e81ac3", "workspace/AGENTS.md"],
+    ["be4c8e5bb9da0acad776cd0174b4b5271ca52c1925e232cf196e55d32e1aa60d", "workspace/README.md"],
   ]);
 });
 
@@ -928,7 +994,7 @@ data carries the result fields. When it does, the default design is: reach the r
 the page's controls, then read that data in the same session, reading the applied location back
 from the page or that answer. Read rendered rows only when it doesn't. For a data request, prefer
 catching the page's own answer in the same call as the step that sends it
-(\`Promise.all([page.waitForResponse(...), button.click()])\`, core skill). Fetching it in the page
+(\`Promise.all([page.waitForResponse(...), button.click()])\`, waits skill). Fetching it in the page
 (\`page.evaluate(() => fetch(...))\`) is fine to speed things up or when that answer can't be
 caught, once the page itself has reached the results, not as the only step.
 
@@ -942,7 +1008,7 @@ design is: set a location or store through the page's controls first if the URL 
 load the results URL, then read that data in the same session, reading the applied location back
 from the page or that answer. Drive the search form and read rendered rows only when they don't.
 For a data request, prefer catching the page's own answer in the same call as the step that sends
-it (\`Promise.all([page.waitForResponse(...), button.click()])\`, core skill). Fetching it in the
+it (\`Promise.all([page.waitForResponse(...), button.click()])\`, waits skill). Fetching it in the
 page (\`page.evaluate(() => fetch(...))\`) is fine to speed things up or when that answer can't be
 caught, once the page itself has reached the results, not as the only step.
 
@@ -971,7 +1037,7 @@ const loadAuthoring = async (
  * renders the same either way.
  */
 const dataRequestSentence =
-  "For a data request, prefer catching the page's own answer in the same call as the step that sends it (`Promise.all([page.waitForResponse(...), button.click()])`, core skill). Fetching it in the page (`page.evaluate(() => fetch(...))`) is fine to speed things up or when that answer can't be caught, once the page itself has reached the results, not as the only step.";
+  "For a data request, prefer catching the page's own answer in the same call as the step that sends it (`Promise.all([page.waitForResponse(...), button.click()])`, waits skill). Fetching it in the page (`page.evaluate(() => fetch(...))`) is fine to speed things up or when that answer can't be caught, once the page itself has reached the results, not as the only step.";
 
 it("renders the search URL fast path only when a host turns it on", async () => {
   const omitted = await loadAuthoring("typescript/authoring");
@@ -996,8 +1062,8 @@ it("renders the search URL fast path only when a host turns it on", async () => 
     ...on.digests.filter(([, name]) => name === "search"),
     [sha256(on.agents), "workspace/AGENTS.md"],
   ]).toStrictEqual([
-    ["ee7e45fcc9cb8ae5d2969538754841c34d07b20baf12371143e8ad081651fbfb", "search"],
-    ["957b0dd8a40a455582a99b28ee2f487cb6c3aecf165ba25d4bcfe6659aefd9c6", "workspace/AGENTS.md"],
+    ["909ae4efe3babd5316a7867beca964ab10c5a73bca0ba71919db22d0213b2e5c", "search"],
+    ["03b0809fa7aec7251989a7d2c49a29015fcad19301e1e8ec6739e561fa342f09", "workspace/AGENTS.md"],
   ]);
   expect(on.digests.filter(([, name]) => name !== "search")).toStrictEqual(
     off.digests.filter(([, name]) => name !== "search"),

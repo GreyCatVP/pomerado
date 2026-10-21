@@ -99,7 +99,7 @@ unavailable, check where the site would show it for the requested scope, such as
 date's calendar or the results for the requested search. Settled evidence for the requested
 option, such as the site not listing it, is enough, and so is the site showing it sold out or
 unavailable for a write. A read that finds the requested option greyed out or sold out returns it
-as unavailable data with the page's alternatives instead (.agents/core/SKILL.md, "Configure,
+as unavailable data with the page's alternatives instead (.agents/inputs/SKILL.md, "Configure,
 then read").
 
 When the site does not match the request exactly, tell two cases apart:
@@ -199,7 +199,7 @@ This holds for `src/tool.mjs`, every fallback in it and your own probes.<!-- pom
 site shows, such as the date picker, selected time, party size, passengers, cabin, applied
 filters, sort and selected options, and refuse a mismatch: the tool throws `InputNotApplied`
 and never returns results for an input that did not apply, except in the cases
-.agents/caller-input/SKILL.md lists, such as a location the site won't apply; a control
+.agents/rejections/SKILL.md lists, such as a location the site won't apply; a control
 the tool could not find or read is `OperationFailure`. Echoed
 input, a
 URL the tool built, a URL parameter, a box checked before the site applied it or the option's
@@ -207,7 +207,7 @@ name elsewhere on the page does not show an input applied; read the site's commi
 as the applied chip, the selected control or the results' own state, and compare its text with
 the input, or the option a proper noun matched, normalized for case, accents, whitespace and
 punctuation. A detail
-read also checks the page's stable identity (.agents/core/SKILL.md). Building or repairing a search or listing tool: read
+read also checks the page's stable identity (.agents/browser-code/SKILL.md). Building or repairing a search or listing tool: read
 .agents/search/SKILL.md before you settle its inputs.<!-- pomerado:section agents.user-defined-fields -->
 
 **Load large content progressively.** Know a file's size before reading it:<!-- pomerado:section agents.file-lengths --> every `read_source` result gives
@@ -233,14 +233,22 @@ account; never embed private literals or tokens in source.
 
 **Publication blocks on these.** Each skill named holds the full rule. Separately, the execution
 review escalates a live step that enters a name, email or phone unless you asked the owner with
-`request_input` first (core skill, "Inputs that tailor the answer").
+`request_input` first (tailoring skill).
 
 - Never make an account-specific value an enum member, example or default; take it free-form
-  or as a declared `ask` with `accountSpecific` options (core skill, the input schema).
+  or as a declared `ask` with `accountSpecific` options (inputs skill).
 - Never narrow an input to the example's value (`example_value`): the code works for every value
-  the schema accepts (core skill).
+  the schema accepts (inputs skill).
 - Write every constraint in a form JSON Schema shows, never a `Schema.filter`, and type every
-  output field, never `Schema.Unknown` (core skill).
+  output field, never `Schema.Unknown` (inputs skill).
+- Give every input and output field, nested ones included, its own `description` (inputs skill).
+- Make every control the flow offers that narrows, orders or configures the result an optional
+  input wired to it, except a choice that was declined (inputs skill).
+- Make every value the request needs required and non-null; only a record whose own page shows
+  no such value may return null, beside a field that says why (outputs skill).
+- Throw `InvalidInput` with the site's choices for a value the site does not offer, and
+  `InputNotApplied` for one the page ignored, except an input that tailors the answer
+  (rejections skill).
 - A secret answer is a handle, written only as the whole value it fills; published source never
   holds one (core skill, "Secret answers").
 - After a write, call `verified()` with no argument just before returning, once a call has read
@@ -259,7 +267,7 @@ whose answers come back to you while this attempt continues, when:
 1. the request has two plausible readings that would build different tools;
 2. a decision needs something only the user knows, such as which account, plan or item, and a
    wrong guess matters (a write or a sign-in), or a location a tool's results, prices or
-   availability depend on, which the caller may skip (.agents/core/SKILL.md, the input schema);
+   availability depend on, which the caller may skip (.agents/tailoring/SKILL.md);
 3. you are stuck navigating after a few distinct attempts: ask for directions ("Where do you
    usually find X?") before giving up;
 4. sign-in offers a branch, such as mutually exclusive account or plan types, or which code
@@ -270,12 +278,12 @@ whose answers come back to you while this attempt continues, when:
    the key rules say;
 6. how the tool should use an input that tailors the answer is genuinely ambiguous, such as
    whether a postal code sets the store or only finds nearby ones: ask the design question
-   `input_use_<input>` (.agents/core/SKILL.md, "Inputs that tailor the answer"); an input whose
+   `input_use_<input>` (.agents/tailoring/SKILL.md); an input whose
    description starts "By design:" records that answer, so keep its use and description word for
    word;
 7. the site never shows a value the request needs: ask before you build whether to build without
    it or stop, and settle every other contract gap before your first example too
-   (.agents/core/SKILL.md, "Find contract gaps before your first example");
+   (.agents/inputs/SKILL.md, "Find contract gaps before your first example");
 8. you would leave out or refuse a capability the site offers, such as a field or column type,
    an option, or what a review finding asks for, because supporting it costs more, such as a
    lookup or an extra request: before narrowing, ask the owner one batched question that lists
@@ -334,8 +342,7 @@ the tool behaves, such as a sort order, a filter, which kind of record a write c
 a save runs the site's automation, is the tool's default, never a required input or a question
 the tool asks when it runs: when a caller could reasonably want another value, make it an
 optional input whose default is the answered value (`defaultedInput`), and keep it fixed, with
-no input, only where varying it would be unsafe or meaningless (.agents/core/SKILL.md, the input
-schema). An
+no input, only where varying it would be unsafe or meaningless (.agents/inputs/SKILL.md). An
 answer that gives only this run's value, such as which customer or date, is this run's input. A
 costly choice stays a required input or a declared question for every caller, and an answer may
 only make declining it its default (.agents/writes/SKILL.md). No request or answer authorizes made-up values:
@@ -664,7 +671,7 @@ disclosed diagnostic-only tool cannot replace a materially different requested o
 `finish_build` keep the requested capability and its effect limits, such as search only and never
 book, in the extracted contract, current source and public definition; continue source correction
 under existing authority when they do not align. The example's input values are one case of the
-tool, never its limits (.agents/core/SKILL.md, the input schema).
+tool, never its limits (.agents/inputs/SKILL.md).
 
 Do not manufacture success from model prose. Publish with `finish_build`. Source, extraction,
 validation and semantic errors require continued diagnosis and repair within the original

@@ -19,14 +19,14 @@ Check the page again after the answer.
 Use Playwright locators and frame chains inside the call. Check unique target identity
 separately from visibility/readiness and semantic completion. Arm relevant event
 waiters before triggers, in the same call. Native dialogs go to the host through
-`decideDialog`, as the core skill describes; do not click again while deciding a dialog.
+`decideDialog`, as the browser-code skill describes; do not click again while deciding a dialog.
 
 `page.waitForLoadState("domcontentloaded")` may resolve for the document already
 loaded. Pairing it with a click does not prove a new navigation has completed.
 When the observed control navigates, arm a waiter tied to that transition before
 clicking, then wait with `waitForOutcome`, the click passed as its `action`, for every answer
 the site can give under the verified query: its results, its explicit empty state, a greyed-out
-choice, its error or refusal (core skill).
+choice, its error or refusal (waits skill).
 For an in-page update, wait for evidence that the new query has completed. An
 immediate snapshot with an empty title and missing controls can be a transition
 observation; it does not establish an empty business result.
@@ -84,9 +84,9 @@ use its named phase and current evidence before diagnosing or changing the locat
 Drive every field from the input. Choose the option that matches the input value, by
 the option's value or its observed label pattern, and read back that the field took it.
 Never click a label or option copied from the example, and never reject an input value
-the schema accepts. Enums and typeahead matching follow the core skill's input schema; a
+the schema accepts. Enums and typeahead matching follow the inputs skill; a
 caller's answer picks an option but does not show which exist. Prefer matching an existing
-record by a fuzzy match on its name (core skill), and prefer never picking an "Add new"
+record by a fuzzy match on its name (inputs skill), and prefer never picking an "Add new"
 row when an existing record matches.
 
 Fill dates with the SDK's form controls and choose values with its picker: import
@@ -142,7 +142,7 @@ does not establish the answer.
 When an overlay such as a cookie or consent banner covers the target, dismiss it with its
 control that declines optional cookies, such as Reject all or Necessary only, when the banner
 shows one, and otherwise with any of its controls, accept included. Name that control as `dismiss` of
-`waitForReady` (core skill) to close the banner before the action, and one that opens later.
+`waitForReady` (waits skill) to close the banner before the action, and one that opens later.
 
 Decide whether each pop-up, banner or interstitial is conditional or always triggered. A
 conditional one shows only for some accounts, states or visits, such as a cookie banner, a
@@ -163,7 +163,7 @@ narrow it to the example's date or a guessed window. A rule of the task or the s
 a range that ends before it starts, a past date or a booking limit, is the tool's own check:
 fail as `InvalidInput` with a message naming the field and the rule, before any site action
 when the input alone breaks it, and when the site refuses the date. The message's start and
-the time zone that makes a date past follow the caller-input skill ("Validate it, and fail
+the time zone that makes a date past follow the rejections skill ("Validate it, and fail
 with the right error").
 
 Date ranges, calendar-only pickers, validation messages, uploads, staged forms and
@@ -197,13 +197,13 @@ such forms save each step as you go. A read build may not fill in or advance suc
 form (it asks the caller and changes its task to a write with `mint_update` first, as the
 writes skill says); a write build does the whole form as its one task. A search, filter or query form
 whose read semantics are established stays a read, and so does a signed-out store or location
-form (core skill). A signed-out quote or price form that only fetches is a read too, but a
+form (tailoring skill). A signed-out quote or price form that only fetches is a read too, but a
 quote, contact or inquiry form that sends a name, email, phone number or similar personal detail
 creates a lead or other lasting record on the site, so it is a write: ask the caller first, as
 the writes skill says. A step that only sets an input that tailors the answer with details the
 caller gave, a name, email or phone the site requires for it included, stays part of the read
 unless the step creates an account or a lasting record; the build's example asks the owner first
-before entering a name, email or phone (core skill, "Inputs that tailor the answer").
+before entering a name, email or phone (tailoring skill).
 
 - Walk every step for real, in the session, with the caller's values. Never infer a
   later step's fields, options or wording in place of reaching it; the page after
@@ -217,8 +217,8 @@ and destination. Read current terms immediately before commitment; fail with a
 specific correction when changed. Use server quote/version checks where available;
 otherwise report the read-to-submit race. Ask about choices as `AGENTS.md` ("Try hard,
 then ask") says, and never keep or clear an add-on, pre-selected paid option or saved
-payment unasked; every optional field the flow offers is still an optional input (core
-skill, the input schema). Prefer confirming from the commit request the final click sends,
+payment unasked; every optional field the flow offers is still an optional input (inputs
+skill). Prefer confirming from the commit request the final click sends,
 checked as the writes skill says, and otherwise from the confirmation the page shows after
 the click, such as a reference number, a success message or a toast, never from another
 request's 200. Match a confirmation message only against text

@@ -26,7 +26,7 @@ A read build may search, filter and query, but may not fill in or advance a form
 saves data on the site, save or submit anything; a task that needs that is a write build.
 Signed out, setting the session's store, location or delivery or pickup mode is part of a
 read, even through a Save button, and so is entering the details the caller gave to set it,
-unless the step creates an account or a lasting record on the site (core skill). While building,
+unless the step creates an account or a lasting record on the site (tailoring skill). While building,
 a live step, the example's or a test case's, that enters a name, email or phone asks the owner
 first, as the execution review requires; the answer keeps the build a read. Adding to a cart, a hold on inventory, a seat or a time slot, an upload and a draft stay writes,
 signed out too.
@@ -53,7 +53,7 @@ Sign in first when the site needs it, and always for a cart or checkout
 read-only, for example to read the first page's options, but never fill, select,
 add, save or submit anything there, except one made-up key in the site's own format, with a
 serial past any the site lists, per input that takes a record's own key, looked up once in the
-site's own lookup to see what it shows for a key it has no record of (core skill).
+site's own lookup to see what it shows for a key it has no record of (waits skill).
 
 Read the path's options with read-only exploration where you can, and settle them before the
 first `act` step where possible: ask with
@@ -92,7 +92,7 @@ During the session:
   may have saved something, and that is honest. Still mark that earlier step.
 - When one of those checks rules the task out, such as a total over the caller's limit, an
   item out of stock or a variant the page does not offer, the script refuses before the mark
-  with `InvalidInput` (the caller-input skill, "Throw the error that matches what happened"),
+  with `InvalidInput` (the rejections skill, "Throw the error that matches what happened"),
   or returns a refusal its output schema declares before its first mark (below). Never return
   a refusal in an output shape the schema does not declare. Apart from such a declared
   refusal, prefer throwing over returning when a write stops before its last commit step. A
@@ -118,7 +118,7 @@ During the session:
   page always opens it in answer to an action: handle it as the forms skill says, so the tool
   still works for a caller who never sees it.
 - Before committing, read back from the page what you are about to submit and check each
-  value as the core skill's Confirm step says, against the option the tool picked when it
+  value as the inputs skill's Confirm step says, against the option the tool picked when it
   picked one, in the session and on every branch of the composed script. Fail if one does
   not match, and prefer running this check before the step's commit mark, so a mismatch
   stops the step before it sends anything. Never read back a field filled with a secret
@@ -140,7 +140,7 @@ During the session:
 ## The session
 
 Author each step as a Kernel script under `src/` with the caller's input schema (the
-core skill), and keep the flow's calls in a module the composed script will import
+inputs skill), and keep the flow's calls in a module the composed script will import
 too. Run each step with `execute` purpose `act`, target `liveBrowser`.
 
 - The first `act` step claims the build's write. The host resets the browser to
@@ -230,7 +230,7 @@ too. Run each step with `execute` purpose `act`, target `liveBrowser`.
   number, its own reference or the values entered), and every field the caller asked
   for that the view shows agrees (the read before the commit already checked what you
   entered). Sites reformat what they save, such as line breaks, spaces and dates in the
-  viewer's format, so compare text after the commit with `sameText`, as before it (the core
+  viewer's format, so compare text after the commit with `sameText`, as before it (the inputs
   skill's Confirm step). Compare a chosen option's value only where the
   view shows that value; otherwise compare the label it shows. When the write changed state
   that already existed, the same read is also the after read of the before-and-after
@@ -318,7 +318,7 @@ the caller asked for, in the form the site saves it.
   did not run, prove it in an `act` step that only reads, while the session is open (below),
   never by committing again.
   When no entry matches, throw `InvalidInput` with `field` and `available`; when several match
-  equally, ask the caller (core skill, the input schema). Write that ID or pick that entry, and
+  equally, ask the caller (inputs skill). Write that ID or pick that entry, and
   compare the read-back by ID, never a label against an ID. Return the reference as
   `{ id, label }` (records skill). Do not drop a reference field only because the site saves an
   ID: the lookup is the fix. When the site shows no ID and offers no list to resolve one, compare
@@ -387,7 +387,7 @@ input. An unset optional input leaves the page's default, as in a read. An optio
 or the owner's answer settled as how the tool behaves, such as which kind of record it
 creates, which line type a free-text line takes or whether a save runs the site's automation,
 is the tool's default: an optional input declared with `defaultedInput` and the answered value,
-whose description says so (core skill), never a required input or a question the script asks.
+whose description says so (inputs skill), never a required input or a question the script asks.
 The exception is a paid add-on or pre-selected paid option
 within the tool's purpose, the payment method and the delivery address: each must be
 explicit, so the script never keeps, clears, accepts or declines one the input leaves open. It
@@ -470,7 +470,7 @@ result, and maintenance reads the site back and finishes the write at most once.
 An `unverifiable` write reports <!-- pomerado:section writes.unverifiable-status:start
 `may_have_applied`
 pomerado:section writes.unverifiable-status:end --> too, and nothing repairs it.
-A script that throws `errors.InvalidInput` (core skill) fails as the caller's input; with
+A script that throws `errors.InvalidInput` (rejections skill) fails as the caller's input; with
 `available`, the host ends the run at once with those choices. Before any commit
 mark is entered, the run reports that it changed nothing, so throw a refusal before the
 mark. A write may instead declare its refusals in its output schema: a branch that requires

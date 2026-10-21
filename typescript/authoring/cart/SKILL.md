@@ -20,9 +20,9 @@ the account's, and never judge the account's cart from one.
 Take the product as the identifier and option values the site's own pages use, such as a
 product number and a size, so a caller can pass a search or details tool's output straight in.
 When `reference/site-tools.json` lists such a tool, use its identifier, field names and option
-values (the core skill). Quantity, each option the product offers and, when the site lets a
+values (the site-tools skill). Quantity, each option the product offers and, when the site lets a
 visitor set one, the location or store are inputs. Set the options as "Configure, then read" in
-the core skill says before adding the product: a value the product does not offer throws
+the inputs skill says before adding the product: a value the product does not offer throws
 `InvalidInput` with `field` and `available`.
 
 ## Quantity
@@ -65,7 +65,7 @@ reason, `field` the input the caller would change, before its commit mark whenev
 the limit first. A checkout that takes a limit of the caller's, such as
 a maximum total, reads the final total and compares it before the order's commit mark, and
 refuses with `InvalidInput`, `field` that input and `kind: "over_price_limit"`, giving the total
-and the limit (the caller-input skill). Never add items, raise a quantity or change the
+and the limit (the rejections skill). Never add items, raise a quantity or change the
 delivery method to meet a limit. While building, ask the caller to revise or stop, as
 `AGENTS.md` says. When they stop, or their answer cannot be met either, end with
 `report_blocked` and explain the site's limit: a build that only reached the limit never

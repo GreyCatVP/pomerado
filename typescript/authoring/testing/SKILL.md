@@ -93,7 +93,7 @@ run no batch before then. Aim for a handful of cases, not dozens:
   site shows before you write its expectation: some sites answer it with a fallback grid or a
   "no exact matches" view rather than an empty list. When the tool takes a free-text input, one
   the caller types rather than picks, use a made-up value the site has no match for here, so
-  this case also shows that value ends as the caller-input skill says: `empty` for a search
+  this case also shows that value ends as the rejections skill says: `empty` for a search
   query, `invalid_input` naming the field, or a labeled `result` for a location the site won't
   apply, never another throw. Skip it for an input that takes a person's or account's name,
   number or code. For one that takes a record's own key, such as an order or ticket number, use
@@ -113,7 +113,7 @@ run no batch before then. Aim for a handful of cases, not dozens:
 
 A blank or over-long value of a free-text input needs no live case: the input schema refuses it
 before the site is touched, so bound every free-text input there, non-empty and with a
-`maxLength` no longer than the site's own field takes (core skill), and
+`maxLength` no longer than the site's own field takes (inputs skill), and
 publication reads that schema. So does a value
 outside an enum input. A free-text value the tool matches against the site's own list, such as
 a store name, that the site does not list at all (`invalid_input`, with the page's choices
@@ -152,7 +152,7 @@ case, use real values the site offers, which you saw while
 exploring: listed options, places, dates, counts, records and retailers the site lists. Never use
 a person's, account's or record's name, number or code, and never the caller's own values beyond
 the example's input. List under `notTested` anything the tool claims that you chose not to test,
-with why. A choice the request, the caller or the owner declined is not part of the tool (core
+with why. A choice the request, the caller or the owner declined is not part of the tool (inputs
 skill), so it is never tested.
 
 ## Run and fix the cases

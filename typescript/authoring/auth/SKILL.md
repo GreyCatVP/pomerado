@@ -426,6 +426,51 @@ failure propagate. An `OperationFailure` with `sessionLoss: "session_not_kept"` 
 could not sign in again, and the run reports that the site did not keep its session. Never catch it
 to go on signed out, and never sign in from the script yourself.
 
+# Authenticated operations
+
+A signed-in operation needs no login or identity hooks. The host signs in before the
+script runs, through an explicit direct HTTP request or host autofill, and the
+script starts signed in. Each enters private values through the trusted host. The
+script never receives a password. After a full page load mid-script, call
+`ensureSignedIn()`, as "Staying signed in during an operation" above describes.
+
+When inspection establishes a login entry, pass `loginUrl` and the first screen's
+`signInStep` to `execute` with purpose `authenticate`. The host uses the URL exactly as given
+and grants it no authority: credentials are typed only on the site's registrable domain or a configured sign-in
+origin. Record the site's own sign-in link ("The login URL you record", above) and include any observed fieldless
+navigation steps needed to reach the credential form from it. A URL no sign-in can start from, and
+a failed sign-in, come back with the reason and the next step; fix the cause and call
+authenticate again. Author no login-routing file beyond the direct-request template described
+below.
+
+Inspect login markup using reviewed read-only `explore` without private credential
+injection. Use execute purpose `authenticate`, target `liveBrowser`, to sign in. The
+host runs<!-- pomerado:section auth.sign-in-request --> the observed `signInStep` and reports the sign-in. It runs no
+generated code, and it does not claim or execute the business example. Login effects
+have separate authentication evidence. If the same browser still shows a login page or
+a signed-out state afterwards, inspect the page and correct the recorded steps or report the failure.
+Credentials the site rejected are never resubmitted.<!-- pomerado:section auth.login-markup --> Wait for the
+signed-in page to become ready after login. Disappearance of the login form alone is
+insufficient. The host requests codes and choices through protected input requests during
+`authenticate`.
+
+Only the host requests website credentials, and only during `authenticate`.
+<!-- pomerado:section auth.login-source -->`request_input` cannot request credentials. If the site cannot be reached, report that instead
+of starting sign-in. Never request durable credentials in model arguments or
+history.<!-- pomerado:section auth.credentials -->
+
+Supported login challenges during `authenticate` belong to the host's sign-in
+(autofill or an explicit direct HTTP step) and its protected input requests. Generated `operation.run` and `explore` code
+never request or enter a sign-in code, or sign in themselves: a code that is part of signing in
+belongs to the `authenticate` step ("Sign in on this site", above). A code the site sends later, to confirm a protected action after sign-in, is different:
+declare it as a `secret` question and ask it with `ask`, as the caller-input skill's
+`caller-code.ts` shows. A missing ordinary page
+control alone does not establish a human-verification challenge. Observe the
+current page state within the existing deadline. When a few distinct attempts have
+not found the way, ask the caller for directions with `request_input` before
+reporting a blocked or unknown state whose cause cannot be established. Completing a
+challenge does not prove login.
+
 # A direct sign-in request
 
 A direct sign-in request signs in with one host-filled HTTP request instead of an autofill form submission. Runs are faster with it, so the host prefers it once a mint proves it.

@@ -7,44 +7,121 @@ import { failureDetail } from "../runtime/failure-detail.js";
 import { hostedFeaturesPreamble } from "../hosted-features.js";
 import { publicationLiveTestsPolicy, publicationOutputPolicy } from "../guardian/publication.js";
 
+/**
+ * Each skill the minter may read: `trigger` says when to read it, in concrete terms it can check
+ * against the step it is about to write, and `contents` says what it holds; the skill list shows
+ * them as one description. `preload` names the starts whose first message a host may carry the
+ * skill in, already read (`preloadedSkills`); every other skill loads when its trigger applies.
+ * Catalog order is preload priority.
+ */
 const catalog = [
   {
     name: "core",
-    description: "Operation SDK, intake, ownership and execution targets",
-    references: [
-      "parser.ts",
-      "native-page.ts",
-      "navigation.ts",
-      "selection.ts",
-      "native-dialog.ts",
-    ],
+    trigger: "Read first, before any other skill",
+    contents: "operation SDK, intake, ownership and execution targets",
+    preload: ["build", "repair"],
+    references: ["parser.ts", "native-page.ts", "selection.ts"],
+  },
+  {
+    name: "waits",
+    trigger:
+      "Read before writing or changing any step that waits for the page, a network answer or an outcome, or that uses `waitForOutcome`, `waitForOutcomeResult`, `waitForRows`, `waitForValues`, `waitForChange`, `waitForReady` or `waitPastChallenge`",
+    contents:
+      "budgets, readiness, naming every answer a step can give, value waits and what each wait failure means",
+    preload: ["build", "repair"],
+    references: ["navigation.ts", "native-dialog.ts"],
+  },
+  {
+    name: "browser-code",
+    trigger:
+      "Read before writing or changing any browser code: a `kernel.browsers.playwright.execute` call, an explore or a probe",
+    contents:
+      "execute calls, clicks and locators, the site origin, reading values from the page, page identity, uncertain transitions, probes and native dialogs",
+    preload: ["build", "repair"],
+    references: ["native-page.ts", "navigation.ts", "native-dialog.ts"],
+  },
+  {
+    name: "inputs",
+    trigger:
+      "Read before writing or changing the input schema or any input, and before code that sets an input on the page",
+    contents:
+      "what the schema holds, required, optional and defaulted inputs, enums and typeahead lookups, JSON Schema constraints, descriptions and examples, contract gaps, and choices set on the page and read back (Configure, then read)",
+    preload: ["build"],
+    references: [],
+  },
+  {
+    name: "outputs",
+    trigger:
+      "Read before writing or changing the output schema or any output field, and before code that reads a value the tool returns",
+    contents:
+      "values the request needs, typed and nullable fields, optional `include` sections, result lists and groups, field names, money, dates and other formats",
+    preload: ["build"],
+    references: [],
+  },
+  {
+    name: "tailoring",
+    trigger:
+      "Read before building a read whose answer can depend on where or who the visitor is (a location, store, ZIP, delivery or pickup, vehicle, membership or plan), and before asking about or setting one",
+    contents:
+      "find those inputs, apply them, return the value the site applied, and when a caller limits an input's use",
+    preload: [],
+    references: [],
+  },
+  {
+    name: "rejections",
+    trigger:
+      "Read before writing any check of the caller's input, any `InvalidInput`, `InputNotApplied` or `OperationFailure`, or any refusal a tool returns",
+    contents:
+      'the rules checked before touching the site, which error fits what happened, `available` and `kind`, and when a message starts "Caller input error:"',
+    preload: [],
+    references: [],
+  },
+  {
+    name: "site-tools",
+    trigger:
+      "Read when `reference/site-tools.json` exists, before settling or changing the tool's inputs and outputs",
+    contents: "the site's other tools, sharing their identifiers and shapes, and reusing their code",
+    preload: [],
+    references: [],
   },
   {
     name: "search",
-    description:
-      "Read before settling a search or listing tool's inputs: the site's own filters, sort and location, applied and read back, and honest empty results",
+    trigger: "Read before settling a search or listing tool's inputs",
+    contents:
+      "the site's own filters, sort and location, applied and read back, and honest empty results",
+    preload: [],
     references: [],
   },
   {
     name: "auth",
-    description: "Discover an evidenced login entry and sign in through the host",
+    trigger: "Read before signing in, before any `authenticate` call, and before writing a signed-in tool",
+    contents:
+      "discover an evidenced login entry, sign in through the host, and keep a signed-in operation signed in",
+    preload: [],
     references: ["auth-entry.ts"],
   },
   {
     name: "testing",
-    description:
-      "For a read: design a few combined live test cases and run them. A read signed out runs a handful; a signed-in read runs four inputs at most. A write skips it and proves its tool with one run",
+    trigger: "Read on a read build once its example passes, before designing its live tests",
+    contents:
+      "design a few combined live test cases and run them. A read signed out runs a handful; a signed-in read runs four inputs at most. A write skips it and proves its tool with one run",
+    preload: [],
     references: [],
   },
   {
     name: "pagination",
-    description:
-      "Read before settling the schema of any tool that returns a list: page size, the cursor, numbered pages, next links, load more, infinite scroll, the site's own list API, changed lists and when to stop",
+    trigger: "Read before settling the schema of any tool that returns a list",
+    contents:
+      "page size, the cursor, numbered pages, next links, load more, infinite scroll, the site's own list API, changed lists and when to stop",
+    preload: [],
     references: ["pagination.ts", "pager.ts"],
   },
   {
     name: "forms",
-    description: "Native/custom selection, resolvers, staged forms and expected terms",
+    trigger:
+      "Read before driving a dropdown, picker, date or file control or a form with several steps, and before any write that fills in a form",
+    contents: "native/custom selection, resolvers, staged forms and expected terms",
+    preload: [],
     references: [
       "dates-and-dropdowns.ts",
       "picker.ts",
@@ -55,29 +132,58 @@ const catalog = [
   },
   {
     name: "writes",
-    description:
-      "Perform an authorized write once, confirm it, then return its integration without running it again",
+    trigger: "Read as soon as a build is a write, before its first `act` step",
+    contents:
+      "perform an authorized write once, confirm it, then return its integration without running it again",
+    preload: [],
     references: ["write-session.ts", "write-readback.ts"],
   },
   {
     name: "cart",
-    description:
-      "Read before building any tool that reads, adds to, changes or checks out a cart: sign in first, read the cart before and after, quantity, account values and site limits",
+    trigger: "Read before building any tool that reads, adds to, changes or checks out a cart",
+    contents:
+      "sign in first, read the cart before and after, quantity, account values and site limits",
+    preload: [],
     references: [],
   },
   {
     name: "caller-input",
-    description:
-      "Read before settling any tool's inputs and errors: what the input schema holds, the rules checked before touching the site, InvalidInput versus InputNotApplied, and asking the run's caller mid-run for what only they know",
+    trigger:
+      "Read before a run asks its caller anything, such as a choice only the page offers, which of several matches, or a code the site sends, and before declaring any question",
+    contents: "declaring, reading and asking questions mid-run, and what happens when no answer comes",
+    preload: [],
     references: ["caller-choice.ts", "caller-code.ts"],
   },
   {
     name: "publication",
-    description:
-      "Read before the first finish_build: what publication checks, private values never to publish, and how to act on each rejection",
+    trigger: "Read before the first finish_build",
+    contents: "what publication checks, private values never to publish, and how to act on each rejection",
+    preload: [],
     references: [],
   },
-] as const;
+] as const satisfies readonly {
+  readonly name: string;
+  readonly trigger: string;
+  readonly contents: string;
+  readonly preload: readonly AuthoringStart[];
+  readonly references: readonly string[];
+}[];
+
+/** Where a minter starts: a new build, read or write, or a repair of a published tool. */
+export type AuthoringStart = "build" | "repair";
+
+/** A skill's description in the skill list: when to read it, then what it holds. */
+const skillDescription = (entry: (typeof catalog)[number]) => `${entry.trigger}: ${entry.contents}`;
+
+/**
+ * The skills a host may carry, already read, in the first message of a start, most needed first.
+ * A host with a budget for that message takes them in this order and leaves out one that does not
+ * fit, which then loads when its trigger applies, like every other skill.
+ */
+export const preloadedSkills = (start: AuthoringStart): readonly string[] =>
+  catalog.flatMap(({ name, preload }) =>
+    (preload as readonly AuthoringStart[]).includes(start) ? [name] : [],
+  );
 
 /**
  * The host-owned workspace guide, relative to the authoring directory. `AGENTS.md` is the
@@ -209,7 +315,7 @@ const searchUrlFastPathPassages: readonly {
       "the page's controls, then read that data in the same session, reading the applied location back",
       "from the page or that answer. Read rendered rows only when it doesn't. For a data request, prefer",
       "catching the page's own answer in the same call as the step that sends it",
-      "(`Promise.all([page.waitForResponse(...), button.click()])`, core skill). Fetching it in the page",
+      "(`Promise.all([page.waitForResponse(...), button.click()])`, waits skill). Fetching it in the page",
       "(`page.evaluate(() => fetch(...))`) is fine to speed things up or when that answer can't be",
       "caught, once the page itself has reached the results, not as the only step.",
     ],
@@ -221,7 +327,7 @@ const searchUrlFastPathPassages: readonly {
       "load the results URL, then read that data in the same session, reading the applied location back",
       "from the page or that answer. Drive the search form and read rendered rows only when they don't.",
       "For a data request, prefer catching the page's own answer in the same call as the step that sends",
-      "it (`Promise.all([page.waitForResponse(...), button.click()])`, core skill). Fetching it in the",
+      "it (`Promise.all([page.waitForResponse(...), button.click()])`, waits skill). Fetching it in the",
       "page (`page.evaluate(() => fetch(...))`) is fine to speed things up or when that answer can't be",
       "caught, once the page itself has reached the results, not as the only step.",
     ],
@@ -308,7 +414,7 @@ export const loadAuthoringSkills = (
             });
           return {
             name: entry.name,
-            description: entry.description,
+            description: skillDescription(entry),
             content: new TextEncoder().encode(
               hostRender(render, options)(
                 new TextDecoder("utf-8", { fatal: true }).decode(

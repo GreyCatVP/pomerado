@@ -24,7 +24,7 @@ The operation's browser work is its own `kernel.browsers.playwright.execute` cal
 
 ## Standalone references
 
-Read the installed core, search, auth, testing, forms, writes, cart, pagination, records, caller-input and publication skills as relevant. The ordinary browser syntax and example source are the same in both compositions. Files use logical `/workspace` paths; installed runtime and skill directories are read-only. Use bounded live observations and `pureFiles` checks on caller-supplied fixtures.
+Read the installed core, waits, browser-code, inputs, outputs, tailoring, rejections, site-tools, search, auth, testing, forms, writes, cart, pagination, records, caller-input and publication skills as relevant. The ordinary browser syntax and example source are the same in both compositions. Files use logical `/workspace` paths; installed runtime and skill directories are read-only. Use bounded live observations and `pureFiles` checks on caller-supplied fixtures.
 
 From `src/`, `explore/` or `test/`, import `Schema` from `effect` and `defineOperation` from `../../runtime/index.js`. All website access uses the generated `kernel.browsers.playwright.execute` call.
 

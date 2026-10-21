@@ -67,22 +67,22 @@ first:
 
 - **Schemas.** The input schema accepts exactly what the code accepts, every input and output
   field has its own description, every output field is typed and each constraint has a JSON
-  Schema form (core skill, the input schema). A read's schemas come from current source, so
+  Schema form (inputs skill). A read's schemas come from current source, so
   fix one there and call again with the same `executionId`; a required output field its example
   did not return is refused (`contract_output_mismatch`). Values the request needs are required
   and non-null: never loosen one. Only a record whose own page shows no such value may return
   null, together with a field saying why; a description never excuses a nullable needed value,
   and Guardian refuses a schema that makes one optional or nullable. No output is a constant
-  where the page shows a value, and titles and names are returned in full (core skill, output
+  where the page shows a value, and titles and names are returned in full (outputs skill, output
   fields).
 - **Typed output.** Prefer parsing what the page shows into typed fields over returning a
   result row, card or itinerary as one text blob or summary. Give each fact a caller would
-  filter, sort or compare its own field (core skill, output fields). A flight card reading "XX
+  filter, sort or compare its own field (outputs skill, output fields). A flight card reading "XX
   234, 7:00 AM-3:31 PM, Nonstop, 5h 31m" should return `{ "flight_number": "XX 234",
   "departure_time": "2026-11-16T07:00:00-08:00", "arrival_time": "2026-11-16T15:31:00-05:00",
   "stops": 0, "duration_minutes": 331 }` rather than `{ "summary": "XX 234 7:00 AM ..." }`. The site's own text may stand in for one value that
   truly does not parse, with that field's description saying so; a record's whole text is only
-  an `include` section (core skill, optional sections).
+  an `include` section (outputs skill, optional sections).
 - **Clean output.** Every string is clean displayed text: no code, styles, markup, template
   leftovers, control labels or repeated entries. `finish_build` refuses an example whose output
   holds code, styles, markup or template leftovers, and gives the publication review the host's
@@ -98,16 +98,16 @@ first:
   whole list at once.
 - **Inputs.** Nothing the caller could vary is a literal, and every control the flow offers
   that narrows, orders or configures what the tool returns, a location included, is an optional
-  input, even one the request never mentioned and one you never asked about (core skill, the
-  input schema; the search skill, "Find the filters"). The one exception is a choice the request,
-  the caller or the owner declined, which is never an input for any caller (core skill), unless
+  input, even one the request never mentioned and one you never asked about (inputs
+  skill; the search skill, "Find the filters"). The one exception is a choice the request,
+  the caller or the owner declined, which is never an input for any caller (inputs skill), unless
   it is a costly choice a write still meets on its path (writes skill). Guardian counts such an input as
   part of the tool, never as scope drift or an unsupported claim. Each input you accept is
-  applied and read back (core skill, the input schema, and `AGENTS.md`; the search skill for a search). An input
+  applied and read back (inputs skill, and `AGENTS.md`; the search skill for a search). An input
   that tailors the answer, such as a location, store or vehicle, that the site won't apply
   returns what the site showed with the applied value beside the caller's and the site's
-  message, which review accepts in place of a refusal (core skill, "Inputs that tailor the
-  answer").
+  message, which review accepts in place of a refusal (tailoring
+  skill).
 - **Personal data.** No personal data from the session in source, schemas, examples or metadata:
   names, emails, account numbers, addresses or the owner's answers (the list below).
 - **Claims.** The name and description claim only what the example or session reached: a
@@ -138,16 +138,16 @@ first:
   - every applied filter or option is read back from the page as the value the site applied,
     such as the chosen option's label, never `true` ("Applied without readback");
   - a requested value the site does not offer throws `InvalidInput` with the site's choices, and
-    one the page ignored throws `InputNotApplied` unless it tailors the answer (core skill) or is
+    one the page ignored throws `InputNotApplied` unless it tailors the answer (tailoring skill) or is
     a search query the site corrected, returned with `applied_query` and `query_corrected` (search
     skill); with
     no results a sort has nothing to apply, so return the empty result ("Unapplied supplied
     input");
   - a free-text place, name or venue that matches several of the site's options equally takes
     the first in the site's order on a read and returns the one it used, and lists them for the
-    caller instead of picking one on a write (core skill, the input schema);
+    caller instead of picking one on a write (inputs skill);
   - a check that refuses a past date compares with today in the site's time zone, or the
-    place's, not with today in UTC (caller-input skill) ("Past date in UTC");
+    place's, not with today in UTC (rejections skill) ("Past date in UTC");
   - in a read signed out, each declared input is used, or changed from its default, by a passing
     case, and a case whose expectation you changed because the site itself gave another answer
     for that input names the capture of that answer, such as the site's no-results page for that
