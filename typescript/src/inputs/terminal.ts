@@ -148,8 +148,13 @@ const answerQuestion = (question: Question): Effect.Effect<unknown, InputRequest
         // An empty username, where the question offers it, declines the login.
         if (question.allowDecline === true && username?.trim() === "")
           return { declined: "public_only", saveLogin: false };
-        const password = yield* line("Password: ", true);
-        return { ...(username === undefined ? {} : { username }), password, saveLogin: false };
+        const password =
+          question.currentStep?.password === false ? undefined : yield* line("Password: ", true);
+        return {
+          ...(username === undefined ? {} : { username }),
+          ...(password === undefined ? {} : { password }),
+          saveLogin: false,
+        };
       }
       case "confirm": {
         const reply = (yield* line("[y/N] ")).trim().toLowerCase();
