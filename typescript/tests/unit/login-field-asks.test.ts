@@ -185,3 +185,27 @@ it("fails the ask after three answers the field cannot take", async () => {
   expect(ask.registered).toEqual([]);
   expect(ask.given.current).toEqual({});
 });
+
+it("asks again when an email answer is malformed, accepting a valid correction", async () => {
+  const ask = field();
+  const answering = owner(["not-an-email", "ada@example.com"], "text");
+  const result = await Effect.runPromise(
+    ask.ask(answering.asker, ["email", "phone"], undefined, false),
+  );
+  expect(result).toEqual({ slot: "email", value: "ada@example.com" });
+  expect(answering.requests).toHaveLength(2);
+  expect(ask.registered).toEqual([{ entity: "EMAIL", value: "ada@example.com" }]);
+  expect(ask.given.current).toEqual({ email: "ada@example.com" });
+});
+
+it("fails the ask after three malformed email answers", async () => {
+  const ask = field();
+  const answering = owner(["bad-email-1", "bad-email-2", "bad-email-3"], "text");
+  const result = await Effect.runPromise(
+    Effect.either(ask.ask(answering.asker, ["email"])),
+  );
+  expect(result).toMatchObject({ _tag: "Left", left: { operation: "autofill.ask" } });
+  expect(answering.requests).toHaveLength(3);
+  expect(ask.registered).toEqual([]);
+  expect(ask.given.current).toEqual({});
+});

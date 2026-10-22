@@ -36,11 +36,10 @@ export const answeredKind = (
   value: string,
   kinds: readonly LoginIdentifierKind[],
 ): LoginIdentifierKind | undefined => {
-  if (kinds.length === 1 && kinds[0] !== "phone") return kinds[0];
   if (kinds.includes("email") && emailShaped(value)) return "email";
   if (kinds.includes("phone") && phoneShaped(value)) return "phone";
   if (kinds.includes("account_number")) return "account_number";
-  return kinds.includes("email") ? "email" : undefined;
+  return undefined;
 };
 
 /** A ZIP or postal code the owner typed, trimmed; undefined if it cannot be one. */
