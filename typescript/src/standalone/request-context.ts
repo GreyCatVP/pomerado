@@ -25,7 +25,7 @@ import {
   sourceChunk,
   type SdkFiles,
 } from "../guardian/source.js";
-import { mintEntryNavigation, type ExecutionEvidence } from "../mint/contracts.js";
+import { mintEntryNavigation, type ExecutionEvidence, type WritePath } from "../mint/contracts.js";
 import { publicDefinitionPath } from "../guardian/publication.js";
 import {
   exampleOutputPath,
@@ -251,6 +251,8 @@ export interface ReviewStep {
   readonly note?: string;
   /** The agent's own description of the step, its execute call's intent; redacted for review. */
   readonly agentNote?: string;
+  /** The write path a write build's act step declares or revises; redacted for review. */
+  readonly writePath?: WritePath;
   /** Files Guardian may read besides the step's own, by their full paths. */
   readonly evidence?: ReadonlyMap<string, string>;
 }
@@ -311,9 +313,12 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
     let writes: (() => readonly WriteOutcome[]) | undefined;
     /** The build's judged live test batches, once the harness binds them. */
     let liveTests: Effect.Effect<readonly ReviewedLiveTestBatch[]> | undefined;
+    /** The build's recorded write path, once the mint state binds it. */
+    let writePath: (() => WritePath | undefined) | undefined;
     const host: MintReviewHost = {
       writes: () => writes?.() ?? [],
       liveTests: () => liveTests,
+      writePath: () => writePath?.(),
       repeatableRead: () => repeatableReadFor(buildEffect, claimed),
       browser: () => (navigated ? "active" : "not_opened"),
       // The page's place is redacted again on each read, as its capture is.
@@ -343,6 +348,17 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
           ...(taskUpdates.length === 0 ? {} : { taskUpdates: [...taskUpdates] }),
           screenedInput: secrets.redact(JSON.stringify(step.input)),
           ...(step.agentNote === undefined ? {} : { agentNote: secrets.redact(step.agentNote) }),
+          ...(step.writePath === undefined
+            ? {}
+            : {
+                writePath: {
+                  steps: step.writePath.steps.map(({ commit, does }) => ({
+                    commit,
+                    does: secrets.redact(does),
+                  })),
+                  ends: secrets.redact(step.writePath.ends),
+                },
+              }),
           screenedObservations: [
             JSON.stringify(observations),
             ...(step.note ? [step.note] : []),
@@ -740,6 +756,10 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
       /** Gives execution reviews the harness's judged live test batches. */
       bindLiveTests: (read: Effect.Effect<readonly ReviewedLiveTestBatch[]>) => {
         liveTests = read;
+      },
+      /** Gives every review the write session's recorded write path. */
+      bindWritePath: (read: () => WritePath | undefined) => {
+        writePath = read;
       },
     };
   });

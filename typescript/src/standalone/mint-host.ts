@@ -17,6 +17,7 @@ import {
   preflightTestInput,
   writeSessionBoundary,
 } from "../mint/step-checks.js";
+import { sessionEnteredMarks, writePathRefusal } from "../mint/write-session.js";
 import type { PomeradoRequest } from "./contracts.js";
 import type { StandaloneSession } from "./session.js";
 import type { RequestContext } from "./request-context.js";
@@ -163,10 +164,18 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
             writeSession: state.writeSession,
           });
         if (refusal !== undefined) return refusal;
-        const boundary = writeSessionBoundary(execution, {
-          buildEffect,
-          writeSessionStarted: state.writeSession.started,
-        });
+        const boundary =
+          writeSessionBoundary(execution, {
+            buildEffect,
+            writeSessionStarted: state.writeSession.started,
+          }) ??
+          (buildEffect === "write"
+            ? writePathRefusal(execution, {
+                started: state.writeSession.started,
+                path: state.writeSession.path,
+                enteredMarks: sessionEnteredMarks(state.writeSession.steps),
+              })
+            : undefined);
         return boundary === undefined
           ? { supported: true as const }
           : { supported: false as const, reason: boundary };

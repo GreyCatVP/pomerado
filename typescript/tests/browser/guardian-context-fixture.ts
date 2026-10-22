@@ -319,6 +319,12 @@ export const execution = (
   ...extra,
 });
 
+/** A write path naming `marks` in order, as a write build's first act step declares it. */
+export const writePath = (...marks: readonly string[]) => ({
+  steps: marks.map((commit) => ({ commit, does: `Sends the ${commit} step` })),
+  ends: "The site's confirmation of the task",
+});
+
 /** A read operation whose live step returns the page's main heading. */
 export const headingOperation = `import { Schema } from "effect";
 import { defineOperation } from "../runtime/index.js";

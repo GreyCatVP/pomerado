@@ -907,12 +907,23 @@ type ClearingWay = "changedExpectationBy" | "excusedBy" | "outsideSchema";
 
 /**
  * The site's own answer for the input that a `changedExpectationBy` lead needs a capture of, by
- * the lead's expectation: its results, its no-results state or its own controls refusing it.
+ * the lead's expectation: its results, its no-results state or its own controls refusing it. A
+ * lead marked `noMatch` expects a result, a count or total of zero, so it needs the site's
+ * no-results state.
  */
 type SiteAnswer = "results" | "no_results" | "refusal";
 
-const siteAnswerFor = (expectation: LiveTestExpectation): SiteAnswer =>
-  expectation === "result" ? "results" : expectation === "empty" ? "no_results" : "refusal";
+const siteAnswerFor = (lead: {
+  readonly expect: LiveTestExpectation;
+  readonly noMatch?: boolean;
+}): SiteAnswer =>
+  lead.expect === "result"
+    ? lead.noMatch === true
+      ? "no_results"
+      : "results"
+    : lead.expect === "empty"
+      ? "no_results"
+      : "refusal";
 
 /**
  * The response statuses that show a site refusing an input itself, for its shape or size. Never
@@ -937,7 +948,9 @@ const siteAnswerCapture: Readonly<Record<SiteAnswer, string>> = {
  */
 const clearedBy = (
   record: LiveTestRecord,
-  lead: { readonly id: string; readonly expect: LiveTestExpectation } | undefined,
+  lead:
+    | { readonly id: string; readonly expect: LiveTestExpectation; readonly noMatch?: boolean }
+    | undefined,
   schemaRead: boolean,
 ) => {
   const ways: ClearingWay[] = [
@@ -960,7 +973,7 @@ const clearedBy = (
       ways,
       note: `No passing case of this input expects another answer. Clears by ${others}; or a passing case of this input whose new expectation a capture shows the site giving: its own results, its own no-results state or its own controls refusing it (changedExpectationBy).`,
     };
-  const siteAnswer = siteAnswerFor(lead.expect);
+  const siteAnswer = siteAnswerFor(lead);
   return {
     ways,
     siteAnswer,
@@ -999,6 +1012,7 @@ const retiredViews = (
             runs: runs(testCase.input, testCase.expect, testCase.next_page === true),
             input: canonical([testCase.input, testCase.next_page === true]),
             expect: testCase.expect,
+            noMatch: testCase.noMatch === true,
             record,
           },
         ]

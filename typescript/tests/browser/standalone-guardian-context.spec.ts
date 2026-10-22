@@ -15,6 +15,7 @@ import {
   recordingGuardian,
   startSite,
   toolResult,
+  writePath,
   type RecordedReview,
 } from "./guardian-context-fixture.js";
 import {
@@ -443,7 +444,7 @@ const laterAsk = async (steps: {
             "src/again.mjs": approvingStep(steps.later),
             "explore/look.mjs": probe(),
           }),
-        () => [call("execute", act("src/tool.mjs"), "first")],
+        () => [call("execute", act("src/tool.mjs", undefined, writePath("submit")), "first")],
         ...(steps.between ?? []),
         () => [call("execute", act("src/again.mjs"), "later")],
         () => [call("execute", execution("explore", "explore/look.mjs"), "look")],
@@ -738,7 +739,7 @@ test("a confirmed update turns a read build into a write build, and later review
         () => [call("execute", execution("explore", "src/look.mjs"), "explore")],
         () => [call("request_input", saveQuestion, "ask")],
         () => [call("mint_update", toWrite(["save"]), "update")],
-        () => [call("execute", execution("act", "src/act.mjs"), "act")],
+        () => [call("execute", execution("act", "src/act.mjs", { writePath: writePath("save") }), "act")],
         () => [call("execute", execution("act", "src/look.mjs"), "read_back")],
       ],
     });
@@ -802,7 +803,7 @@ test("a read build that ran its live example becomes a write and runs the write"
         () => [call("execute", execution("example", "src/look.mjs"), "example")],
         () => [call("request_input", saveQuestion, "ask")],
         () => [call("mint_update", toWrite(["save"]), "update")],
-        () => [call("execute", execution("act", "src/act.mjs"), "act")],
+        () => [call("execute", execution("act", "src/act.mjs", { writePath: writePath("save") }), "act")],
       ],
     });
     expect(toolResult(last, "example")).toMatchObject({ status: "completed" });
@@ -904,7 +905,7 @@ test("a write build refuses a repeat of a write no outcome review showed did not
       guardian,
       turns: [
         () => patch({ "src/act.mjs": saveStep, "src/look.mjs": probe() }),
-        () => [call("execute", execution("act", "src/act.mjs"), "act_1")],
+        () => [call("execute", execution("act", "src/act.mjs", { writePath: writePath("save") }), "act_1")],
         () => [call("execute", execution("act", "src/act.mjs"), "act_2")],
         () => [call("execute", execution("test", "src/look.mjs"), "test")],
         () => [call("execute", execution("explore", "src/look.mjs"), "explore")],
@@ -961,7 +962,7 @@ test("a write build refuses a copy of a write, and Guardian sees the write befor
             "src/act-copy.mjs": saveStep,
             "src/act-rewritten.mjs": `// The same save, rewritten.\n${saveStep}`,
           }),
-        () => [call("execute", execution("act", "src/act.mjs"), "act_1")],
+        () => [call("execute", execution("act", "src/act.mjs", { writePath: writePath("save") }), "act_1")],
         () => [call("execute", execution("act", "src/act-copy.mjs"), "act_copy")],
         () => [call("execute", execution("act", "src/act-rewritten.mjs"), "act_rewritten")],
       ],
@@ -1000,7 +1001,7 @@ test("a write session runs the input its first act step read from the request, a
       turns: [
         () =>
           patch({ "src/read.mjs": readNote, "src/save.mjs": saveNote, "src/tool.mjs": saveNote }),
-        () => [call("execute", act("src/read.mjs", { note: "kept" }), "read")],
+        () => [call("execute", act("src/read.mjs", { note: "kept" }, writePath("save")), "read")],
         () => [call("execute", act("src/save.mjs", { note: "other" }), "changed")],
         () => [call("execute", act("src/save.mjs"), "save")],
         (request) => [
@@ -1053,7 +1054,7 @@ test("a write session refuses exampleInput that is not an object, and takes it o
       turns: [
         () => patch({ "src/look.mjs": probe(), "src/read.mjs": readNote }),
         () => [call("execute", act("src/look.mjs", "[1]"), "not_object")],
-        () => [call("execute", act("src/look.mjs"), "started")],
+        () => [call("execute", act("src/look.mjs", undefined, writePath("save")), "started")],
         () => [call("execute", act("src/read.mjs", { note: "late" }), "late")],
       ],
     });
@@ -1087,7 +1088,7 @@ test("a write session runs the caller's own input and refuses exampleInput besid
       turns: [
         () => patch({ "src/read.mjs": readNote }),
         () => [call("execute", act("src/read.mjs", { note: "other" }), "beside")],
-        () => [call("execute", act("src/read.mjs"), "read")],
+        () => [call("execute", act("src/read.mjs", undefined, writePath("save")), "read")],
       ],
     });
     expect(toolResult(last, "beside")).toMatchObject({ status: "unsupported" });

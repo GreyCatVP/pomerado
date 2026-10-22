@@ -1,6 +1,6 @@
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Schema } from "effect";
 import { describe, expect, it } from "vitest";
-import { MintFailure } from "../../src/mint/contracts.js";
+import { ExecutionRequest, MintFailure, type WritePath } from "../../src/mint/contracts.js";
 import {
   checkWriteSession,
   commitEvidenceOf,
@@ -10,6 +10,8 @@ import {
   sessionSentWrite,
   uncertainCommit,
   verifyFirstNotice,
+  writePathRefusal,
+  writePathRemaining,
   type WriteSessionMarks,
 } from "../../src/mint/write-session.js";
 
@@ -277,5 +279,147 @@ describe("a write session's publication check", () => {
       contract({ confirmation: "unverifiable", commits: ["place-order"] }),
     );
     expect(Exit.isSuccess(result) && result.value.declared).toBe("unverifiable");
+  });
+});
+
+describe("a write build's write path", () => {
+  const path = (...marks: readonly string[]): WritePath => ({
+    steps: marks.map((commit) => ({ commit, does: `Sends ${commit}` })),
+    ends: "The quote the site returns",
+  });
+  const quote = path("save-draft", "save-coverage", "get-quote");
+  const act = (writePath?: WritePath) => ({
+    purpose: "act" as const,
+    target: "liveBrowser" as const,
+    ...(writePath === undefined ? {} : { writePath }),
+  });
+  const session = (started: boolean, recorded?: WritePath, entered: readonly string[] = []) => ({
+    started,
+    path: recorded,
+    enteredMarks: new Set(entered),
+  });
+
+  it("names the marks no step entered yet, in path order", () => {
+    expect(writePathRemaining(quote, new Set(["save-draft"]))).toEqual([
+      "save-coverage",
+      "get-quote",
+    ]);
+    expect(writePathRemaining(quote, new Set(["get-quote", "save-coverage", "save-draft"]))).toEqual(
+      [],
+    );
+    expect(writePathRemaining(undefined, new Set())).toEqual([]);
+  });
+
+  it("is required on the session's first act step, and only there", () => {
+    expect(writePathRefusal(act(), session(false))).toContain(
+      "A write build's first act step declares writePath before anything is sent",
+    );
+    expect(writePathRefusal(act(quote), session(false))).toBeUndefined();
+    expect(writePathRefusal(act(), session(true, quote))).toBeUndefined();
+    // A session a host started before it kept paths runs on without one.
+    expect(writePathRefusal(act(), session(true))).toBeUndefined();
+    expect(writePathRefusal({ ...act(), purpose: "explore" }, session(false))).toBeUndefined();
+  });
+
+  it("may be revised to add steps, never to drop or reorder a mark the session entered", () => {
+    const entered = session(true, quote, ["save-draft", "save-coverage"]);
+    expect(
+      writePathRefusal(act(path("save-draft", "save-coverage", "save-property", "get-quote")), entered),
+    ).toBeUndefined();
+    // A step the site skips for this input may leave the path before the session enters it.
+    expect(writePathRefusal(act(path("save-draft", "save-coverage")), entered)).toBeUndefined();
+    expect(writePathRefusal(act(path("save-draft", "get-quote")), entered)).toContain(
+      "keeps every mark of the recorded path the session already entered, in the same order: save-coverage.",
+    );
+    expect(
+      writePathRefusal(act(path("save-coverage", "save-draft", "get-quote")), entered),
+    ).toContain("in the same order: save-coverage.");
+  });
+
+  it("names each mark once, and decodes on the execute request", () => {
+    const decode = Schema.decodeUnknownEither(ExecutionRequest);
+    const request = {
+      purpose: "act",
+      target: "liveBrowser",
+      entrypoint: "src/draft.mjs",
+      fixtureRefs: [],
+      caseFilter: [],
+      maxWorkers: 1,
+      timeoutSeconds: 30,
+    };
+    expect(decode({ ...request, writePath: quote })._tag).toBe("Right");
+    expect(decode({ ...request, writePath: path("save-draft", "save-draft") })._tag).toBe("Left");
+    expect(decode({ ...request, writePath: path("save draft") })._tag).toBe("Left");
+    expect(decode({ ...request, writePath: { steps: [], ends: "The quote" } })._tag).toBe("Left");
+  });
+
+  describe("at publication", () => {
+    const contract = (write: {
+      readonly confirmation: "message" | "readback";
+      readonly commits: readonly unknown[];
+    }) => ({ contract: { write }, inputDecodes: true });
+    const reason = (exit: Exit.Exit<unknown, unknown>) =>
+      Exit.isFailure(exit) && exit.cause._tag === "Fail" && exit.cause.error instanceof MintFailure
+        ? exit.cause.error.reason
+        : undefined;
+    const confirmed: WriteSessionMarks = { enteredMarks: ["place-order"], confirmation: "readback" };
+    const quoted = contract({
+      confirmation: "message",
+      commits: ["save-draft", "save-coverage", "get-quote"],
+    });
+    const draft: WriteSessionMarks = { enteredMarks: ["save-draft"], confirmation: "message" };
+    const rest: WriteSessionMarks = {
+      enteredMarks: ["save-coverage", "get-quote"],
+      confirmation: "message",
+    };
+    const run = (
+      steps: readonly WriteSessionMarks[],
+      extracted: ReturnType<typeof contract>,
+      writePath: WritePath | "none" = quote,
+    ) => {
+      let extractions = 0;
+      const result = Effect.runSyncExit(
+        checkWriteSession({
+          session: { steps },
+          step: steps.at(-1) ?? { enteredMarks: [] },
+          extract: Effect.sync(() => {
+            extractions++;
+            return extracted;
+          }),
+          ...(writePath === "none" ? {} : { writePath }),
+        }),
+      );
+      return { result, extractions };
+    };
+    const marksOf = (exit: Exit.Exit<unknown, unknown>) =>
+      Exit.isFailure(exit) && exit.cause._tag === "Fail" && exit.cause.error instanceof MintFailure
+        ? exit.cause.error.writePathMarks
+        : undefined;
+
+    it("refuses a session that has not entered every mark of its path, before reading the contract", () => {
+      const { result, extractions } = run([draft], quoted);
+      expect(reason(result)).toBe("write_path_unfinished");
+      expect(marksOf(result)).toEqual(["save-coverage", "get-quote"]);
+      expect(extractions).toBe(0);
+    });
+
+    it("refuses a contract that leaves a mark of the path out", () => {
+      const { result } = run(
+        [draft, rest],
+        contract({ confirmation: "message", commits: ["save-draft", "get-quote"] }),
+      );
+      expect(reason(result)).toBe("write_path_undeclared");
+      expect(marksOf(result)).toEqual(["save-coverage"]);
+    });
+
+    it("publishes the whole path, and a session with no recorded path as before", () => {
+      expect(run([draft, rest], quoted).result).toEqual(
+        Exit.succeed({ extracted: quoted, declared: "message" }),
+      );
+      const placing = contract({ confirmation: "readback", commits: ["place-order"] });
+      expect(run([confirmed], placing, "none").result).toEqual(
+        Exit.succeed({ extracted: placing, declared: "readback" }),
+      );
+    });
   });
 });

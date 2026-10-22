@@ -30,6 +30,7 @@
  *   `template`, `script`, `style`, `noscript`). An element a stylesheet hides, or an empty box,
  *   counts as visible, so an error refuses a good marker rather than passes a bad one.
  */
+import { pathMatches } from "./autofill-recipe.js";
 import type { AutofillSignedIn } from "./autofill-step.js";
 import { frameCrossing } from "./autofill-locate-code.js";
 
@@ -117,16 +118,19 @@ const pathOf = (value: string) => {
 
 /**
  * The refusal for a path alone that is the recorded login page's path (`loginPath`, a path or a
- * URL): a signed-out run lands there too.
+ * URL), any one segment at each place its `anySegments` lists (`pathMatches`): a signed-out run
+ * lands there too.
  */
 export const loginPathRefusal = (
   marker: AutofillSignedIn,
   loginPath: string | undefined,
+  anySegments?: readonly number[],
 ): "marker_is_login_path" | undefined => {
   if (marker.selector !== undefined || marker.urlPath === undefined || loginPath === undefined)
     return undefined;
   const login = pathOf(loginPath);
-  return login !== undefined && pathOf(marker.urlPath) === login
+  const path = pathOf(marker.urlPath);
+  return login !== undefined && path !== undefined && pathMatches(path, login, anySegments)
     ? "marker_is_login_path"
     : undefined;
 };

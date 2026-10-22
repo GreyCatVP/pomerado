@@ -11,7 +11,7 @@ import {
   type AutofillStepReport,
   type AutofillStepRequest,
 } from "../destinations/autofill-step.js";
-import { MintFailure, type ExecutionRequest } from "../mint/contracts.js";
+import { MintFailure, type ExecutionRequest, type WritePath } from "../mint/contracts.js";
 import { makeSecretHandles } from "../mint/secret-handles.js";
 import type { FileHandles } from "../mint/file-handles.js";
 import { makeSignInRecorder } from "../mint/sign-in-recorder.js";
@@ -204,16 +204,19 @@ export const mintState = (
     /**
      * The build's one write session: whether its first act step dispatched, and the agent's
      * `exampleInput` it runs when the caller sent none (fixed by the first act step that passed
-     * one), its act steps in order for publication's checks, and the confirm popups its act
-     * steps accepted.
+     * one), its recorded write path (the latest one an allowed act step that dispatched carried),
+     * its act steps in order for publication's checks, and the confirm popups its act steps
+     * accepted.
      */
     const writeSession: {
       started: boolean;
       input: Readonly<Record<string, unknown>> | undefined;
+      path: WritePath | undefined;
       readonly steps: (WriteSessionMarks & { readonly executionId: string })[];
     } & ConfirmSession = {
       started: false,
       input: undefined,
+      path: undefined,
       steps: [],
       acceptedConfirms: [],
       confirmSteps: new Set(),
@@ -338,6 +341,7 @@ export const mintState = (
         });
         return { recorder, markers, start, sessionSignIn, signInOrigins };
       });
+    context.bindWritePath(() => writeSession.path);
     let bound = yield* bindSite(context.siteOrigin, context.authenticationOrigins);
     // A later binding lives as long as the first: until the request's scope closes.
     const scope = yield* Effect.scope;

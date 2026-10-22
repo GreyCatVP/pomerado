@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import { confirmActionUnmatched } from "../browser/dialogs/expected.js";
 import type { CommitEvidence } from "../runtime/run-outcome.js";
-import { MintFailure } from "./contracts.js";
+import { MintFailure, type ExecutionRequest, type WritePath } from "./contracts.js";
 import { entrypointImportClosure } from "./operation-source.js";
 import { writeContractRefusal } from "./write-contract.js";
 import type { GuardianAction } from "../guardian/review-contracts.js";
@@ -108,6 +108,71 @@ export const sessionEnteredMarks = (steps: readonly WriteSessionMarks[]) => {
   return entered;
 };
 
+/** The commit marks of a recorded write path that `entered` lacks, in path order. */
+export const writePathRemaining = (
+  path: WritePath | undefined,
+  entered: ReadonlySet<string>,
+): readonly string[] =>
+  path === undefined ? [] : path.steps.map((step) => step.commit).filter((name) => !entered.has(name));
+
+/**
+ * The marks of the recorded path the session entered that a revision drops or moves out of their
+ * order. A revision may add marks anywhere, the ones the session entered off the path included.
+ */
+const enteredMarksLost = (
+  recorded: WritePath,
+  revised: WritePath,
+  entered: ReadonlySet<string>,
+) => {
+  const order = revised.steps.map((step) => step.commit);
+  const lost: string[] = [];
+  let next = 0;
+  for (const { commit } of recorded.steps) {
+    if (!entered.has(commit)) continue;
+    const at = order.indexOf(commit, next);
+    if (at === -1) lost.push(commit);
+    else next = at + 1;
+  }
+  return lost;
+};
+
+/**
+ * Why a write build's act step may not run with the write path it carries, if it may not, before
+ * any review or dispatch. A build's first act step declares its whole write path; a later one may
+ * revise it, keeping every mark of the recorded path the session already entered, in the same
+ * order. A session that started without a recorded path, as one a host started before it kept
+ * paths, runs on without one. Hosts apply it to a build's write session, never to a repair's.
+ */
+export const writePathRefusal = (
+  submitted: Pick<ExecutionRequest, "purpose" | "target" | "writePath">,
+  session: {
+    readonly started: boolean;
+    readonly path: WritePath | undefined;
+    readonly enteredMarks: ReadonlySet<string>;
+  },
+): string | undefined => {
+  if (submitted.purpose !== "act" || submitted.target !== "liveBrowser") return undefined;
+  if (submitted.writePath === undefined)
+    return session.started
+      ? undefined
+      : "A write build's first act step declares writePath before anything is sent: in steps, each step that saves or submits on the site through to the outcome the request asks for, by the commit mark its helper enters, in order; in ends, what the last step leaves the caller with. Guardian reviews the path as publication will review the tool, and the session runs until every mark on it is entered. Add writePath and execute again. Nothing was executed.";
+  if (session.path === undefined) return undefined;
+  const lost = enteredMarksLost(session.path, submitted.writePath, session.enteredMarks);
+  return lost.length === 0
+    ? undefined
+    : `A revised writePath keeps every mark of the recorded path the session already entered, in the same order: ${lost.join(", ")}. Correct writePath and execute again. Nothing was executed.`;
+};
+
+/**
+ * The receipt note of an act step after which marks of the recorded write path are not yet settled,
+ * as unentered or entered only by a step that lost its result: the session runs on until they are,
+ * and a confirmation the step recorded does not end it.
+ */
+export const writePathNotice = (remaining: readonly string[], confirmed: boolean) => ({
+  remaining,
+  instruction: `${confirmed ? "This step's confirmation does not end the write session. " : ""}The session's recorded write path has commit marks not yet settled (a step that lost its result may have entered them): ${remaining.join(", ")}. The session runs until every one is settled. Read back first where a receipt says so: a read-back that confirms the write settles the marks a lost step entered. Then run only steps that never ran, on the page as it stands; never redo one that finished or may have. When the page shows the path must change, such as a step the site skips for this input, declare the revised path in writePath on the next act step.`,
+});
+
 /** Whether a step of the session recorded a confirmation. */
 export const sessionConfirmed = (steps: readonly WriteSessionMarks[]) =>
   steps.some((entry) => entry.confirmation !== undefined);
@@ -126,15 +191,23 @@ export const sessionSentWrite = (session: { readonly steps: readonly WriteSessio
       step.action === "write" && step.possiblySent === true && step.assessment !== "not_done",
   );
 
-const sessionRefusal = (reason: NonNullable<MintFailure["reason"]>) =>
-  new MintFailure({ code: "PublicationUnavailable", reason });
+const sessionRefusal = (
+  reason: NonNullable<MintFailure["reason"]>,
+  writePathMarks?: readonly string[],
+) =>
+  new MintFailure({
+    code: "PublicationUnavailable",
+    reason,
+    ...(writePathMarks === undefined ? {} : { writePathMarks }),
+  });
 
 /**
  * A write session's checks before its composed script publishes, in order: the session sent its
- * write, then the script's contract, which `extract` reads offline only after that, declares a
- * confirmation and the commit marks the session entered, decodes the session's input and matches
- * the confirmation the named step recorded. Last, given `confirms`, the script names each step its
- * session accepted a confirm popup at. The composed script is never run.
+ * write and, given `writePath`, entered every mark of its recorded write path; then the script's
+ * contract, which `extract` reads offline only after that, declares a confirmation and the commit
+ * marks the session entered, decodes the session's input and matches the confirmation the named
+ * step recorded, and declares every mark of the recorded path. Last, given `confirms`, the script
+ * names each step its session accepted a confirm popup at. The composed script is never run.
  */
 export const checkWriteSession = <
   Extracted extends {
@@ -156,18 +229,29 @@ export const checkWriteSession = <
    * never match its recorded confirm. A host that runs this check on its own leaves it unset.
    */
   readonly confirms?: { readonly steps: Iterable<string>; readonly entrypoint: string };
+  /**
+   * The session's recorded write path, which its first act step declared and Guardian allowed. A
+   * host that kept none, as for a session started before hosts kept paths, leaves it unset.
+   */
+  readonly writePath?: WritePath;
 }) =>
   Effect.gen(function* () {
     const { session, step } = check;
     if (!sessionSentWrite(session)) return yield* sessionRefusal("write_not_submitted");
+    const enteredMarks = sessionEnteredMarks(session.steps);
+    const unrun = writePathRemaining(check.writePath, enteredMarks);
+    if (unrun.length > 0) return yield* sessionRefusal("write_path_unfinished", unrun);
     const extracted = yield* check.extract;
     const declared = extracted.contract.write?.confirmation;
     const refusal = writeContractRefusal(extracted.contract.write, extracted.inputDecodes, step, {
       confirmed: sessionConfirmed(session.steps),
-      enteredMarks: sessionEnteredMarks(session.steps),
+      enteredMarks,
     });
     if (refusal !== undefined || declared === undefined)
       return yield* sessionRefusal(refusal ?? "confirmation_undeclared");
+    const commits = extracted.contract.write?.commits ?? [];
+    const undeclared = writePathRemaining(check.writePath, new Set(commits.map(String)));
+    if (undeclared.length > 0) return yield* sessionRefusal("write_path_undeclared", undeclared);
     // A run accepts a confirm popup without asking only at the action the build accepted it at,
     // so the composed script must run each such action under the session's action id.
     if (check.confirms !== undefined) {

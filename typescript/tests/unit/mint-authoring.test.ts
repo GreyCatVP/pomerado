@@ -18,6 +18,8 @@ import {
   guardianPublicationPolicy,
   publicationLiveTestsPolicy,
   publicationOutputPolicy,
+  publicationWriteOutcomePolicy,
+  publicationWritePathPolicy,
 } from "../../src/guardian/publication.js";
 import { inputFeedbackInstruction } from "../../src/mint/input-feedback.js";
 import {
@@ -130,9 +132,14 @@ const contents = (skills: readonly SkillDescriptor[]) =>
  * it gathers that evidence before its first publication instead of learning it from a denial. The
  * file is the text the review reads, so a policy change reaches the minter in the same release.
  */
-it("installs the publication review's test and output rules for the minter", async () => {
-  const rules = `${publicationLiveTestsPolicy}\n\n${publicationOutputPolicy}`;
-  for (const part of [publicationLiveTestsPolicy, publicationOutputPolicy])
+it("installs the publication review's test, output and write path rules for the minter", async () => {
+  const rules = `${publicationLiveTestsPolicy}\n\n${publicationOutputPolicy}\n\n${publicationWriteOutcomePolicy} ${publicationWritePathPolicy}`;
+  for (const part of [
+    publicationLiveTestsPolicy,
+    publicationOutputPolicy,
+    publicationWriteOutcomePolicy,
+    publicationWritePathPolicy,
+  ])
     expect(guardianPublicationPolicy).toContain(part);
   const root = await authoringCopy((_path, text) => composeHostText(text));
   try {
@@ -445,6 +452,23 @@ const renderedTexts = async (directory: string, render?: (text: string) => strin
   for (const [path, text] of guide.files) texts.set(`workspace/${path}`, text);
   return texts;
 };
+
+/*
+ * A step that lost its result may have entered a mark of the recorded write path, so the
+ * publication skill's row for an unfinished path asks for the read-back first and never for that
+ * step again.
+ */
+it("never tells the minter to run a write path's step that may have committed again", async () => {
+  const publication = (await renderedTexts("typescript/authoring")).get("publication") ?? "";
+  const row = publication
+    .split("\n")
+    .find((line) => line.includes("`write_path_unfinished`"))
+    ?.replace(/\s+/g, " ");
+  expect(row).toContain(
+    "Read back first where a receipt says so; run only steps that never ran, or declare a revised path when the site skips one; never redo one that finished or may have.",
+  );
+  expect(row).not.toMatch(/Run the steps `writePathMarks` names/);
+});
 
 it("gives the local host and a composing host the same shared guidance", async () => {
   // A host that composes empty text into every section keeps only what is shared.
@@ -1097,17 +1121,17 @@ it("renders the pinned standalone authoring", async () => {
       .filter(([path]) => path !== "reference/publication-review.md")
       .map(([path, text]) => [sha256(text), `workspace/${path}`]),
   ]).toStrictEqual([
-    ["a9dbd4ce6b6f06f18b31235b910ee5a82b55d1d750fc89cade0326aa95428939", "core"],
+    ["92db9c4c22a4abf5cc51200f267e9dcaba133d213a0b0181ad12f3973b7ae619", "core"],
     ["a896a59d7b924a2940a90437b8d4488cd515c4f4afc70da9fe14953b1583dd93", "search"],
-    ["e1b24b29d645071fa265f37d0fae3bb5be2b38798a32ecdbd7d5a6826a1c9248", "auth"],
-    ["6c94541384e6a8133606bc1f86f7a3ba428943bf28be1108134a4763575c16bc", "testing"],
+    ["4685c83739eac20c5ee28d64c8dace6df03d12e4e6ced6c93e08479fd7b855fd", "auth"],
+    ["ea6e7780a9a9028d806436de84488f20687fd292bb0d39ea01652b521c705772", "testing"],
     ["3cc71d02f70447f1de02e062695095682a0cabab4ed668abe1309d017bc0cf83", "pagination"],
-    ["da972d9b65ff424210686366db36843a6aa966dce4dbb203fcfcfcaad9f84853", "forms"],
-    ["4dec1571c30dec8467834a57399769a0c6d63c5fefa617e0d9fbb47c3902d300", "writes"],
+    ["1e5ba533a9a77f6ebeda8ab82979f82d085b84540bb0b0ce7f37722e32366de3", "forms"],
+    ["dc3002bcc8fbab8c7956e16c7a7bf297b746e245f37c4e746f4ad280040b7c4d", "writes"],
     ["01eb1c98d8945987929ca3d8c68d4d848e64415d2042fc844166a490ca9457cb", "cart"],
     ["4423c6fd332f1c3d3b17e3e5ea988aa564e3bb9d0d94838d85558cdecd987fb9", "caller-input"],
-    ["3855dfaddc3e2ef61282b67344e61f667723f120dd0cd33d70d394504aa274ab", "publication"],
-    ["cc8954534e8490523ff8e9e3299a5bce5609b1b6ebcd25a10cf1a008bc161862", "workspace/AGENTS.md"],
+    ["6a6c8e632adfa6d7a95640498fc006fe904b5b569010c836c21b37f38fbf290a", "publication"],
+    ["7afa42f757e1cbafa0fbdda2ecb1d70a9ad7cc01ed11f1cf7d6400b7fb27be37", "workspace/AGENTS.md"],
     ["9501ae9c273d5d4db8976a544879f7aee44212c8a616b00e74263dcd3c593035", "workspace/README.md"],
   ]);
 });
@@ -1228,7 +1252,7 @@ it("renders the search URL fast path only when a host turns it on", async () => 
     [sha256(on.agents), "workspace/AGENTS.md"],
   ]).toStrictEqual([
     ["ea3c3bc8472c8c9db7aa9dd9b99b682f525f5ab55c091b944946dcf75f5ec83e", "search"],
-    ["c237d72fe99b05a963fd97cbaacfc591f82fe541289c57cb021f43f2a509a5b0", "workspace/AGENTS.md"],
+    ["2717309c2761b3e5984e09e9178e6dbd58395a447c97395f4f5abfead9b1e045", "workspace/AGENTS.md"],
   ]);
   expect(on.digests.filter(([, name]) => name !== "search")).toStrictEqual(
     off.digests.filter(([, name]) => name !== "search"),

@@ -1011,3 +1011,55 @@ it("refuses an approval before any request carried the identifier", async () => 
   expect(steps(fake)).toEqual(["ask:missing_credentials"]);
 });
 
+
+// A screen a cookie or consent notice covered records the notice's own control as `dismiss`: the
+// replay hands it to the host's fill, which clicks it before typing when the page shows it.
+const coveredSite = () =>
+  scriptedSite({
+    entry: "login",
+    screens: { login: loginScreen, account: [] },
+    fill: (_page, values) => (signedLogin(values) ? { next: "account", signIn: true } : {}),
+  });
+const coveredRecipe: SignInRecipe = {
+  version: 6,
+  steps: [{ ...loginStep, dismiss: "#consent-accept" }],
+  signedIn: { selector: "#account" },
+};
+
+it("hands a recorded screen's dismiss to the host's fill", async () => {
+  const fake = coveredSite();
+  const dismissed: (string | undefined)[] = [];
+  const fill = fake.browser.fill;
+  fake.browser = {
+    ...fake.browser,
+    fill: (input) => {
+      dismissed.push(input.step.dismiss);
+      return fill(input);
+    },
+  };
+  const { result } = await signIn(coveredRecipe, fake);
+  expect(result).toEqual(Either.right({ alreadySignedIn: false }));
+  expect(dismissed).toEqual(["#consent-accept"]);
+});
+
+it("ends a replay whose submit a notice still caught as blocked, having sent nothing", async () => {
+  const fake = scriptedSite({
+    entry: "login",
+    screens: { login: loginScreen, account: [] },
+    fill: () => ({
+      report: {
+        outcome: "filled",
+        fields: [
+          { slot: "username", status: "filled" },
+          { slot: "password", status: "filled" },
+        ],
+        submit: "blocked",
+        blockedBy: { tag: "div", id: "consent", role: null, ariaLabel: null, className: null },
+        url: `${origin}/login`,
+      },
+    }),
+  });
+  const { result } = await signIn(coveredRecipe, fake);
+  expect(result).toMatchObject(Either.left({ reason: "submit_blocked" }));
+  expect(steps(fake)).toEqual(["ask:missing_credentials", "fill:login"]);
+});

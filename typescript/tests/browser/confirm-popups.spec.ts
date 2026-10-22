@@ -15,7 +15,13 @@ import { noIncidents } from "../../src/runtime/incidents.js";
 import { InputRequestFailure, type InputRequest } from "../../src/runtime/input-request.js";
 import { createPomerado } from "../../src/standalone/pomerado.js";
 import { RunOutcomeFailure } from "../../src/standalone/run-report.js";
-import { call, executionIdOf, recordingGuardian, toolResult } from "./guardian-context-fixture.js";
+import {
+  call,
+  executionIdOf,
+  recordingGuardian,
+  toolResult,
+  writePath,
+} from "./guardian-context-fixture.js";
 import { act, mint } from "./standalone-mint-fixture.js";
 import { runExample } from "./authoring-fixture.js";
 import {
@@ -165,7 +171,7 @@ const mintOrder = async (
           },
         },
       ],
-      () => [call("execute", act("src/order.mjs", named ?? {}), "place")],
+      () => [call("execute", act("src/order.mjs", named ?? {}, writePath("place")), "place")],
       (request) => [
         call(
           "finish_build",
@@ -323,7 +329,7 @@ test("a write whose composed script raises its accepted confirm under another st
             placeOrder.replace('step:"place-order"', 'step:"submit-order"'),
           ),
         ],
-        () => [call("execute", act("src/order.mjs", {}), "place")],
+        () => [call("execute", act("src/order.mjs", {}, writePath("place")), "place")],
         (request) => [
           call(
             "finish_build",

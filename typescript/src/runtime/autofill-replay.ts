@@ -34,9 +34,14 @@ import {
   type OffScreens,
 } from "./autofill-replay-pages.js";
 
-/** A recorded screen's page as this replay knows it: a workspace screen's on its workspace origin. */
-const pageOf = <E extends YieldableError, V extends string, L extends AutofillLogin>(replay: Replay<E, V, L>, recorded: SignInRecipeStep) =>
-  resolvedPage(recorded, replay.progress.workspace) ?? recorded.page;
+/**
+ * A recorded screen's page as this replay knows it, a workspace screen's on its workspace origin,
+ * with the segments it lists.
+ */
+const pageOf = <E extends YieldableError, V extends string, L extends AutofillLogin>(replay: Replay<E, V, L>, recorded: SignInRecipeStep) => ({
+  page: resolvedPage(recorded, replay.progress.workspace) ?? recorded.page,
+  anySegments: recorded.anySegments,
+});
 
 /** A recorded screen the host refused: its step event says which check, then the replay ends. */
 const refusedScreen = <E extends YieldableError, V extends string, L extends AutofillLogin>(

@@ -886,6 +886,16 @@ See the compiling `references/variants.ts` example.
 
 <!-- pomerado:section core.layout-captures -->
 
+## Cookie banners
+
+Whenever a cookie or tracking consent banner shows, dismiss it before you do anything else on the
+page: in an `explore`, in each sign-in step as its `dismiss` (the auth skill), and in the tool's
+own code, which dismisses it on every run where it shows. Use the banner's own control, in this
+order: its close or dismiss control, then one that rejects or declines what is not essential, then
+accept, only when that is the only way out. Never click anything else in the banner, such as its
+settings or partner lists. A request that says otherwise about cookies wins. This is only for a
+banner about cookies or tracking, never a marketing prompt or terms the site asks you to accept.
+
 ## Safety defaults
 
 Turn safety defaults off, on every tool, a read or a write. A preselected option whose only effect is to

@@ -142,6 +142,22 @@ describe("decodeSignInRecipe", () => {
         signedIn,
       },
     ],
+    [
+      "version 6 with a screen a covering notice's control dismissed, beside a code step its key submits",
+      {
+        version: 6,
+        steps: [
+          { ...steps[0], dismiss: "#consent-accept" },
+          steps[1],
+          {
+            page: "https://example.test/login/code",
+            fields: [{ selector: "#code", slot: "code" }],
+            submitKey: "Enter",
+          },
+        ],
+        signedIn,
+      },
+    ],
     ["version 1 with a code split across 7 one-character boxes", boxedCodeRecipe(7)],
     ["version 1 with a code split across 8 one-character boxes", boxedCodeRecipe(8)],
   ])("reads %s", (_name, recipe) => {
@@ -155,7 +171,7 @@ describe("decodeSignInRecipe", () => {
   });
 
   it("refuses a version it does not know, so a run never drops what that version adds", () => {
-    expect(decodeSignInRecipe(JSON.stringify({ version: 6, steps, signedIn }))).toBe(
+    expect(decodeSignInRecipe(JSON.stringify({ version: 8, steps, signedIn }))).toBe(
       "unknown_version",
     );
   });
@@ -318,6 +334,24 @@ describe("decodeSignInRecipe", () => {
       "a version 5 step with a key this host does not know",
       JSON.stringify({ version: 5, steps: [{ ...steps[0], submitAfter: 1 }], signedIn }),
     ],
+    // `dismiss` is version 6's: an older version that carries it is refused, never replayed
+    // without dismissing the notice.
+    [
+      "a version 5 step that dismisses a notice",
+      JSON.stringify({ version: 5, steps: [{ ...steps[1], dismiss: "#accept" }], signedIn }),
+    ],
+    [
+      "a version 6 step whose dismiss is its own submit",
+      JSON.stringify({ version: 6, steps: [{ ...steps[1], dismiss: "#sign-in" }], signedIn }),
+    ],
+    [
+      "a version 6 step whose dismiss is one of its fields",
+      JSON.stringify({ version: 6, steps: [{ ...steps[1], dismiss: "#password" }], signedIn }),
+    ],
+    [
+      "a version 6 step with a key this host does not know",
+      JSON.stringify({ version: 6, steps: [{ ...steps[0], submitAfter: 1 }], signedIn }),
+    ],
   ])("refuses %s as invalid", (_name, text) => {
     expect(decodeSignInRecipe(text)).toBe("invalid");
   });
@@ -424,6 +458,22 @@ describe("signInRecipe", () => {
     const recipe = signInRecipe([recorded, code], signedIn, { workspace: { parent: "example.test" } });
     expect(recipe).toMatchObject({ version: 5, workspace: { parent: "example.test" } });
     expect(recipe.steps[1]).toEqual({ ...code });
+    const text = signInRecipeText(recipe);
+    expect(decodeSignInRecipe(text)).toEqual(recipe);
+    expect(Object.keys(JSON.parse(text) as object)).toEqual([
+      "version",
+      "workspace",
+      "steps",
+      "signedIn",
+    ]);
+  });
+
+  it("writes version 6 only for a step that dismissed a covering notice, keeping a workspace relation, and reads it back", () => {
+    const covered = { ...recorded, dismiss: "#consent-accept" };
+    expect(signInRecipe([recorded], signedIn).version).toBe(1);
+    const recipe = signInRecipe([covered], signedIn, { workspace: { parent: "example.test" } });
+    expect(recipe).toMatchObject({ version: 6, workspace: { parent: "example.test" } });
+    expect(recipe.steps[0]).toMatchObject({ dismiss: "#consent-accept" });
     const text = signInRecipeText(recipe);
     expect(decodeSignInRecipe(text)).toEqual(recipe);
     expect(Object.keys(JSON.parse(text) as object)).toEqual([

@@ -1,5 +1,6 @@
 import { Either, Schema } from "effect";
 import { SignInRecipe, type SignInRecipeStep } from "../destinations/sign-in-recipe.js";
+import { pageMatches } from "../destinations/autofill-recipe.js";
 import {
   loginPathRefusal,
   matchSignedOutSnapshots,
@@ -81,7 +82,11 @@ export type SignInVersionRule =
   // alone, so a host that permits sign-in on another site's origin, such as an identity
   // provider's, drops this rule's findings itself and still gets every other rule, https
   // included. A workspace step without a valid relation is also refused as `workspace_parent`.
-  | "foreign_origin";
+  | "foreign_origin"
+  // A step lists segments written as `*` (version 7's `anySegments`) on a page off the site's own
+  // origin that is no workspace step, such as another site's sign-in, or on the page the entry URL
+  // opens, which a run opens rather than matches.
+  | "wildcard_placement";
 
 /** A refused part, by its path in the version, such as `recipe.steps[2].submit`. */
 export interface SignInVersionFinding {
@@ -223,6 +228,12 @@ export const checkSignInVersion = (
     if (step.origin !== "workspace" && !secure(step.page)) refuse("insecure_origin", `${at}.page`);
     if (step.origin === "workspace" ? relation === undefined : !onSite(siteOrigin, step.page))
       refuse("foreign_origin", `${at}.page`);
+    if (
+      step.anySegments !== undefined &&
+      ((step.origin !== "workspace" && URL.parse(step.page)?.origin !== siteOrigin) ||
+        pageMatches(version.entryUrl, step))
+    )
+      refuse("wildcard_placement", `${at}.anySegments`);
     if (step.popup !== undefined) {
       if (namesIdentityOrPrivateMask(belowDomain(step.popup.origin), values))
         refuse("page_names_contact", `${at}.popup.origin`);
@@ -253,8 +264,8 @@ export const checkSignInVersion = (
     return findings;
   }
   if (
-    [version.entryUrl, ...steps.map((step) => step.page)].some(
-      (page) => loginPathRefusal(marker, page) !== undefined,
+    [{ page: version.entryUrl, anySegments: undefined }, ...steps].some(
+      (step) => loginPathRefusal(marker, step.page, step.anySegments) !== undefined,
     )
   )
     refuse("marker_is_login_path", "recipe.signedIn.urlPath");

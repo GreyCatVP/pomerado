@@ -340,6 +340,7 @@ export const mintPublication =
             step: sample.journal,
             extract,
             confirms: { steps: writeSession.confirmSteps, entrypoint: publication.entrypoint },
+            ...(writeSession.path === undefined ? {} : { writePath: writeSession.path }),
           })
         : undefined;
       const { files, sources, signIn, result } = session?.extracted ?? (yield* extract);

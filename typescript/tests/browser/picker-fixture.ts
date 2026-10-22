@@ -15,6 +15,17 @@ export const call = async (page: Page, body: string, timeoutSec = 20) => {
   return answer.success ? { result: answer.result } : { error: answer.error };
 };
 
+/** Like `call`, for a call that fails: its error and the first line of its stack, as a host logs them. */
+export const callFailure = async (page: Page, body: string, timeoutSec = 20) => {
+  const answer = await makeLocalKernel(page).browsers.playwright.execute("session-1", {
+    timeout_sec: timeoutSec,
+    code: `${pickerCode}\nconst fast = { settleMs: 120, holdMs: 120, timeout: 8000 };\n${body}`,
+  });
+  return answer.success
+    ? { result: answer.result }
+    : { error: answer.error, stack: String(answer.stderr ?? "").split("\n")[0] };
+};
+
 export const origin = "https://picker.test";
 
 /** A JSON answer for one fixture request, after `delayMs`, as a site's API gives it. */

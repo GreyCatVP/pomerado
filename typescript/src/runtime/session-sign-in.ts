@@ -6,6 +6,7 @@ import type {
   AutofillStep,
   AutofillStepReport,
 } from "../destinations/autofill-step.js";
+import { pageMatches } from "../destinations/autofill-recipe.js";
 import { failureDetail, type FailureDetail } from "./failure-detail.js";
 import {
   InputRequestFailure,
@@ -66,11 +67,9 @@ export const placeOf = (page: string | undefined) => {
   return url === null ? undefined : `${url.origin}${pathOf(url.pathname)}`;
 };
 
-/** Whether the page is one of the recorded sign-in screens. */
-const onSignInScreen = (url: string | undefined, steps: readonly { readonly page: string }[]) => {
-  const here = url === undefined ? undefined : placeOf(url);
-  return here !== undefined && steps.some((step) => placeOf(step.page) === here);
-};
+/** Whether the page is one of the recorded sign-in screens (`pageMatches`). */
+const onSignInScreen = (url: string | undefined, steps: SessionCheckRecipe["steps"]) =>
+  url !== undefined && steps.some((step) => pageMatches(url, step));
 
 const markerFailure = (failed: string) =>
   failed === "indicator_not_visible" ||
@@ -92,7 +91,10 @@ const onMarkerPath = (url: string | undefined, urlPath: string, failed: string) 
 
 /** What a session check reads of a recorded sign-in: its screens and its marker's path. */
 export interface SessionCheckRecipe {
-  readonly steps: readonly { readonly page: string }[];
+  readonly steps: readonly {
+    readonly page: string;
+    readonly anySegments?: readonly number[] | undefined;
+  }[];
   readonly signedIn: { readonly urlPath?: string | undefined };
 }
 

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { call, serve, submitted } from "./picker-fixture.js";
+import { call, callFailure, serve, submitted } from "./picker-fixture.js";
 
 // The picker helper, run as a Kernel call body runs it, on synthetic pages that each model one
 // kind of picker or one way a picker misbehaves. Chromium must generate the events: the widgets
@@ -824,9 +824,46 @@ test("pickValue fails as options_loading when the list never finishes loading", 
 <script>document.getElementById("account").addEventListener("input", () => {
   document.getElementById("box").innerHTML = '<div class="spinner" role="progressbar" style="width:20px;height:20px">…</div>';
 });</script>`);
-  expect(await call(page, `return await pickValue(page.getByLabel("Account"), "Savings", { ...fast, timeout: 2000 });`)).toEqual({
+  // The reason stays fixed, as code compares it; the stack's first line, which a host logs, and
+  // the failure's loading say what still showed: kinds and counts, never the page's text.
+  expect(await callFailure(page, `return await pickValue(page.getByLabel("Account"), "Savings", { ...fast, timeout: 2000 });`)).toEqual({
     error: "options_loading",
+    stack: "PickerFailure: options_loading (1 new loading sign: progress bar (div) on the page)",
   });
+  expect(
+    await call(
+      page,
+      `try { await pickValue(page.getByLabel("Account"), "Savings", { ...fast, timeout: 2000 }); }
+      catch (error) { return { name: error.name, message: error.message, loading: error.loading }; }`,
+    ),
+  ).toEqual({
+    result: {
+      name: "PickerFailure",
+      message: "options_loading",
+      loading: {
+        signs: 1,
+        kinds: [{ sign: "progressbar", tag: "div", where: "page" }],
+        rows: 0,
+        listBusy: false,
+        requests: 0,
+        requestTypes: [],
+        oldestRequestMs: 0,
+        answered: null,
+      },
+    },
+  });
+});
+
+test("pickValue's options_loading names a request its typing started that never answered", async ({ page }) => {
+  await serve(
+    page,
+    `<label>Account <input id="account" autocomplete="off"></label><ul id="accounts" role="listbox"></ul>
+<script>document.getElementById("account").addEventListener("input", (event) => { fetch("/accounts?q=" + encodeURIComponent(event.target.value)); });</script>`,
+    () => ({ body: [], delayMs: 5000 }),
+  );
+  const failed = await callFailure(page, `return await pickValue(page.getByLabel("Account"), "Savings", { ...fast, timeout: 2000 });`);
+  expect(failed.error).toBe("options_loading");
+  expect(failed.stack).toMatch(/^PickerFailure: options_loading \(1 request it started in flight \(fetch, \d+\.\d s\)\)$/u);
 });
 
 test("pickValue waits for a site's own answered signal when given one", async ({ page }) => {

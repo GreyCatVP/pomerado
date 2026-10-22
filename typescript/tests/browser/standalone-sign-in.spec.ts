@@ -26,6 +26,7 @@ import {
   shopAccount,
   shopWorkspaces,
   shopCode,
+  teamAccounts,
   type Shop,
 } from "./shop-fixture.js";
 
@@ -894,8 +895,20 @@ const noteMinter = (
   signIn: readonly unknown[] = [identitySignIn],
   stopAfterCheck = false,
 ) => {
+  // Each step carries the note's one-save write path; the first one that runs records it.
   const act = (entrypoint: string, callId: string) =>
-    execute("act", { entrypoint, intent: "Save the note to the account" }, callId);
+    execute(
+      "act",
+      {
+        entrypoint,
+        intent: "Save the note to the account",
+        writePath: {
+          steps: [{ commit: "save", does: "Saves the note" }],
+          ends: "The site's confirmation of the saved note",
+        },
+      },
+      callId,
+    );
   const save = act("src/tool.mjs", "save");
   const finish = (request: ModelRequest): Output => {
     if (resultOf(request, "save") === undefined) return [save];
@@ -2097,7 +2110,7 @@ test("a recipe of a version this host does not know is refused before the run si
       endpoint,
       answers(asked),
       accountReader({
-        recipe: { ...loginRecipe(shop.origin), version: 6 },
+        recipe: { ...loginRecipe(shop.origin), version: 8 },
         entryUrl: `${shop.origin}/login`,
       }),
       `${shop.origin}/account`,
@@ -2109,6 +2122,58 @@ test("a recipe of a version this host does not know is refused before the run si
     });
     expect(asked).toEqual([]);
     expect(shop.state.loginPosts).toBe(0);
+  });
+});
+
+/** The team sign-in's recipe, version 7: its password screen's team segment is written as `*`. */
+const teamRecipe = (origin: string) => ({
+  version: 7,
+  steps: [
+    {
+      page: `${origin}/team-sign-in`,
+      fields: [{ selector: "#username", accepts: ["username"] }],
+      submit: "#next",
+      submittedBy: "host",
+    },
+    {
+      page: `${origin}/team/*/password`,
+      anySegments: [1],
+      fields: [{ selector: "#password", slot: "password" }],
+      submit: "#sign-in",
+      submittedBy: "host",
+    },
+  ],
+  signedIn: { selector: "#account" },
+});
+
+test("one version 7 recipe signs in two logins whose password screens sit on their own teams' paths", async () => {
+  test.info().annotations.push({
+    type: "slow",
+    description: "Chromium and two runs through two recorded sign-in screens",
+  });
+  test.setTimeout(120_000);
+  await withShop(async (shop, endpoint) => {
+    for (const account of [teamAccounts.a, teamAccounts.b]) {
+      const asked: InputRequest[] = [];
+      const login = makeInputAsker((request) =>
+        Effect.sync(() => {
+          asked.push(request);
+          return Object.fromEntries(
+            request.questions.map((question) => [question.id, { ...account, saveLogin: false }]),
+          );
+        }),
+      );
+      const result = await runInNewSession(
+        endpoint,
+        login,
+        accountReader({ recipe: teamRecipe(shop.origin), entryUrl: `${shop.origin}/team-sign-in` }),
+        `${shop.origin}/account`,
+      );
+      expect(result).toEqual(Either.right({ signedIn: true }));
+      expect(reasons(asked)).toEqual(["missing_credentials"]);
+    }
+    // Each login's password went to its own team's path.
+    expect(shop.state.teamSignIns).toEqual(["a", "b"]);
   });
 });
 
@@ -2987,6 +3052,12 @@ test("a later build in the same session keeps no signed-in page as a signed-out 
   });
 });
 
+/** A shop write's path: one order, as a write build's first act step declares it. */
+const shopPath = {
+  steps: [{ commit: "place-order", does: "Places the order" }],
+  ends: "The shop's order confirmation",
+};
+
 test("the local minter's marker check loads no page once the write session started", async () => {
   test.info().annotations.push({
     type: "slow",
@@ -3010,7 +3081,7 @@ test("the local minter's marker check loads no page once the write session start
           [
             execute(
               "act",
-              { entrypoint: "src/search.mjs", intent: "Search the shop" },
+              { entrypoint: "src/search.mjs", intent: "Search the shop", writePath: shopPath },
               "act_search",
             ),
           ],
@@ -3066,7 +3137,7 @@ test("a sign-in screen the host fills while a write is unresolved reaches the ou
             [
               execute(
                 "act",
-                { entrypoint: "src/login.mjs", intent: "Open the sign-in page" },
+                { entrypoint: "src/login.mjs", intent: "Open the sign-in page", writePath: shopPath },
                 "act_login",
               ),
             ],

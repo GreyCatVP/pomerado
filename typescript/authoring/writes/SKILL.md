@@ -55,6 +55,24 @@ add, save or submit anything there, except one made-up key in the site's own for
 serial past any the site lists, per input that takes a record's own key, looked up once in the
 site's own lookup to see what it shows for a key it has no record of (core skill).
 
+Settle the whole path before the first `act` step, from the request and what read-only
+exploration shows, such as the form's list of pages or steps: every step that saves or submits
+on the site, through to the outcome the request asks for, such as the quote or decline, the
+placed order or the confirmed booking; prefer not to end at a saved draft or a new account on
+the way to it. Publication judges the finished tool by the same rule
+(`reference/publication-review.md`). Declare it as `writePath` on the first `act` step: in
+`steps`, each step that saves or submits, in order, with the `commit` mark its helper will
+enter and what it saves (`does`); in `ends`, what the last step leaves the caller with.
+Guardian reviews the path before anything is sent, and the host keeps it: the session is not
+over until every mark on it is entered, so a step that confirms earlier leaves the session
+open, and its receipt's `writePath` lists the marks not yet settled. When the page shows the
+path must change, such as a page the site skips or adds for this input, declare the revised
+path in `writePath` on the next `act` step, keeping every mark already entered. When no single
+session can reach the outcome, such as a step that waits for another person's approval, an
+emailed link or a later date, or Guardian denies the path for that, end with `report_blocked`
+reason `site_lacks_capability` before the first `act` step, naming that step: a build has one
+write session, never a second.
+
 Read the path's options with read-only exploration where you can, and settle them before the
 first `act` step where possible: ask with
 `request_input` about the ones the caller's input does not settle, as `AGENTS.md` ("Try
@@ -180,10 +198,10 @@ Author each step as a Kernel script under `src/` with the caller's input schema 
 core skill), and keep the flow's calls in a module the composed script will import
 too. Run each step with `execute` purpose `act`, target `liveBrowser`.
 
-- The first `act` step claims the build's write. The host resets the browser to
-  the site origin page first, with fresh page state that keeps the browser's cookies
-  and site storage (a signed-in build keeps its session), so that step starts the flow
-  there and sets every value its input controls itself.
+- The first `act` step claims the build's write. It carries the `writePath` (above). The
+  host resets the browser to the site origin page first, with fresh page state that keeps
+  the browser's cookies and site storage (a signed-in build keeps its session), so that
+  step starts the flow there and sets every value its input controls itself.
 - Later steps continue on the page exactly as the previous step left it. Keep steps
   small and read the actual state after each submission. On multi-step forms, a
   button named Continue, Next or Save may save a draft, persist that page, or finish
@@ -427,7 +445,11 @@ marking the same commit steps as the session. A script declared `unverifiable` c
 `verified`. One that declares no commit marks is refused as `commit_marks_undeclared`,
 and one that declares a mark no `act` step of the session entered is refused as
 `commit_marks_unentered`. If the declaration names the wrong marks, correct it to
-match the marks the session actually entered. If the completed session entered no
+match the marks the session actually entered. It declares every mark of the session's
+recorded `writePath`, in order: one that leaves a mark out is refused as
+`write_path_undeclared`, and a publication before the session entered every mark of the
+path as `write_path_unfinished`, which names the marks not yet settled while the session
+stays open. If the completed session entered no
 marks, it cannot publish: changing its source or entering a mark in a later read
 cannot show that the earlier commit was marked. End the build and explain that
 the task completed but its commit steps were not marked; never repeat the write

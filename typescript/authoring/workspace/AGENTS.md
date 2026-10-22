@@ -452,8 +452,9 @@ conversation:
   the tool's input or `ask()` (.agents/caller-input/SKILL.md), never a literal copied from
   the answer.
 - `reference/publication-review.md` holds the rules Guardian's publication review applies
-  to live tests and output, in the review's own words: read it while you explore, and gather
-  the evidence it asks for before your first `finish_build`.
+  to live tests, output and a write's outcome and path, in the review's own words: read it
+  while you explore, gather the evidence it asks for before your first `finish_build`, and in a
+  write, settle the path it asks for before your first `act` step.
 
 ## Reviews and retries
 

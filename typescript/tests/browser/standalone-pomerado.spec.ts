@@ -51,6 +51,12 @@ import {
   nativeExecutionEnvironment,
 } from "../../src/guardian/execution-policy.js";
 
+/** A write fixture's path: its one save, as a write build's first act step declares it. */
+const savePath = {
+  steps: [{ commit: "save", does: "Saves the fixture" }],
+  ends: "The site's confirmation of the save",
+};
+
 const message = (text: string): ModelResponse["output"][number] => ({
   type: "message",
   role: "assistant",
@@ -735,7 +741,13 @@ async ({kernel,sessionId,enteringCommit,verified}) => {
       return [
         call(
           "execute",
-          { ...execution, purpose: "act", entrypoint: "src/act.mjs", intent: "Save exactly once" },
+          {
+            ...execution,
+            purpose: "act",
+            entrypoint: "src/act.mjs",
+            intent: "Save exactly once",
+            writePath: savePath,
+          },
           "act_once",
         ),
       ];
@@ -895,6 +907,7 @@ async ({kernel,sessionId,input,ask,enteringCommit,verified}) => {
             entrypoint: "src/act.mjs",
             intent: "Order the requested item exactly once",
             exampleInput: JSON.stringify(supplied),
+            writePath: savePath,
           },
           "act_once",
         ),

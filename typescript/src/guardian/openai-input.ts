@@ -121,6 +121,10 @@ export const guardianReviewInput = (
       ...(turn.pending.agentNote === undefined || reviewKindOf(turn.pending) !== "execution"
         ? {}
         : { agentNote: cutToLimit(turn.pending.agentNote, agentNoteLimit) }),
+      // The write path the step declares or revises: untrusted call data, like the note.
+      ...(turn.pending.writePath === undefined || reviewKindOf(turn.pending) !== "execution"
+        ? {}
+        : { writePath: turn.pending.writePath }),
       ...(turn.sources?.entrypoint === undefined
         ? {}
         : { entrypointSource: turn.sources.entrypoint }),

@@ -144,10 +144,9 @@ waits for the list to settle and types again when it lacks the value; when the s
 which query its options answer, pass that check as `answered`. A matching old option alone
 does not establish the answer.
 
-When an overlay such as a cookie or consent banner covers the target, dismiss it with its
-control that declines optional cookies, such as Reject all or Necessary only, when the banner
-shows one, and otherwise with any of its controls, accept included. Name that control as `dismiss` of
-`waitForReady` (core skill) to close the banner before the action, and one that opens later.
+When a cookie or tracking consent banner covers the target, dismiss it with the control the core
+skill's cookie banner section picks. Name that control as `dismiss` of `waitForReady` (core
+skill) to close the banner before the action, and one that opens later.
 
 Decide whether each pop-up, banner or interstitial is conditional or always triggered. A
 conditional one shows only for some accounts, states or visits, such as a cookie banner, a

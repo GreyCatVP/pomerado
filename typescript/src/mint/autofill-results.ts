@@ -126,6 +126,8 @@ export const unansweredFailure = ({ cause: unanswered }: Unanswered) =>
   });
 
 const filledNotices = {
+  blocked:
+    "The host filled the fields, but another element sat over the submit and caught its click (blockedBy), such as a cookie or tracking consent banner, so nothing was sent and no fill was spent. Never click the submit yourself. Find that banner's own control with a read-only explore (never read a field the host filled): its close or dismiss control, else one that rejects or declines what is not essential, else accept when that is the only way out. Then send this same signInStep again with that control's selector as dismiss: the host clicks it, then clicks the submit once more, typing nothing unless the dismiss emptied a field.",
   failed:
     "The host filled the fields, but its click of the submit failed. You may click that one submit yourself in an explore, and nothing else: never read, change or return a field the host filled. Then continue with the next signInStep, or signedIn.",
   none: "The host filled the fields; the screen has no button. Explore read-only to see what it revealed, then send the next signInStep for it.",
@@ -150,6 +152,10 @@ export const lostFillNotice = `The host lost the fill call's answer: the fields 
 export const lostTypingNotice =
   "The host lost the answer of the call that typed a field, so that field may hold its value. The host never clicked the submit. It never retries a fill by itself. Explore read-only to see the page, then continue with the next signInStep.";
 
+/** A step whose `dismiss` the host refused before it typed or clicked anything. */
+export const dismissRefusedNotice =
+  "The step's dismiss is not a covering notice's own control: it is or holds a control of the sign-in, sits in its form, submits a form, opens another page, or matches more than one visible element. The host typed and clicked nothing. Send the step again with the notice's own close or dismiss control as dismiss, else one that rejects or declines what is not essential, else its accept control, or without dismiss.";
+
 /** After a step whose submit key the host pressed. */
 const keyNotices = {
   failed:
@@ -162,6 +168,8 @@ export const stepNotice = (
   stepReport: AutofillStepReport,
   step?: Pick<AutofillStep, "submitKey">,
 ) => {
+  if (stepReport.outcome === "refused" && stepReport.reason === "dismiss_refused")
+    return dismissRefusedNotice;
   if (stepReport.outcome === "refused")
     return `The host typed and clicked nothing (${stepReport.reason}), so nothing reached the site and no sign-in was spent. Correct the step from the page's evidence, ${autofillRecovery}.`;
   if (lostTyping(stepReport)) return lostTypingNotice;

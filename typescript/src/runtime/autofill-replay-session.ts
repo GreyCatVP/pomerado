@@ -2,11 +2,13 @@ import { makeReplayScreenWait } from "./autofill-replay-screens.js";
 import { Effect } from "effect";
 import type { YieldableError } from "effect/Cause";
 import { logicalRejectedField, recordedRejections, rejectableSlot } from "./autofill-rejection.js";
-import type {
-  AutofillRecipe,
-  AutofillRecipeStep,
-  RejectedMarker,
-  SignInMethodChoice,
+import {
+  pageMatches,
+  pathMatches,
+  type AutofillRecipe,
+  type AutofillRecipeStep,
+  type RejectedMarker,
+  type SignInMethodChoice,
 } from "../destinations/autofill-recipe.js";
 import { resolvedPage, type SignInRecipeStep } from "../destinations/sign-in-recipe.js";
 import { signedInCheckOrigin, workspaceHost, workspaceToPin } from "./workspace-origin.js";
@@ -26,7 +28,6 @@ import {
 } from "./autofill-state.js";
 import { type AutofillLogin, makeAutofillValues } from "./autofill-values.js";
 import { cantTell, leftSignInScreens } from "./autofill-replay-pages.js";
-import { pathOf, placeOf } from "./session-sign-in.js";
 import {
   type AutofillReplayInput,
   type AutofillRetryState,
@@ -95,12 +96,9 @@ const workspaceScreens = <E extends YieldableError, V extends string, L extends 
    * there still waits for the screen's admission.
    */
   const matchesRecorded = (page: string, recorded: SignInRecipeStep) => {
-    if (recorded.origin !== "workspace") {
-      const here = placeOf(page);
-      return here !== undefined && here === placeOf(recorded.page);
-    }
+    if (recorded.origin !== "workspace") return pageMatches(page, recorded);
     const at = URL.parse(page);
-    if (at === null || pathOf(at.pathname) !== pathOf(recorded.page)) return false;
+    if (at === null || !pathMatches(at.pathname, recorded.page, recorded.anySegments)) return false;
     return progress.workspace !== undefined ? at.origin === progress.workspace : sibling(at.origin);
   };
   return { sibling, resolvedSteps, matchesRecorded };

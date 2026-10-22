@@ -99,6 +99,11 @@ const patch = (files: Readonly<Record<string, string>>): Output =>
           .join("\n") + "\n",
     },
   }));
+/** The write path every act step here carries: the form's one save. */
+const formPath = {
+  steps: [{ commit: "save", does: "Saves the form" }],
+  ends: "The site's confirmation of the saved form",
+};
 const execution = (
   purpose: string,
   entrypoint: string,
@@ -116,6 +121,7 @@ const execution = (
       maxWorkers: 1,
       timeoutSeconds: 20,
       intent: `Run ${entrypoint}`,
+      ...(purpose === "act" ? { writePath: formPath } : {}),
       ...extra,
     },
     callId,

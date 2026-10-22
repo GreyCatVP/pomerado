@@ -59,7 +59,9 @@ const fakeSite = (options: SiteOptions = {}) => {
   const checkedOn: (string | undefined)[] = [];
   const opened: string[] = [];
   const trusted = (url: URL) => sameSite(site, url);
-  const shows = (selector: string) => (screens[state.at.pathname] ?? []).includes(selector);
+  // The site serves each screen with or without a trailing slash on its path.
+  const path = () => (state.at.pathname.length > 1 ? state.at.pathname.replace(/\/$/u, "") : state.at.pathname);
+  const shows = (selector: string) => (screens[path()] ?? []).includes(selector);
   const page = () => `${state.at.origin}${state.at.pathname}`;
   const browser: SignInReplayBrowser<Error> = {
     inspect: (step) =>
@@ -109,20 +111,20 @@ const fakeSite = (options: SiteOptions = {}) => {
       Effect.sync(() => {
         const filledOn = page();
         fills.push(filledOn);
-        if (state.at.pathname === "/login") {
+        if (path() === "/login") {
           const username = values[0] ?? "";
           const next = options.passwordOn?.(username) ?? `${accounts[username] ?? site}/login/password`;
           state.at = new URL(next);
-        } else if (state.at.pathname === "/login/continue") {
+        } else if (path() === "/login/continue") {
           state.signedInOn = state.at.origin;
           state.at = new URL(`${state.at.origin}/home`);
         } else if (
-          screens[state.at.pathname]?.includes("#password") === true &&
+          screens[path()]?.includes("#password") === true &&
           values[0] === password &&
           options.afterPassword !== undefined
         ) {
           state.at = new URL(options.afterPassword);
-        } else if (screens[state.at.pathname]?.includes("#password") === true && values[0] === password) {
+        } else if (screens[path()]?.includes("#password") === true && values[0] === password) {
           state.signedInOn = state.at.origin;
           state.at = new URL(`${state.at.origin}/home`);
         }
@@ -253,6 +255,18 @@ it("admits the shared sign-in screen on the login's pinned workspace", async () 
   const fake = fakeSite({ leftover: `${acme}/login`, passwordOn: () => `${acme}/login/password` });
   const pinned = await signIn(workspaceRecipe, fake, "ada-owner", acme);
   expect(pinned).toEqual(Either.right({ alreadySignedIn: false, workspaceOrigin: acme }));
+});
+
+it("goes on to a workspace screen the site shows with a trailing slash on the login's pinned workspace", async () => {
+  // The site skips the shared identifier screen and shows the password screen, recorded as
+  // /login/password, at /login/password/ on the login's pinned workspace.
+  const fake = fakeSite({ leftover: `${acme}/login/password/` });
+  const events: WorkspaceOriginEvent[] = [];
+  expect(await signIn(workspaceRecipe, fake, "ada-owner", acme, events)).toEqual(
+    Either.right({ alreadySignedIn: false, workspaceOrigin: acme }),
+  );
+  expect(fake.fills).toEqual([`${acme}/login/password/`]);
+  expect(events).toEqual([]);
 });
 
 it("refuses another tenant's sign-in screen before this login sent anything, once the site's data is cleared", async () => {

@@ -5836,6 +5836,67 @@ it.each(["read_back", "fallback"] as const)(
   },
 );
 
+// A confirmation the host marks as leaving steps of the session's recorded write path unentered,
+// such as a saved draft's notice before the quote the path ends with, keeps the session open: its
+// receipt names the steps left and the next act step runs. The step that leaves none closes it.
+// Fails when the first confirmation closes the session, as every one did before write paths.
+it("keeps a write session open past a confirmation its recorded path has steps after", async () => {
+  const receipts: unknown[] = [];
+  let steps = 0;
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        const act = { ...execution, purpose: "act", target: "liveBrowser" };
+        receipts.push(JSON.parse(yield* turn.actions.execute(act)));
+        receipts.push(
+          JSON.parse(yield* turn.actions.execute({ ...act, entrypoint: "src/quote.ts" })),
+        );
+        expect(
+          yield* Effect.either(turn.actions.execute({ ...act, entrypoint: "src/after.ts" })),
+        ).toMatchObject({ _tag: "Left", left: { code: "AlreadyExecuted" } });
+        yield* turn.actions.finish({ ...publication, executionId: "act_2" });
+      }),
+    {
+      reviewAndExecute: () =>
+        Effect.sync((): ExecutionEvidence => {
+          steps++;
+          return steps === 1
+            ? {
+                executionId: "act_1",
+                status: "completed",
+                effect: "verified",
+                confirmation: "message",
+                writePathRemaining: ["get-quote"],
+                resultRef: "result_draft",
+                observations: "Draft saved",
+              }
+            : {
+                executionId: "act_2",
+                status: "completed",
+                effect: "verified",
+                confirmation: "message",
+                resultRef: "result_quote",
+                observations: "Quote ready",
+              };
+        }),
+      publish: () => Effect.succeed({ publicationRef: "published", diagnostics: [] }),
+    },
+  );
+  expect(await f.run({ ...request, effect: "write" })).toMatchObject({ build: "published" });
+  expect(steps).toBe(2);
+  expect(receipts[0]).toMatchObject({
+    confirmation: "message",
+    writePath: {
+      remaining: ["get-quote"],
+      instruction: expect.stringContaining(
+        "This step's confirmation does not end the write session",
+      ) as unknown,
+    },
+  });
+  expect(receipts[1]).toMatchObject({ confirmation: "message" });
+  expect(receipts[1]).not.toHaveProperty("writePath");
+});
+
 // The fallback is for a read-back that cannot run, such as once the execution host is lost. It
 // fails when the withheld step does not keep the attempt open for publication.
 it("publishes a withheld write confirmation through the fallback after the execution host is lost", async () => {

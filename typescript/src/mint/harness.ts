@@ -111,6 +111,7 @@ import {
 import { readImportClosure } from "./operation-source.js";
 import { boundedResult, digestResult, resultDigestPath } from "./result-digest.js";
 import { contentDigest } from "./step-checks.js";
+import { writePathNotice } from "./write-session.js";
 import {
   caseDigest,
   caseView,
@@ -391,6 +392,8 @@ const writeCompletionReasons: ReadonlySet<string> = new Set([
   "write_not_submitted",
   "commit_marks_undeclared",
   "commit_marks_unentered",
+  "write_path_unfinished",
+  "write_path_undeclared",
   "confirmation_undeclared",
   "confirmation_unrecorded",
   // A read's execution after the build became a write: the write itself is still to do.
@@ -657,6 +660,9 @@ const safeExecutionEvidence = (evidence: ExecutionEvidence): ExecutionEvidence =
     ...(evidence.withheldConfirmation === undefined || evidence.confirmation !== undefined
       ? {}
       : { withheldConfirmation: evidence.withheldConfirmation }),
+    ...(evidence.writePathRemaining === undefined || evidence.writePathRemaining.length === 0
+      ? {}
+      : { writePathRemaining: evidence.writePathRemaining }),
     ...(evidence.checks === undefined ? {} : { checks: evidence.checks }),
     ...(siteAccess === undefined ? {} : { siteAccess }),
     ...Option.match(Schema.decodeUnknownOption(ExecutionRefusal)(evidence.refusal), {
@@ -1706,9 +1712,13 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
             evidence.scriptQuestion === undefined && handedBack
               ? { outcome: "unanswered" as const }
               : evidence.scriptQuestion;
+          const pathLeft = purpose === "act" ? evidence.writePathRemaining : undefined;
           return JSON.stringify({
             ...receipt,
             ...(withheld === undefined ? {} : { instruction: withheldConfirmationInstruction }),
+            ...(pathLeft === undefined || pathLeft.length === 0
+              ? {}
+              : { writePath: writePathNotice(pathLeft, evidence.confirmation !== undefined) }),
             ...(evidence.review === undefined
               ? {}
               : {
@@ -1755,8 +1765,13 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         purposes.set(evidence.executionId, purpose);
         if (taskState.revision > 0) revisions.set(evidence.executionId, taskState.revision);
         if (purpose === "example") example = referenceOnly;
-        // The step that recorded the site's confirmation is the build's own write result.
-        if (purpose === "act" && safe.confirmation !== undefined) {
+        // The step that recorded the site's confirmation is the build's own write result, once
+        // the session entered every mark of its recorded write path; until then it runs on.
+        if (
+          purpose === "act" &&
+          safe.confirmation !== undefined &&
+          safe.writePathRemaining === undefined
+        ) {
           example = referenceOnly;
           writeSession = "closed";
         }
@@ -5653,6 +5668,20 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                     error.reason,
                     {},
                     "Not published: this build has not demonstrated the requested write. Continue the remaining authorized work, and never run a write that completed again. If a step may already have committed, read back first, in a new act step that only reads the page or the account: if the write happened, record it with verified() in that step and call finish_build naming it. The host runs a step that may have committed only once, unless the outcome review finds it did not happen; a repeat is refused until then. If the site offers no read-back that can tell, never submit again: publish the write as unverifiable against the step that could have committed. If the caller's inputs cannot work on the site as given, ask the owner with request_input whether to revise them. A path that skipped the write does not show a working write tool.",
+                  );
+                if (error.reason === "write_path_unfinished")
+                  return notPublished(
+                    error.code,
+                    error.reason,
+                    { writePathMarks: error.writePathMarks ?? [] },
+                    "Not published: the write session has not settled every commit mark of its recorded write path; writePathMarks names the ones not yet settled (a step that lost its result may have entered them). The session stays open until they are. Read back first where a receipt says so: a read-back that confirms the write settles the marks a lost step entered. Then run only steps that never ran, on the page as it stands, and call finish_build naming the step that confirmed the path's end. Never redo a step that finished or may have. When the page shows the path must change, such as a step the site skips for this input, declare the revised path in writePath on the next act step. When the site refuses to go on, or nothing can settle a mark, end with report_blocked.",
+                  );
+                if (error.reason === "write_path_undeclared")
+                  return notPublished(
+                    error.code,
+                    error.reason,
+                    { writePathMarks: error.writePathMarks ?? [] },
+                    "Not published: the composed script leaves out commit marks of the session's recorded write path from write.commits; writePathMarks names them. Run every step of the path in the composed script, marked by the same helper the session used, declare every mark in order, and call finish_build again with the same executionId. Never run the write again.",
                   );
                 if (
                   error.reason === "confirmation_undeclared" ||

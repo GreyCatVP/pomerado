@@ -1,6 +1,6 @@
 import { OpenAIProvider, setDefaultModelProvider, Usage } from "@openai/agents";
 import type { ModelRequest, ModelResponse } from "@openai/agents";
-import { Effect } from "effect";
+import { Effect, Either } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   guardianExecutionPolicy,
@@ -9,6 +9,7 @@ import {
 import { makeOpenAIReviewer } from "../../src/guardian/openai.js";
 import { answersForReview } from "../../src/guardian/question.js";
 import {
+  decodePublicationDecision,
   guardianPublicationPolicy,
   publicationCallerDecisionPolicy,
   publicationDecisionPolicy,
@@ -24,7 +25,13 @@ import {
   type PendingExecution,
   type Reviewer,
 } from "../../src/guardian/review.js";
+import {
+  unfixableFindingCategories,
+  unfixablePublicationReasons,
+} from "../../src/guardian/review-contracts.js";
+import type { PublicationScope } from "../../src/guardian/review-contracts.js";
 import { makeSourceInspector } from "../../src/guardian/source.js";
+import { publicationScope } from "../../src/mint/publication-review.js";
 import { instructionsOf } from "../support/guardian-requests.js";
 
 afterEach(() => setDefaultModelProvider(new OpenAIProvider()));
@@ -650,12 +657,13 @@ describe("a finding about a choice on the site's sign-in pages", () => {
     });
   });
 
-  // A broken, incorrect or unsafe tool is never excused, wherever the finding sits.
+  // A broken, incorrect or unsafe tool is never excused, wherever the finding sits. Much of the
+  // recipe records the minter's own sign-in choices, which it fixes by signing in again, so a
+  // denial a correction gets past keeps its reason there too.
   it.each([
     { reason: "source_correction", finding: inRecipe("schema_mismatch") },
     { reason: "unsupported_claim", finding: inRecipe("unsupported_claim") },
     { reason: "source_correction", finding: inRecipe("confirmation") },
-    { reason: "privacy", finding: inRecipe("customer_data") },
     { reason: "host_owned", finding: inRecipe("credential") },
     { reason: "source_correction", finding: at("operation/operation.mjs", "schema_mismatch") },
     { reason: "source_correction", finding: at("operation/operation.mjs", "confirmation") },
@@ -669,19 +677,31 @@ describe("a finding about a choice on the site's sign-in pages", () => {
   );
 
   // An input design finding about anything but a sign-in page choice still stands: one in
-  // another host-written file, one in the minter's files, and one in the recipe under a refusal
-  // for privacy or authority, which the exception never touches.
+  // another host-written file and one in the minter's files.
   it.each([
     { reason: "input_feedback", finding: at("operation/operation.mjs", "input_option") },
     { reason: "source_correction", finding: at("operation/operation.mjs", "example_value") },
     { reason: "input_feedback", finding: at("publication/definition.json", "input_option") },
     { reason: "source_correction", finding: at(pending.entrypoint, "example_value") },
-    { reason: "authority", finding: inRecipe("input_option") },
   ])(
     "keeps a $reason denial for $finding.category in $finding.path that is no sign-in page choice",
     async ({ reason, finding }) => {
       const decided = await review({ outcome: "deny", reason, findings: [finding] });
       expect(decided).toMatchObject({ outcome: "deny", reason, findings: [finding] });
+      expect(decided).not.toHaveProperty("excusedSignInChoices");
+    },
+  );
+
+  // A refusal for privacy or authority in the recipe is one no correction gets past, and the
+  // exception never touches it: it blocks as the host's own, host_owned.
+  it.each([
+    { reason: "privacy", finding: inRecipe("customer_data") },
+    { reason: "authority", finding: inRecipe("input_option") },
+  ])(
+    "blocks a $reason denial for $finding.category in $finding.path as host_owned",
+    async ({ reason, finding }) => {
+      const decided = await review({ outcome: "deny", reason, findings: [finding] });
+      expect(decided).toMatchObject({ outcome: "deny", reason: "host_owned", findings: [finding] });
       expect(decided).not.toHaveProperty("excusedSignInChoices");
     },
   );
@@ -736,7 +756,187 @@ describe("a finding about a choice on the site's sign-in pages", () => {
   });
 });
 
+// The minter edits no bundle file the host writes, such as its sign-in recipe, though much of the
+// recipe records the minter's own sign-in choices, which it fixes by signing in again. So a refusal
+// no correction gets past, whose every finding is in such a file, ends the build as the host's own
+// failure. The host sets that reason itself: a reviewer that names another one would let the
+// minter end the build on it as its own policy block.
+describe("a denial whose every finding is in a bundle file the host wrote", () => {
+  const recipe = JSON.stringify({
+    version: 1,
+    steps: [{ page: "https://portal.example/team/sample/login", fields: [], submit: "#sign-in" }],
+    signedIn: { selector: "#account" },
+  });
+  const bundle = new Map([
+    ["src/tool.mjs", "export default {};"],
+    ["auth-fill.json", recipe],
+  ]);
+  const evidence = new Map([
+    ["publication/definition.json", '{"name":"read_reports"}'],
+    ["publication/tests.json", '{"cases":[]}'],
+  ]);
+  // The index as a host that marks the files it adds to the bundle builds it, and as one that
+  // marks none, as the local host does.
+  const marked = publicationScope(bundle, evidence, { hostWritten: new Set(["auth-fill.json"]) });
+  const unmarked = publicationScope(bundle, evidence);
+  const at = (path: string, category: string) => ({
+    path,
+    byteStart: 0,
+    byteEnd: 1,
+    category,
+    explanation,
+  });
+  const inRecipe = at("operation/auth-fill.json", "private_literal");
+  const inSource = at("operation/src/tool.mjs", "private_literal");
+  const rationale = "The recipe's path names a team.";
+  const decode = (scope: PublicationScope, decision: Record<string, unknown>) =>
+    Effect.runPromise(
+      Effect.either(decodePublicationDecision(scope, { rationale, findings: [], ...decision })),
+    );
+
+  it("marks the sign-in recipe as the host's only when the host says it wrote it", () => {
+    expect(marked.files.find((file) => file.path === "operation/auth-fill.json")?.owner).toBe(
+      "host",
+    );
+    expect(unmarked.files.find((file) => file.path === "operation/auth-fill.json")?.owner).toBe(
+      "minter",
+    );
+  });
+
+  it.each(["source_correction", "privacy", "authority", "evidence"])(
+    "decodes a %s denial whose only finding is a private literal in the host's sign-in recipe as host_owned",
+    async (reason) => {
+      const decided = await decode(marked, { outcome: "deny", reason, findings: [inRecipe] });
+      expect(decided).toMatchObject({
+        _tag: "Right",
+        right: { outcome: "deny", reason: "host_owned", findings: [inRecipe] },
+      });
+      // The rationale keeps the reason the review gave, so the record shows the host set it.
+      expect(Either.getOrThrow(decided).rationale).toContain(reason);
+      expect(Either.getOrThrow(decided).rationale).toContain(rationale);
+    },
+  );
+
+  // A signed-in marker that also shows signed out is the minter's own choice, recorded in the
+  // recipe, which it fixes by signing in again, so the denial goes back to it.
+  it("keeps a source_correction denial for a signed-in marker in the host's sign-in recipe", async () => {
+    const marker = {
+      ...at("operation/auth-fill.json", "schema_mismatch"),
+      explanation:
+        "The signed-in marker also shows on the signed-out page. Sign in again with one only a signed-in page shows.",
+    };
+    expect(
+      await decode(marked, { outcome: "deny", reason: "source_correction", findings: [marker] }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "source_correction", rationale, findings: [marker] },
+    });
+  });
+
+  // Any other denial a correction gets past keeps its reason too.
+  it.each([
+    { reason: "source_correction", category: "confirmation" },
+    { reason: "unsupported_claim", category: "unsupported_claim" },
+    { reason: "evidence", category: "schema_mismatch" },
+  ])(
+    "keeps a $reason denial for a $category finding in the host's sign-in recipe",
+    async ({ reason, category }) => {
+      const finding = at("operation/auth-fill.json", category);
+      expect(await decode(marked, { outcome: "deny", reason, findings: [finding] })).toMatchObject({
+        _tag: "Right",
+        right: { outcome: "deny", reason, rationale, findings: [finding] },
+      });
+    },
+  );
+
+  // A sign-in page choice beside it is still set aside, and the rest blocks as host_owned.
+  it("sets a sign-in page choice aside and decodes the rest as host_owned", async () => {
+    const choice = at("operation/auth-fill.json", "input_option");
+    expect(
+      await decode(marked, {
+        outcome: "deny",
+        reason: "source_correction",
+        findings: [choice, inRecipe],
+      }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: {
+        outcome: "deny",
+        reason: "host_owned",
+        findings: [inRecipe],
+        excusedSignInChoices: [choice],
+      },
+    });
+  });
+
+  it("keeps a denial host_owned when the review already named it", async () => {
+    expect(
+      await decode(marked, { outcome: "deny", reason: "host_owned", findings: [inRecipe] }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "host_owned", rationale, findings: [inRecipe] },
+    });
+  });
+
+  // Any finding the minter can fix keeps the review's reason, so the denial goes back to it.
+  it.each([
+    { where: "a file the minter wrote", findings: [inRecipe, inSource] },
+    { where: "the public definition", findings: [at("publication/definition.json", "private_literal")] },
+    { where: "the live test record", findings: [at("publication/tests.json", "unsupported_claim")] },
+    {
+      where: "the recipe and the public definition",
+      findings: [inRecipe, at("publication/definition.json", "private_literal")],
+    },
+  ])("keeps a source_correction denial with a finding in $where", async ({ findings }) => {
+    expect(
+      await decode(marked, { outcome: "deny", reason: "source_correction", findings }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "source_correction", rationale, findings },
+    });
+  });
+
+  it("keeps a denial whose recipe a host never marked as its own", async () => {
+    expect(
+      await decode(unmarked, { outcome: "deny", reason: "source_correction", findings: [inRecipe] }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "source_correction", rationale, findings: [inRecipe] },
+    });
+  });
+
+  // Input feedback never blocks publication on its own, a denial with no finding names no file,
+  // and an escalation asks for a person's decision, so each keeps the review's reason.
+  it.each([
+    {
+      outcome: "deny",
+      reason: "input_feedback",
+      findings: [at("operation/auth-fill.json", "account_specific_enum")],
+    },
+    { outcome: "deny", reason: "evidence", findings: [] },
+    { outcome: "escalate", reason: "source_correction", findings: [inRecipe] },
+  ])("keeps a $outcome for $reason with $findings.length findings", async (decision) => {
+    expect(await decode(marked, decision)).toMatchObject({
+      _tag: "Right",
+      right: { ...decision, rationale },
+    });
+  });
+});
+
 describe("the publication policy", () => {
+  // Hosts with their own publication policy compose the same decision policy.
+  it("says the host sets host_owned itself for a denial in the host's bundle files", () => {
+    const rule =
+      "The host itself sets reason host_owned on a deny it cannot send back for a fix, one for privacy or authority or with a private_literal, credential, customer_data, exfiltration, unsafe_logging or safety_default finding, whose every finding is in an owner: host file under operation/, so when the minter's source causes such a problem, also put a finding on that source.";
+    expect(publicationDecisionPolicy).toContain(
+      `approved only with allow and no findings. ${rule} Site naming`,
+    );
+    expect(guardianPublicationPolicy.split(rule)).toHaveLength(2);
+    // It names every refusal the host counts as one no correction gets past.
+    for (const name of [...unfixablePublicationReasons, ...unfixableFindingCategories])
+      expect(rule).toContain(name);
+  });
+
   it("is the core text, naming the files the host writes", () => {
     const policy = guardianPublicationPolicy;
     expect(policy.split("\n")).toHaveLength(18);

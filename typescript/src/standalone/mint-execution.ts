@@ -47,7 +47,7 @@ import { makeRunFiles } from "../runtime/file-transfer.js";
 import { stepInput } from "../mint/step-checks.js";
 import { admitListCursor, sealListOutput } from "../runtime/list-cursor.js";
 import { mintListScope, refusedCursor } from "./list-cursors.js";
-import { readBackFirst } from "../mint/write-session.js";
+import { readBackFirst, sessionEnteredMarks, writePathRemaining } from "../mint/write-session.js";
 import { commitEvidenceOf, type CommitEvidence } from "../runtime/run-outcome.js";
 import { InputRequestFailure, type InputAsker } from "../runtime/input-request.js";
 import { siteDomain } from "../runtime/same-site.js";
@@ -312,6 +312,8 @@ interface ReceiptInput {
   readonly journal: Journal;
   /** A failed act step that may have committed its write: read back before writing again. */
   readonly writeSession?: { readonly verifyFirst: true; readonly notice: string };
+  /** An act step's marks of the session's recorded write path not yet settled. */
+  readonly writePathRemaining?: readonly string[];
   /** The step ran after the host sent a login no check verified; see `afterUnverifiedSignIn`. */
   readonly afterUnverifiedSignIn?: true;
 }
@@ -363,6 +365,9 @@ const failedReceipt = (
       ...(failureJournal.confirmation === undefined
         ? {}
         : { confirmation: failureJournal.confirmation }),
+      ...(receipt.writePathRemaining === undefined
+        ? {}
+        : { writePathRemaining: receipt.writePathRemaining }),
       observations: {
         message: secrets.redact(failure.message),
         ...(failure instanceof LocalOperationFailure
@@ -416,6 +421,9 @@ const completedReceipt = (receipt: ReceiptInput, result: LocalOperationOutput) =
       resultRef: `local:${id}`,
       effect: result.effect,
       ...(result.confirmation === undefined ? {} : { confirmation: result.confirmation }),
+      ...(receipt.writePathRemaining === undefined
+        ? {}
+        : { writePathRemaining: receipt.writePathRemaining }),
       observations: yield* projection.json({
         output: result.output,
         stdout: result.stdout,
@@ -493,6 +501,9 @@ const authoredExecution = (
         },
         startsOnFreshPage: start.resets(execution),
         ...(execution.agentNote === undefined ? {} : { agentNote: execution.agentNote }),
+        ...(execution.purpose !== "act" || execution.writePath === undefined
+          ? {}
+          : { writePath: execution.writePath }),
       },
       "not_sent",
     );
@@ -530,6 +541,8 @@ const authoredExecution = (
       writeSession.started = true;
       // Guardian allowed the step on this input, so the session runs it from here on.
       if (selected.mark === "intent_derived") writeSession.input = selected.input;
+      // Guardian allowed the path the step declared or revised, so the session runs it.
+      if (execution.writePath !== undefined) writeSession.path = execution.writePath;
     }
     const questions = scriptQuestions(state, execution.entrypoint, input, sourceMap);
     const { scriptAsk } = questions;
@@ -629,6 +642,12 @@ const authoredExecution = (
             yield* acceptedConfirmsKept({ write: true, accepted, screen: secrets.assertAbsent }),
           );
         if (act !== undefined) writeSession.steps.push({ executionId: id, ...act.marks });
+        // The marks of the session's recorded path not yet settled: until none is left, a
+        // confirmation does not close the session.
+        const pathLeft =
+          act === undefined
+            ? []
+            : writePathRemaining(writeSession.path, sessionEnteredMarks(writeSession.steps));
         if (execution.purpose === "example" && executed._tag === "Right")
           context.setInputSchema(executed.right.schemas.input);
         const receipt = {
@@ -641,6 +660,7 @@ const authoredExecution = (
           reviewed,
           journal,
           ...(act?.writeSession === undefined ? {} : { writeSession: act.writeSession }),
+          ...(pathLeft.length === 0 ? {} : { writePathRemaining: pathLeft }),
           ...(afterUnverifiedSignIn ? { afterUnverifiedSignIn: true as const } : {}),
         };
         const evidence = yield* executed._tag === "Left"

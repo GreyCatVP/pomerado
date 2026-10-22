@@ -61,7 +61,9 @@ export interface CommitConfirmation {
  *   region, an indeterminate progress bar, or a skeleton, shimmer, spinner or loader class (never
  *   on a form control) counts while it shows until it has held for `noProgressMs`. Determinate
  *   bars (ratings, steps, meters) never count, and signs showing before the action in the same
- *   number, or class hints already there at the first look, are the page's own decoration.
+ *   number, or class hints already there at the first look, are the page's own decoration. One
+ *   page call counts them at each look; a sign element in content the browser skips rendering
+ *   does not show, and a look whose count runs out of time takes the class hints as unchanged.
  *   `waitForRows` also counts a sign beside its rows (in their container or the element around
  *   it, never inside a row, and only when it is visible): one there before the action, in the
  *   same number, is the page's own; any other counts while it shows, until it and the rows have
@@ -111,6 +113,59 @@ const waitContextLost = (error) =>
 const waitLoadingSigns = '[aria-busy="true"], [role="progressbar"]:not([aria-valuenow], [aria-valuetext])';
 const waitLoadingClasses =
   ':is([class*="skeleton" i], [class*="shimmer" i], [class*="spinner" i], [class*="loader" i]):not(input, select, textarea, button, option, [role="progressbar"])';
+// How long one look's sign count may run in the page, which runs one call at a time, before it
+// leaves the class hints uncounted.
+const waitClassesBudgetMs = 250;
+// Runs in the page, as page.evaluate(spec) or region.evaluateAll(elements, spec): how many generic
+// loading signs and class hints show in the document or the region's elements, through open
+// shadow roots, in one call, since a locator's count can cost a protocol call for each element it
+// matches. A sign shows as a visible locator match does: rendered, not hidden by visibility, with
+// a box, or for display: contents, a child element or text that shows. An element in content the
+// browser skips rendering (content-visibility) does not show, and its box is never read: reading
+// it would lay that content out, one element at a time. A display: contents sign is judged by its
+// children even there, its text by a range's box, as the visible check judges it. A closed shadow
+// root is out of page code's reach, so a sign inside one, which a Patchright locator could count,
+// is not counted. Class hints left uncounted after the budget are null.
+const waitSignsInPage = (first, second) => {
+  const [roots, spec] = second === undefined ? [[document], first] : [first, second];
+  const started = performance.now();
+  const scopes = new Set(roots);
+  for (const scope of scopes) {
+    if (scope.shadowRoot) scopes.add(scope.shadowRoot);
+    for (const node of scope.querySelectorAll("*")) if (node.shadowRoot) scopes.add(node.shadowRoot);
+  }
+  const boxed = (box) => box.width > 0 && box.height > 0;
+  const textShows = (text) => {
+    const range = text.ownerDocument.createRange();
+    range.selectNode(text);
+    return boxed(range.getBoundingClientRect());
+  };
+  const shows = (element) => {
+    const rendered = typeof element.checkVisibility !== "function" ||
+      element.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true });
+    // Without a box: display: contents shows when a child element or text does; hidden or skipped
+    // content does not.
+    if (!rendered)
+      return !element.checkVisibility() && getComputedStyle(element).display === "contents" &&
+        [...element.childNodes].some((child) =>
+          child.nodeType === Node.ELEMENT_NODE ? shows(child) : child.nodeType === Node.TEXT_NODE && textShows(child));
+    return boxed(element.getBoundingClientRect());
+  };
+  const count = (selector, budgetMs) => {
+    const seen = new Set();
+    let shown = 0;
+    for (const scope of scopes)
+      for (const element of scope.querySelectorAll(selector)) {
+        if (seen.has(element)) continue;
+        seen.add(element);
+        if (shows(element)) shown += 1;
+        if (performance.now() - started > budgetMs) return null;
+      }
+    return shown;
+  };
+  return { signs: count(spec.signs, Infinity), classes: count(spec.classes, spec.budgetMs) };
+};
+const waitSignsSpec = { signs: waitLoadingSigns, classes: waitLoadingClasses, budgetMs: waitClassesBudgetMs };
 // A request the wait's action started, while it ran or in the second after, is the answer on its
 // way: it counts as progress and keeps the page busy until it ends, up to
 // lateFillCap. Any other request counts as progress for up to 10 s, and keeps the page busy for up
@@ -208,20 +263,11 @@ const waitProgress = (options = {}) => {
   // more than before, until its count has held for the no-progress window. A sign that stays is
   // part of the page. (waitForRows also judges the signs beside its rows: see listSigns.)
   const generic = {
-    signs: { selector: waitLoadingSigns, holdMs: noProgressMs, before: undefined, count: 0, changedAt: started, shows: false },
-    classes: {
-      selector: waitLoadingClasses,
-      holdMs: noProgressMs,
-      before: undefined,
-      count: 0,
-      changedAt: started,
-      shows: false,
-      firstLook: true,
-    },
+    signs: { holdMs: noProgressMs, before: undefined, count: 0, changedAt: started, shows: false },
+    classes: { holdMs: noProgressMs, before: undefined, count: 0, changedAt: started, shows: false, firstLook: true },
   };
   let loadingShows = false;
   let region = { count: 0, targets: 0 };
-  const scope = options.region ?? page;
   // One look at the page's signs. The baseline look, taken before the action, notes them without
   // counting anything as progress.
   // Quiet time runs to the latest look that could see progress: the first look after the start
@@ -248,9 +294,17 @@ const waitProgress = (options = {}) => {
     try {
       loadingShows = options.loading !== undefined && (await options.loading.filter({ visible: true }).count()) > 0;
       if (loadingShows) note("loading sign");
-      // A generic sign counts when it comes or goes, and while it is new: see generic above.
-      for (const sign of Object.values(generic)) {
-        const count = await scope.locator(sign.selector).filter({ visible: true }).count();
+      // A generic sign counts when it comes or goes, and while it is new: see generic above. Both
+      // kinds are counted in one page call; class hints left uncounted are no news at this look.
+      const counted = await (options.region === undefined
+        ? page.evaluate(waitSignsInPage, waitSignsSpec)
+        : options.region.evaluateAll(waitSignsInPage, waitSignsSpec));
+      for (const [name, sign] of Object.entries(generic)) {
+        // A count left undone is no news: the last count stands, so a sign showing keeps its
+        // hold, and a baseline or first look notes nothing.
+        const fresh = counted[name];
+        if (fresh === null && (baseline || (sign.firstLook && sign.before === undefined))) continue;
+        const count = fresh ?? sign.count;
         if (baseline || (sign.firstLook && sign.before === undefined)) {
           sign.before = count;
           sign.changedAt = now;

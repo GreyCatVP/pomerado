@@ -311,6 +311,58 @@ describe("liveTestsEvidence", () => {
     expect(coverage).toContain("1 of those failures still counts.");
   });
 
+  // A count's zero case first expected empty and failed as a result; marked noMatch, it passes. Its
+  // lead needs the site's zero, never a page listing results, which a count that matched nothing
+  // cannot show.
+  it("asks a noMatch lead for the site's no-results state, never its results", () => {
+    const quiet = {
+      id: "quiet-month",
+      purpose: "A month the site lists no reviews for; its filtered list shows a total of 0.",
+      input: { month: 2, year: 2024 },
+      expect: "result" as const,
+    };
+    const failedEmpty = {
+      id: quiet.id,
+      caseDigest: caseDigest({ ...quiet, expect: "empty" }),
+      sourceDigest: "published",
+      verdict: "fail" as const,
+      got: "a result",
+      durationMs: 1,
+      input: quiet.input,
+      expect: "empty" as const,
+    };
+    const leadOf = (noMatch: boolean) => {
+      const testCase = noMatch ? { ...quiet, noMatch: true } : quiet;
+      const passing = {
+        id: quiet.id,
+        caseDigest: caseDigest(testCase),
+        sourceDigest: "published",
+        verdict: "pass" as const,
+        got: "a result",
+        durationMs: 1,
+      };
+      return liveTestsEvidence({
+        file: { cases: [testCase] },
+        versions: [
+          {
+            version: "playwright",
+            sourceDigest: "published",
+            records: new Map([[quiet.id, passing]]),
+            replaced: [failedEmpty],
+          },
+        ],
+      }).record.retired[0];
+    };
+    expect(leadOf(true)).toMatchObject({
+      changedExpectationBy: quiet.id,
+      clearedBy: { siteAnswer: "no_results" },
+    });
+    expect(leadOf(false)).toMatchObject({
+      changedExpectationBy: quiet.id,
+      clearedBy: { siteAnswer: "results" },
+    });
+  });
+
   // A host that read no input schema cannot mark a failure outsideSchema, so the record never
   // offers that way out.
   it("offers no schema bound as a way out when the host read no input schema", () => {

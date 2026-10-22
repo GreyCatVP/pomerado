@@ -15,6 +15,14 @@ const products = storeProducts
   .filter((item) => item.department === "home")
   .map(({ id, name, priceMinor }) => ({ id, name, priceMinor }));
 export const shopAccount = { username: "ada@example.test", password: "correct-horse-battery-9" };
+/**
+ * The accounts the team sign-in, `/team-sign-in`, takes, by their team: it sends each account on
+ * to its own team's password screen, `/team/<team>/password`.
+ */
+export const teamAccounts = {
+  a: shopAccount,
+  b: { username: "dana@example.test", password: "river-lamp-quiet-4" },
+} as const;
 /** The code the shop asks for after the one-screen sign-in, when `loginCode` is set. */
 export const shopCode = "482913";
 /** How many help links the two-screen sign-in's password screen shows besides its 4 controls. */
@@ -140,6 +148,8 @@ interface ShopState extends StoreState {
   statements: string[];
   /** Each load of `/statements`: the page asked for and whether the browser was signed in. */
   statementLoads: { readonly page: number; readonly signedIn: boolean }[];
+  /** The team of each account the team sign-in signed in, in order. */
+  teamSignIns: string[];
 }
 
 export interface Shop {
@@ -514,6 +524,37 @@ ${next === null ? "" : `<a rel="next" href="${next}">Next</a>`}`,
     });
     response.end();
   };
+  // The team sign-in's identifier screen, which sends a known account on to its team's password
+  // screen, and that screen, which signs in its team's account.
+  const teamSignIn: Route = async (request, response) => {
+    if (request.method !== "POST")
+      return html(
+        response,
+        `<title>Sign in</title><form method="post" action="/team-sign-in"><label>Email<input id="username" name="username" type="email" autocomplete="username"></label><button id="next">Next</button></form>`,
+      );
+    const username = new URLSearchParams(await readBody(request)).get("username");
+    const team = Object.entries(teamAccounts).find(([, account]) => account.username === username);
+    if (team === undefined) return html(response, "<title>Sign in</title><p>No such account</p>");
+    response.writeHead(303, { location: `/team/${team[0]}/password` });
+    response.end();
+  };
+  const teamPassword: Route = async (request, response) => {
+    const team = new URL(request.url ?? "/", "https://www.shop.test").pathname.split("/")[2] ?? "";
+    if (request.method !== "POST")
+      return html(
+        response,
+        `<title>Password</title><form method="post"><label>Password<input id="password" name="password" type="password" autocomplete="current-password"></label><button id="sign-in">Sign in</button></form>`,
+      );
+    const password = new URLSearchParams(await readBody(request)).get("password");
+    if (Object.entries(teamAccounts).every(([at, account]) => at !== team || account.password !== password))
+      return html(response, "<title>Password</title><p id='wrong-password'>Wrong password</p>");
+    state.teamSignIns.push(team);
+    response.writeHead(303, {
+      location: "/account",
+      "set-cookie": [`shop_session=${signedIn}; Path=/; Secure; HttpOnly; SameSite=Lax`],
+    });
+    response.end();
+  };
   // A sign-in whose script sends the login to an identity service on another site, then trades the
   // token it returns for the shop's session, as a single-page site on a hosted identity service
   // does. The form has no action and the shop's own origin never receives the password.
@@ -651,6 +692,8 @@ ${next === null ? "" : `<a rel="next" href="${next}">Next</a>`}`,
     ["/sign-in", identifierScreen],
     ["/sign-in/password", passwordScreen],
     ["/sign-in/session", postOnly(passwordSession)],
+    ["/team-sign-in", teamSignIn],
+    ["/team/*/password", teamPassword],
     ["/search", search],
     ["/api/products", productsApi],
     ["/api/cart", postOnly(cart)],
@@ -728,6 +771,7 @@ export const startShop = async (directory: string): Promise<Shop> => {
     signOutOn: undefined,
     statements: Array.from({ length: 45 }, (_, index) => `S${index + 1}`),
     statementLoads: [],
+    teamSignIns: [],
     ...initialStoreState(),
   };
   const sessionValue = `sess-${randomBytes(12).toString("hex")}`;
@@ -758,7 +802,8 @@ export const startShop = async (directory: string): Promise<Shop> => {
             "",
           );
         }
-        await (routes.get(url.pathname) ?? notFound)(request, response);
+        const route = url.pathname.replace(/^\/team\/[^/]+\/password$/u, "/team/*/password");
+        await (routes.get(route) ?? notFound)(request, response);
       })().catch(() => {
         response.destroy();
       });

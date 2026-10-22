@@ -14,6 +14,11 @@ import type { MintDependencies, PublicationDecision } from "../../src/mint/contr
 import type { ModelObserverFactory } from "../../src/models/model-observer.js";
 import type { MintRecoveryFactory } from "../../src/mint/recovery-contracts.js";
 import { EventUnavailable } from "../../src/runtime/errors.js";
+import { makeGuardian, ReviewFailure } from "../../src/guardian/review.js";
+import type { PendingExecution } from "../../src/guardian/review.js";
+import { makeSourceInspector } from "../../src/guardian/source.js";
+import { publicationScope } from "../../src/mint/publication-review.js";
+import { reviewDenied } from "../../src/mint/review-context.js";
 import { memoryPublicationDecisions } from "../../src/standalone/publication-decisions.js";
 import { makeOpenAIMinter } from "../../src/mint/openai.js";
 import { signInUnavailableSummary } from "../../src/mint/sign-in-failure.js";
@@ -674,6 +679,94 @@ it("ends the build as the host's failure after a publication denial for a host-o
   });
   expect(outcome.blocked).toBeUndefined();
   expect(review.publications()).toBe(1);
+  // No continuation prompt follows the denial.
+  expect(f.requests.length).toBeLessThanOrEqual(3);
+});
+
+// The review names another reason for a denial whose every finding is in a bundle file the host
+// wrote, here its sign-in recipe. The host decodes it as host_owned, so the build ends as the
+// host's failure at once and the minter never gets to end it as its own policy block.
+it("ends the build as the host's failure when a review denies only a bundle file the host wrote", async () => {
+  const bundle = new Map([
+    ["src/tool.ts", "export default {};"],
+    [
+      "auth-fill.json",
+      JSON.stringify({ version: 1, steps: [{ page: "https://portal.example/team/sample/login" }] }),
+    ],
+  ]);
+  const sources = new Map<string, string>(
+    [...bundle].map(([path, text]) => [`operation/${path}`, text]),
+  );
+  const reviewed: PendingExecution = {
+    invocationId: "invocation_host_file",
+    attemptId: "attempt_host_file",
+    entrypoint: "operation/src/tool.ts",
+    screenedIntent: "Read public reports",
+    screenedInput: "{}",
+    screenedObservations: "Prior example completed.",
+    accountScope: "account_a",
+    allowedOrigins: [],
+    allowedEffects: ["Publish current package only"],
+    publication: publicationScope(bundle, new Map(), { hostWritten: new Set(["auth-fill.json"]) }),
+  };
+  const guardian = makeGuardian({
+    run: () =>
+      Effect.succeed({
+        outcome: "deny",
+        reason: "source_correction",
+        rationale: "The sign-in recipe's path names a team.",
+        findings: [
+          {
+            path: "operation/auth-fill.json",
+            quote: "team/sample",
+            category: "private_literal",
+            explanation: "The recorded page names a team.",
+          },
+        ],
+      }),
+  });
+  const readSource = makeSourceInspector(
+    (path) =>
+      Effect.suspend(() => {
+        const text = sources.get(path);
+        return text === undefined
+          ? Effect.fail(new ReviewFailure({ code: "SourceUnavailable" }))
+          : Effect.succeed(new TextEncoder().encode(text));
+      }),
+    (_path, bytes) => Effect.succeed(new TextDecoder().decode(bytes)),
+  );
+  let publications = 0;
+  // Publishes as a host does: Guardian reviews the bundle, and a refusal is the build's denial.
+  const publish = () =>
+    Effect.gen(function* () {
+      publications++;
+      const { reviewId, decision } = yield* guardian
+        .review(reviewed, readSource)
+        .pipe(Effect.mapError(() => new MintFailure({ code: "PublicationUnavailable" })));
+      if (decision.outcome === "allow")
+        return { publicationRef: "published_revision", diagnostics: [] };
+      return yield* reviewDenied(reviewId, { ...decision, outcome: decision.outcome });
+    });
+  const f = await fixture(
+    (_request, index) =>
+      [
+        call("execute", execution),
+        call("finish_build", publication),
+        call("report_blocked", {
+          reason: "policy",
+          explanation: "Guardian refused to publish this tool.",
+        }),
+      ][index] ?? prose("Stopping."),
+    { publish },
+  );
+  const outcome = await f.run();
+  expect(outcome).toMatchObject({
+    build: "incomplete",
+    hostFailure: "publication_unavailable",
+    publicationDenial: { reason: "host_owned" },
+  });
+  expect(outcome.blocked).toBeUndefined();
+  expect(publications).toBe(1);
   // No continuation prompt follows the denial.
   expect(f.requests.length).toBeLessThanOrEqual(3);
 });

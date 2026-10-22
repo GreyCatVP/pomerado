@@ -26,6 +26,7 @@ import type {
   PolicyFailureUrlCategory,
 } from "../runtime/policy-metadata.js";
 import { Context, Data, Schema, type Effect } from "effect";
+import { commitMarkMaxLength, commitMarkPattern } from "../runtime/operation.js";
 import type { SiteAccessDiagnostic } from "./site-access-contracts.js";
 import type { SignInVersionFinding } from "./sign-in-version.js";
 import {
@@ -204,6 +205,8 @@ export class MintFailure extends Data.TaggedError("MintFailure")<{
   readonly loginDeclined?: LoginDecline;
   /** The session's `decideDialog` step names a `confirm_action_unmatched` refusal names. */
   readonly confirmActionIds?: readonly string[];
+  /** The commit marks of the recorded write path a `write_path_*` refusal names, in path order. */
+  readonly writePathMarks?: readonly string[];
   /** Where the input schema rejected the input a `contract_input_mismatch` refusal names. */
   readonly inputIssues?: readonly InputIssue[];
   /** For `output_checks_blocked`, each blocking finding by path, check and count; never a value. */
@@ -358,6 +361,17 @@ export class MintFailure extends Data.TaggedError("MintFailure")<{
     | "commit_marks_undeclared"
     /** The composed script declares a commit step no act step of the session ever entered. */
     | "commit_marks_unentered"
+    /**
+     * The session has not settled every commit mark of its recorded write path;
+     * `writePathMarks` names the ones not yet settled (a step that lost its result may have
+     * entered them).
+     */
+    | "write_path_unfinished"
+    /**
+     * The composed script leaves marks of the session's recorded write path out of
+     * `write.commits`; `writePathMarks` names them.
+     */
+    | "write_path_undeclared"
     /** The session step named for publication did not record the confirmation the script declares. */
     | "confirmation_unrecorded"
     /** The composed script's input schema rejects the caller's own values. */
@@ -505,7 +519,10 @@ export type SignedInMarkerCheckRequest = typeof SignedInMarkerCheckRequest.Type;
  * that submits them, which the host clicks. A screen without a button (a password field that
  * appears once the identifier is filled) names no submit; a method choice names only a submit. A
  * screen whose form has no submit control and submits on Enter names `submitKey` instead, and the
- * host presses Enter in its last field. `signedIn` names what shows the site signed in, which the host checks on the page itself.
+ * host presses Enter in its last field. A screen a cookie or tracking consent banner covers names
+ * that banner's own close, reject or accept control as `dismiss`, in that order of preference,
+ * which the host clicks first, when it shows. `signedIn` names what shows the site signed in,
+ * which the host checks on the page itself.
  */
 export const SignInStep = Schema.Union(
   Schema.Struct({
@@ -558,10 +575,27 @@ export const SignInStep = Schema.Union(
         Schema.maxItems(8),
       ),
     ),
+    /**
+     * The own control of a cookie or tracking consent banner that shows on this screen: its close
+     * or dismiss control, else one that rejects what is not essential, else accept when that is
+     * the only way out. The host clicks it before it types, when the page shows it, and runs do the
+     * same. After the host reports `submit: blocked`, send the same step again with it: the host
+     * clicks it, then clicks the submit once more, typing nothing unless the dismiss emptied a
+     * field. Never a submit, a field or a control of the sign-in's own form.
+     */
+    dismiss: Schema.optional(SignInSelector),
   }).pipe(
     Schema.filter((step) => step.fields.length > 0 || step.submit !== undefined, {
       message: () => "a sign-in step fills a field or clicks a control",
     }),
+    Schema.filter(
+      (step) =>
+        step.dismiss === undefined ||
+        (step.dismiss !== step.submit &&
+          !step.fields.some((field) => field.selector === step.dismiss) &&
+          !(step.methods ?? []).some((option) => option.selector === step.dismiss)),
+      { message: () => "dismiss names the covering notice's own control, none of the step's" },
+    ),
     Schema.filter(
       (step) =>
         step.submitKey === undefined ||
@@ -641,6 +675,46 @@ export const CardFillStep = Schema.Struct({
 });
 export type CardFillStep = typeof CardFillStep.Type;
 
+/** A commit mark's name, as a script's `enteringCommit` takes it and its contract declares it. */
+const CommitMarkName = Schema.String.pipe(
+  Schema.maxLength(commitMarkMaxLength),
+  Schema.pattern(commitMarkPattern),
+);
+/** The most steps a write path names. */
+export const writePathStepLimit = 32;
+/**
+ * A write build's whole path, which its first `act` step declares before anything is sent: each
+ * step that saves or submits on the site, by the commit mark its helper enters, in order, and what
+ * the last one leaves the caller with. Guardian reviews it against the request by the rule the
+ * publication review judges the finished tool by, the host keeps the path its review allowed, and
+ * the session runs until every mark on it is entered. A later `act` step may revise it, keeping
+ * each mark the session already entered.
+ */
+export const WritePath = Schema.Struct({
+  steps: Schema.Array(
+    Schema.Struct({
+      commit: CommitMarkName.annotations({
+        description:
+          "The commit mark this step's helper enters with enteringCommit, as the composed script declares it in write.commits",
+      }),
+      does: Schema.String.pipe(Schema.pattern(/\S/), Schema.maxLength(200)).annotations({
+        description: "What the step saves or submits, in a few words, such as 'saves the applicant page'",
+      }),
+    }),
+  ).pipe(
+    Schema.minItems(1),
+    Schema.maxItems(writePathStepLimit),
+    Schema.filter((steps) => new Set(steps.map((step) => step.commit)).size === steps.length, {
+      message: () => "name each commit mark once",
+    }),
+  ),
+  ends: Schema.String.pipe(Schema.pattern(/\S/), Schema.maxLength(300)).annotations({
+    description:
+      "What the last step leaves the caller with: the outcome the request asks for, such as the quote or decline the site returns, or the order's confirmation",
+  }),
+});
+export type WritePath = typeof WritePath.Type;
+
 export const ExecutionRequest = Schema.Struct({
   /**
    * `act` is a step of a write build's one live write session; see the writes skill. `card_fill`
@@ -687,6 +761,16 @@ export const ExecutionRequest = Schema.Struct({
    * repeat it unchanged, or omit it where the host keeps the session's input and runs it on them.
    */
   exampleInput: Schema.optional(Schema.String),
+  /**
+   * On a write build's first `act` step: the build's whole write path (`WritePath`). On a later
+   * `act` step: a revision of it, which keeps every mark the session already entered.
+   */
+  writePath: Schema.optional(
+    WritePath.annotations({
+      description:
+        "Required on a write build's first act step, before anything is sent: the whole path its one write session and the published tool take, through to the outcome the request asks for. steps lists, in order, each step that saves or submits on the site, by the commit mark its helper enters; ends says what the last step leaves the caller with. Guardian reviews it as publication will review the tool, and the session runs until every mark on it is entered. On a later act step, only to revise the path when the page shows it must change; keep every mark already entered.",
+    }),
+  ),
 });
 export type ExecutionRequest = typeof ExecutionRequest.Type;
 /** The execute tool's input where the host offers no autofill sign-in: no `signInStep`. */
@@ -864,7 +948,10 @@ export interface ExecutionEvidence {
   readonly executionId: string;
   readonly status: "completed" | "failed" | "unsupported" | "needs_input";
   readonly effect: "not_sent" | "possible" | "verified";
-  /** The confirmation a write session step recorded; it closes the session. */
+  /**
+   * The confirmation a write session step recorded; it closes the session, unless
+   * `writePathRemaining` names marks of the recorded write path not yet settled.
+   */
   readonly confirmation?: "message" | "readback";
   /**
    * The confirmation a write session step read when the host did not accept its result, such as
@@ -876,6 +963,14 @@ export interface ExecutionEvidence {
    * `CommitAlreadySent`. Ignored when `confirmation` is set.
    */
   readonly withheldConfirmation?: "message" | "readback";
+  /**
+   * Trusted host marker on a write build's act step: the commit marks of the session's recorded
+   * write path not yet settled, in path order (a step that lost its result may have entered
+   * them). While it names any, a confirmation the step recorded does not close the session, which
+   * runs on through them. The host treats the commit marks a confirming step entered as settled
+   * for every later act step, as for a withheld confirmation.
+   */
+  readonly writePathRemaining?: readonly string[];
   /** Screened, finite supporting observation; never a replacement execution failure. */
   readonly siteAccess?: SiteAccessDiagnostic;
   /** Trusted host marker from a failed live runner result after cleanup and retention. */
@@ -932,6 +1027,7 @@ export const ExecutionEvidence: Schema.Schema<ExecutionEvidence> = Schema.Struct
   withheldConfirmation: Schema.optionalWith(Schema.Literal("message", "readback"), {
     exact: true,
   }),
+  writePathRemaining: Schema.optionalWith(Schema.Array(CommitMarkName), { exact: true }),
   siteAccess: Schema.optionalWith(
     Schema.Union(
       Schema.Struct({

@@ -37,6 +37,7 @@ import {
   Schema,
 } from "effect";
 import type { ModelDiagnosticTiming } from "../models/model-diagnostic-timing.js";
+import type { WritePath } from "../mint/contracts.js";
 import type { RuntimeRecordInput } from "../models/model-runtime-record.js";
 import type { GuardianReasoningEffort } from "./model.js";
 import type { PromptCacheDiagnostic } from "../models/cached-instructions.js";
@@ -340,6 +341,11 @@ export interface PendingExecution {
    * execute call. Untrusted, never authority; the review reads at most its first 500 characters.
    */
   readonly agentNote?: string;
+  /**
+   * Execution reviews only: the write path a write build's act step declares or revises, screened,
+   * as its execute call carries it. Untrusted call data, never authority.
+   */
+  readonly writePath?: WritePath;
   readonly screenedObservations: string;
   readonly accountScope: string;
   readonly allowedOrigins: readonly string[];
@@ -436,6 +442,12 @@ export interface PendingExecution {
      * as part of that sign-in. A code asked any other time is never listed.
      */
     readonly signInCodes?: readonly string[];
+    /**
+     * A write build's recorded write path, screened: the one an act step declared or revised that
+     * an execution review allowed, recorded once that step dispatched. Absent before the session's
+     * first act step, and for a session a host started without one.
+     */
+    readonly writePath?: WritePath;
     readonly captureIndex?: string;
     /**
      * The host's own notice, present once it replaced the attempt's browser (a proxy, mode or

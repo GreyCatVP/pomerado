@@ -15,6 +15,7 @@ import {
   recordingGuardian,
   scripted,
   startSite,
+  writePath,
   type RecordedReview,
 } from "./guardian-context-fixture.js";
 
@@ -123,6 +124,80 @@ export const noteSite = () => {
       }),
   };
 };
+/**
+ * A quote form saved in two steps: Save keeps the applicant as a draft and shows a draft notice,
+ * and only then Get quote quotes the saved draft.
+ * It keeps every draft and quote it received.
+ */
+export const quoteSite = () => {
+  const drafts: string[] = [];
+  const quotes: string[] = [];
+  return {
+    drafts,
+    quotes,
+    start: () =>
+      startSite((request, response, body) => {
+        if (request.method === "POST" && request.url === "/draft") {
+          drafts.push(body);
+          response.end("saved");
+          return;
+        }
+        if (request.method === "POST" && request.url === "/quote") {
+          quotes.push(body);
+          response.end(`Q-${1000 + quotes.length}`);
+          return;
+        }
+        html(
+          response,
+          `<title>Quote</title><button id="save" onclick="fetch('/draft',{method:'POST',body:document.body.dataset.applicant}).then(()=>{document.querySelector('#status').textContent='Draft saved';document.querySelector('#quote').hidden=false;})">Save</button><button id="quote" hidden onclick="fetch('/quote',{method:'POST',body:document.body.dataset.applicant}).then((r)=>r.text()).then((q)=>{document.querySelector('#status').textContent='Quote '+q;})">Get quote</button><div id="status"></div>`,
+        );
+      }),
+  };
+};
+/** The quote form's whole write path: the saved draft, then the quote. */
+export const quotePath = {
+  steps: [
+    { commit: "save-draft", does: "Saves the applicant as a draft" },
+    { commit: "get-quote", does: "Asks the site to quote the saved draft" },
+  ],
+  ends: "The quote the site returns for the applicant",
+};
+/** Fills the applicant in, saves the draft and waits for the draft notice. */
+const saveDraftCall =
+  'enteringCommit("save-draft"); const saved = await kernel.browsers.playwright.execute(sessionId,{code:"await page.evaluate((a) => { document.body.dataset.applicant = a; }, " + JSON.stringify(input.applicant) + "); await page.locator(\'#save\').click(); await page.waitForFunction(() => document.querySelector(\'#status\').textContent === \'Draft saved\'); return true;",timeout_sec:10}); if(!saved.success || saved.result !== true) throw new Error("Draft not saved");';
+/** Asks for the quote on the saved draft and reads it. */
+const getQuoteCall =
+  'enteringCommit("get-quote"); const quoted = await kernel.browsers.playwright.execute(sessionId,{code:"await page.locator(\'#quote\').click(); await page.waitForFunction(() => document.querySelector(\'#status\').textContent.startsWith(\'Quote \')); return await page.locator(\'#status\').textContent();",timeout_sec:10}); if(!quoted.success) throw new Error("No quote");';
+/** A quote form script declaring `commits`, whose body runs `body`. */
+const quoteScript = (name: string, commits: readonly string[], body: string) => `import { Schema } from "effect";
+import { defineOperation } from "../runtime/index.js";
+export default defineOperation({name:"${name}",input:Schema.Struct({applicant:Schema.String}),output:Schema.Unknown,write:{confirmation:"message",commits:${JSON.stringify(commits)}}},
+async ({kernel,sessionId,input,enteringCommit,verified}) => { ${body} });`;
+/** The session's first step: it saves the draft and, reading the draft notice, confirms it. */
+export const saveDraftStep = quoteScript(
+  "save_draft",
+  ["save-draft", "get-quote"],
+  `${saveDraftCall} verified({confirmation:"message"}); return {draft:"saved"};`,
+);
+/** The session's next step: it gets the quote on the saved draft and confirms it. */
+export const getQuoteStep = quoteScript(
+  "get_quote",
+  ["save-draft", "get-quote"],
+  `${getQuoteCall} verified({confirmation:"message"}); return {quote:String(quoted.result).slice(6)};`,
+);
+/** The composed script: the whole path from the caller's applicant to the quote. */
+export const quoteTool = quoteScript(
+  "quote_applicant",
+  ["save-draft", "get-quote"],
+  `${saveDraftCall} ${getQuoteCall} verified({confirmation:"message"}); return {quote:String(quoted.result).slice(6)};`,
+);
+/** A composed script that leaves the path's quote step out of its declared marks. */
+export const draftOnlyTool = quoteScript(
+  "save_applicant",
+  ["save-draft"],
+  `${saveDraftCall} verified({confirmation:"message"}); return {draft:"saved"};`,
+);
+
 /** A write step that saves its input's note once and confirms it. */
 export const saveNote = `import { Schema } from "effect";
 import { defineOperation } from "../runtime/index.js";
@@ -138,14 +213,18 @@ export const readNote = `import { Schema } from "effect";
 import { defineOperation } from "../runtime/index.js";
 export default defineOperation({name:"read_note",input:Schema.Struct({note:Schema.String}),output:Schema.Unknown},
 async ({input}) => ({note:input.note}));`;
-export const act = (entrypoint: string, exampleInput?: unknown) =>
-  execution(
-    "act",
-    entrypoint,
-    exampleInput === undefined
+/** An act step, with the session's `exampleInput` and, on its first step, its write path. */
+export const act = (
+  entrypoint: string,
+  exampleInput?: unknown,
+  path?: ReturnType<typeof writePath>,
+) =>
+  execution("act", entrypoint, {
+    ...(exampleInput === undefined
       ? {}
       : {
           exampleInput:
             typeof exampleInput === "string" ? exampleInput : JSON.stringify(exampleInput),
-        },
-  );
+        }),
+    ...(path === undefined ? {} : { writePath: path }),
+  });

@@ -426,10 +426,29 @@ const pickerPageCode = String.raw`(element, args) => {
       top: scroller ? scroller.scrollTop : 0,
     };
   });
-  const loading =
-    signsShown().some((node) => !state.signs.has(node) && (!popup || holds(popup, node) || !holds(node, popup))) ||
-    statuses.some((text) => loadingText.test(text)) ||
-    Boolean(popup && popup.getAttribute("aria-busy") === "true");
+  // Still loading: a loading sign new since the snapshot (in the popup, or anywhere not around
+  // it), a "Loading" or "Searching" row, or a busy popup. why says which, as kinds and counts:
+  // each sign's kind, tag (a custom element's is "custom") and place, never its text.
+  const fresh = signsShown().filter((node) => !state.signs.has(node) && (!popup || holds(popup, node) || !holds(node, popup)));
+  const loadingRows = statuses.filter((text) => loadingText.test(text)).length;
+  const listBusy = Boolean(popup && popup.getAttribute("aria-busy") === "true");
+  const loading = fresh.length > 0 || loadingRows > 0 || listBusy;
+  const signKind = (node) =>
+    node.getAttribute("aria-busy") === "true" ? "busy"
+      : node.matches("[role=progressbar]:not([aria-valuenow]):not([aria-valuetext])") ? "progressbar"
+      : (/loading|spinner|searching|skeleton/i.exec(node.getAttribute("class") ?? "")?.[0].toLowerCase() ?? "busy");
+  const why = loading
+    ? {
+        signs: fresh.length,
+        kinds: fresh.slice(0, 5).map((node) => ({
+          sign: signKind(node),
+          tag: /^[a-z][a-z0-9]*$/i.test(node.localName) ? node.localName.toLowerCase() : "custom",
+          where: node === element ? "field" : !popup ? "page" : holds(popup, node) ? "list" : "outside_list",
+        })),
+        rows: loadingRows,
+        listBusy,
+      }
+    : null;
   let confirm = null;
   if (popup && kindOf(popup) === "dialog") {
     const button = all("button, [role=button], input[type=button], input[type=submit]", popup).find(
@@ -462,6 +481,7 @@ const pickerPageCode = String.raw`(element, args) => {
     kind: popup ? kindOf(popup) : null,
     expanded,
     loading,
+    why,
     search: Boolean(search),
     go,
     inForm,
@@ -555,7 +575,12 @@ const pickerPageCode = String.raw`(element, args) => {
  * Everything else throws an Error named `PickerFailure` whose message is a fixed reason, never a
  * value: `wanted_missing`, `popup_missing` (the control opened nothing), `options_loading` (still
  * loading, or more list to read, at the timeout), `not_committed` (the field never kept the
- * choice) or `timeout` (the budget ran out mid-action, or the control never showed).
+ * choice) or `timeout` (the budget ran out mid-action, or the control never showed). An
+ * `options_loading` failure's `loading`, and its stack's first line, which a host logs, say what
+ * still showed the list loading, as kinds and counts, never page text: new loading signs, each
+ * with its kind, tag and place (on the field, in the list, outside it, or on the page), loading
+ * rows, a busy list, requests the picker started still in flight with their types and age,
+ * `answered` not yet true, and the options read when the list was not read to its end.
  */
 export const pickerCode = String.raw`
 const pickerFailure = (reason) => Object.assign(new Error(reason), { name: "PickerFailure" });
@@ -620,7 +645,7 @@ const pickerNetwork = (page, causedMs, siteDomain) => {
       const gaps = [times[1] - times[0], times[2] - times[1], times[3] - times[2]];
       if (Math.min(...gaps) >= 50 && Math.max(...gaps) - Math.min(...gaps) <= Math.max(...gaps) / 2) polls.add(key);
     }
-    const entry = { at, endAt: null, key };
+    const entry = { at, endAt: null, key, type: request.resourceType() };
     entries.push(entry);
     byRequest.set(request, entry);
   };
@@ -633,9 +658,11 @@ const pickerNetwork = (page, causedMs, siteDomain) => {
   page.on("requestfinished", onDone);
   page.on("requestfailed", onDone);
   const caused = (since) => entries.filter((entry) => !polls.has(entry.key) && entry.at >= since && entry.at <= since + causedMs);
+  const pending = (since) => caused(since).filter((entry) => entry.endAt === null && Date.now() - entry.at < pickerLimits.inflight);
   return {
     mark: (at) => marks.push(at),
-    inflight: (since) => caused(since).filter((entry) => entry.endAt === null && Date.now() - entry.at < pickerLimits.inflight).length,
+    inflight: (since) => pending(since).length,
+    pending,
     // When the action's last caused request started or ended, or 0.
     lastAt: (since) => Math.max(0, ...caused(since).map((entry) => entry.endAt ?? entry.at)),
     stop: () => {
@@ -718,7 +745,53 @@ const pickerEval = async (s, phase, extra = {}) => {
 const pickerMark = (s) => {
   const at = Date.now();
   s.net.mark(at);
+  s.markedAt = at;
   return at;
+};
+// The options_loading failure, its message the fixed reason. Its loading, and its stack's first
+// line, which a host logs, say what still showed the list loading at the last look, as kinds and
+// counts, never page text: new loading signs (see why), loading rows, a busy list, requests the
+// action at since started still in flight, answered() not yet true, and how many options were
+// read when the list was not read to its end (listRead).
+const pickerLoadingText = (loading) => {
+  const plural = (count, word) => count + " " + word + (count === 1 ? "" : "s");
+  const signs = { busy: "busy region", progressbar: "progress bar", loading: "loading class", spinner: "spinner class", searching: "searching class", skeleton: "skeleton class" };
+  const places = { field: "on the field", page: "on the page", list: "in the list", outside_list: "outside the list" };
+  const parts = [];
+  if (loading.signs > 0)
+    parts.push(
+      plural(loading.signs, "new loading sign") + ": " +
+        loading.kinds.map((kind) => signs[kind.sign] + " (" + kind.tag + ") " + places[kind.where]).join(", ") +
+        (loading.signs > loading.kinds.length ? " and " + (loading.signs - loading.kinds.length) + " more" : ""),
+    );
+  if (loading.rows > 0) parts.push(plural(loading.rows, "loading row") + " in the list");
+  if (loading.listBusy) parts.push("the list marked busy");
+  if (loading.requests > 0)
+    parts.push(
+      plural(loading.requests, "request") + " it started in flight (" + loading.requestTypes.join(", ") + ", " +
+        (loading.requests === 1 ? "" : "the oldest ") + (loading.oldestRequestMs / 1000).toFixed(1) + " s)",
+    );
+  if (loading.answered === false) parts.push("answered() not true");
+  if (loading.listRead !== undefined) parts.push("the list not read to its end (" + plural(loading.listRead, "option") + " read)");
+  return parts.length === 0 ? "nothing still showed loading" : parts.join("; ");
+};
+const pickerLoadingFailure = (s, scan, since, answered, listRead) => {
+  const requests = since === undefined ? [] : s.net.pending(since);
+  const loading = {
+    signs: scan?.why?.signs ?? 0,
+    kinds: scan?.why?.kinds ?? [],
+    rows: scan?.why?.rows ?? 0,
+    listBusy: scan?.why?.listBusy ?? false,
+    requests: requests.length,
+    requestTypes: [...new Set(requests.map((entry) => entry.type))],
+    oldestRequestMs: requests.length === 0 ? 0 : Date.now() - Math.min(...requests.map((entry) => entry.at)),
+    answered: s.options.answered && typeof answered === "boolean" ? answered : null,
+    ...(listRead === undefined ? {} : { listRead }),
+  };
+  const failure = Object.assign(pickerFailure("options_loading"), { loading });
+  const stack = String(failure.stack ?? "");
+  failure.stack = "PickerFailure: options_loading (" + pickerLoadingText(loading) + ")" + (stack.includes("\n") ? stack.slice(stack.indexOf("\n")) : "");
+  return failure;
 };
 const pickerTag = (s, name, value) => s.frame.locator("[" + name + "=" + JSON.stringify(value) + "]");
 const pickerChoices = (options) => options.map((option) => ({ names: option.names, value: option.value, disabled: option.disabled, key: option.key }));
@@ -745,7 +818,7 @@ const pickerSettle = async (s, since, before, query) => {
     // No reaction needs a few looks across the idle window, so one slow read cannot end it.
     if (!busy && answered && quiet >= (reacted ? s.settleMs : s.idleMs) && (reacted || looks >= 3)) return { scan, reacted };
     if (now >= s.until) {
-      if (busy || !answered) throw pickerFailure("options_loading");
+      if (busy || !answered) throw pickerLoadingFailure(s, scan, since, answered);
       return { scan, reacted };
     }
     await pickerSleep(40);
@@ -872,7 +945,7 @@ const pickerQuery = async (s, field, wanted, seenAvailable = []) => {
       const { scan, reacted } = await pickerSettle(s, since, before, query);
       const found = await pickerCollect(s, scan, wanted);
       lastFound = found;
-      if (!found.complete) throw pickerFailure("options_loading");
+      if (!found.complete) throw pickerLoadingFailure(s, found.scan, s.markedAt, undefined, found.list.length);
       if (found.ranking.status !== "missing") return { found, field };
       available.push(...pickerAvailable(found.list));
       // A tag input that may create values and shows nothing for the text is a free-entry field.
@@ -915,7 +988,7 @@ const pickerFind = async (s, wanted) => {
   const strong = found.complete && found.ranking.status !== "missing" && ["exact", "normalized"].includes(found.ranking.rank);
   const search = s.options.search ?? (found.scan.search || scan.search ? pickerTag(s, "data-pomerado-pick-search", s.token) : null);
   // A list too long to read whole is narrowed with its search box, or not judged at all.
-  if (!found.complete && search === null) throw pickerFailure("options_loading");
+  if (!found.complete && search === null) throw pickerLoadingFailure(s, found.scan, s.markedAt, undefined, found.list.length);
   if (strong || search === null) return { ...pickerOutcome(found, wanted, s.tie), field: s.control, scan: found.scan, popupKind: scan.kind };
   const queried = await pickerQuery(s, search, wanted, pickerAvailable(found.list));
   const outcome = pickerOutcome(queried.found.ranking.status === "missing" && found.complete && found.ranking.status !== "missing" ? found : queried.found, wanted, s.tie);
@@ -1328,7 +1401,7 @@ const pickerOptions = async (control, options = {}) => {
       }
     }
     const found = await pickerCollect(s, scan, null);
-    if (!found.complete) throw pickerFailure("options_loading");
+    if (!found.complete) throw pickerLoadingFailure(s, found.scan, s.markedAt, undefined, found.list.length);
     await pickerClose(s, field);
     return { kind: s.kind, options: found.list.map((option) => ({ label: option.label, value: option.value, disabled: option.disabled })) };
   } catch (error) {

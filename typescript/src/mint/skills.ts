@@ -5,7 +5,12 @@ import { readScopedFile } from "../filesystem/read.js";
 import { MintFailure } from "./contracts.js";
 import { failureDetail } from "../runtime/failure-detail.js";
 import { hostedFeaturesPreamble } from "../hosted-features.js";
-import { publicationLiveTestsPolicy, publicationOutputPolicy } from "../guardian/publication.js";
+import {
+  publicationLiveTestsPolicy,
+  publicationOutputPolicy,
+  publicationWriteOutcomePolicy,
+  publicationWritePathPolicy,
+} from "../guardian/publication.js";
 
 const catalog = [
   {
@@ -89,15 +94,20 @@ const catalog = [
 const workspaceGuideFiles = [{ path: "README.md", sectionKey: "guide" }] as const;
 
 /**
- * The publication review's rules for live tests and output, installed in the workspace for the
- * minter to read while it explores, so it gathers that evidence before its first publication
- * instead of learning it from a denial. It is the text every host's publication policy includes,
- * not a copy, so a change to a rule reaches the minter in the same release. No host render
- * applies: it is not authoring text.
+ * The publication review's rules for live tests, output and a write's outcome and path, installed
+ * in the workspace for the minter to read while it explores, so it gathers that evidence, and
+ * declares a write's whole path, before its first publication or write step instead of learning
+ * them from a denial. It is the text every host's publication policy includes, not a copy, so a
+ * change to a rule reaches the minter in the same release. No host render applies: it is not
+ * authoring text.
  */
 const publicationReviewRules = {
   path: "reference/publication-review.md",
-  text: [publicationLiveTestsPolicy, publicationOutputPolicy].join("\n\n"),
+  text: [
+    publicationLiveTestsPolicy,
+    publicationOutputPolicy,
+    `${publicationWriteOutcomePolicy} ${publicationWritePathPolicy}`,
+  ].join("\n\n"),
 } as const;
 
 export interface WorkspaceGuide {
