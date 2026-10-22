@@ -20,21 +20,30 @@ import {
   stillOff,
   type OffScreens,
 } from "./autofill-replay-pages.js";
+import { placeOf } from "./session-sign-in.js";
 
 /**
- * Which pages are the recorded screens: by default each screen's exact recorded page; a replay of a
- * tool with a workspace relation puts its workspace screens on the login's workspace origin.
+ * Which pages are the recorded screens: by default each screen's recorded page, its origin and its
+ * path with any trailing slash but the root's dropped; a replay of a tool with a workspace relation
+ * puts its workspace screens on the login's workspace origin.
  */
 export interface ReplayScreens {
   readonly onScreens: (page: string) => boolean;
   readonly matches: (page: string, recorded: AutofillRecipeStep) => boolean;
 }
 
-const exactScreens = (steps: readonly AutofillRecipeStep[]): ReplayScreens => {
-  const pages = new Set(steps.map((step) => step.page));
+/**
+ * The default screens: a page is a screen on that screen's recorded origin and path, as `placeOf`
+ * reads both. A workspace screen records a path alone, so it matches no page here.
+ */
+export const exactScreens = (steps: readonly AutofillRecipeStep[]): ReplayScreens => {
+  const matches = (page: string, recorded: AutofillRecipeStep) => {
+    const here = placeOf(page);
+    return here !== undefined && here === placeOf(recorded.page);
+  };
   return {
-    onScreens: (page) => pages.has(page),
-    matches: (page, recorded) => page === recorded.page,
+    onScreens: (page) => steps.some((step) => matches(page, step)),
+    matches,
   };
 };
 
@@ -67,7 +76,7 @@ const inspectReplayProgression = <E>(
         if (
           !("outcome" in found) &&
           screens.matches(found.page, recorded) &&
-          (found.page !== currentPage ||
+          (placeOf(found.page) !== placeOf(currentPage) ||
             (current.fields.length > 0 &&
               probe.fields.some(
                 (field) => !current.fields.some((previous) => previous.selector === field.selector),

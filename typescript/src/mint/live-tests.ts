@@ -95,6 +95,12 @@ export const LiveTestCase = Schema.Struct({
   expect: LiveTestExpectation,
   /** Run page 1, then the next page through the cursor page 1 returned. */
   next_page: Schema.optionalWith(Schema.Boolean, { exact: true }),
+  /**
+   * The case is the tool's no-match case although it expects a result: its input matches nothing,
+   * and the tool, a count or total, honestly answers it with 0. Like `purpose`, it describes the
+   * case, so it leaves the case's digest, and its result, unchanged.
+   */
+  noMatch: Schema.optionalWith(Schema.Boolean, { exact: true }),
 });
 export type LiveTestCase = typeof LiveTestCase.Type;
 
@@ -659,6 +665,7 @@ export interface LiveTestRecord {
   readonly purpose?: string;
   readonly expect?: LiveTestExpectation;
   readonly nextPage?: true;
+  readonly noMatch?: true;
   /** A failing result the minter replaced by changing the case; kept for the publication review. */
   readonly retired?: true;
   /** A retired failure whose case, unchanged, passed when run again on the same source. */
@@ -699,6 +706,7 @@ export const LiveTestRecord: Schema.Schema<LiveTestRecord> = Schema.Struct({
   purpose: Schema.optionalWith(Schema.String, { exact: true }),
   expect: Schema.optionalWith(LiveTestExpectation, { exact: true }),
   nextPage: Schema.optionalWith(Schema.Literal(true), { exact: true }),
+  noMatch: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   retired: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   flaky: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   signedIn: Schema.optionalWith(Schema.Literal(true), { exact: true }),
@@ -749,6 +757,7 @@ export const caseView = (
     purpose: testCase.purpose,
     expect: testCase.expect,
     ...(testCase.next_page === true ? { next_page: true } : {}),
+    ...(testCase.noMatch === true ? { noMatch: true } : {}),
     status,
     ...(record === undefined
       ? {}
@@ -1129,6 +1138,7 @@ export const liveTestsEvidence = (options: {
     purpose: testCase.purpose,
     expect: testCase.expect,
     ...(testCase.next_page === true ? { next_page: true } : {}),
+    ...(testCase.noMatch === true ? { noMatch: true } : {}),
     input: testCase.input,
     results: Object.fromEntries(
       versions.map((entry) => {
@@ -1137,6 +1147,7 @@ export const liveTestsEvidence = (options: {
           purpose: _purpose,
           expect: _expect,
           next_page: _nextPage,
+          noMatch: _noMatch,
           outputChecks: findings,
           ...view
         } = caseView(testCase, entry.records.get(testCase.id), entry.sourceDigest);
@@ -1221,7 +1232,7 @@ export const liveTestsEvidence = (options: {
       kind: "host_live_tests",
       note: nothing
         ? "Written by the host, never by the minter. The minter designed and ran no live test case, so beyond the example nothing was tested live."
-        : "Written by the host from its own runs, never by the minter. The same cases run on each version of the tool: playwright, the Kernel script, and http, the HTTP version, for each version that ships: a version that does not ship, such as an HTTP version the minter ruled out, is not listed. versions names each version's entrypoint, the source digest its results are judged against, and its counts. Each case's results hold its result on each version, from that version's own batches: one version's run never counts for the other. Each case ran in a fresh script process on a page reset to the site's origin, after one Guardian review of its batch; purpose is the minter's account of what the case establishes. A result's start says how its browser started: cold, first on a new browser with an empty profile, as a caller the site remembers nothing about meets it; warm, on a browser that kept the site data earlier steps left. versions counts each version's coldPasses, the cases that passed cold; a host with one browser runs no case cold. status is against that version's source being published: stale means the source or the case changed after the case ran, and not_run means no batch ran it on that version. outputChecks lists the host's output check findings on a case's output. notTested lists what the minter chose not to test, and why. retired lists, by version, cases the minter deleted, failures it replaced by changing the case, and failures that passed when the unchanged case ran again on the same source (flaky), with their last result. A retired failure stops counting when the host marks it outsideSchema or names its excusedBy. outsideSchema means that version's published input schema bounds a value the failure's input supplied, at path (a JSON pointer into the input) by keyword (the JSON Schema rule it breaks), so the tool no longer claims that input; a field the schema newly requires never marks it. excusedBy names a case that passes the same input on that version's published source after the source changed, with the same expectation or with a refusal the failure's own expectation accepts, such as InvalidInput for a case that expected error. changedExpectationBy names a case that passes the same input with another expectation on that version's published source, for a failure on any source; it excuses nothing by itself. clearedBy, on each retired failure that still counts, says what can clear it: ways, the ways open to it; siteAnswer, when it has a changedExpectationBy, the site's own answer for that input a capture must show (results, no_results or refusal), with refusalStatuses for a refusal; and a note.",
+        : "Written by the host from its own runs, never by the minter. The same cases run on each version of the tool: playwright, the Kernel script, and http, the HTTP version, for each version that ships: a version that does not ship, such as an HTTP version the minter ruled out, is not listed. versions names each version's entrypoint, the source digest its results are judged against, and its counts. Each case's results hold its result on each version, from that version's own batches: one version's run never counts for the other. Each case ran in a fresh script process on a page reset to the site's origin, after one Guardian review of its batch; purpose is the minter's account of what the case establishes. noMatch marks the case the minter gives as the tool's no-match case although it expects a result: its input matches nothing, and the tool, a count or total, answers it with 0. A result's start says how its browser started: cold, first on a new browser with an empty profile, as a caller the site remembers nothing about meets it; warm, on a browser that kept the site data earlier steps left. versions counts each version's coldPasses, the cases that passed cold; a host with one browser runs no case cold. status is against that version's source being published: stale means the source or the case changed after the case ran, and not_run means no batch ran it on that version. outputChecks lists the host's output check findings on a case's output. notTested lists what the minter chose not to test, and why. retired lists, by version, cases the minter deleted, failures it replaced by changing the case, and failures that passed when the unchanged case ran again on the same source (flaky), with their last result. A retired failure stops counting when the host marks it outsideSchema or names its excusedBy. outsideSchema means that version's published input schema bounds a value the failure's input supplied, at path (a JSON pointer into the input) by keyword (the JSON Schema rule it breaks), so the tool no longer claims that input; a field the schema newly requires never marks it. excusedBy names a case that passes the same input on that version's published source after the source changed, with the same expectation or with a refusal the failure's own expectation accepts, such as InvalidInput for a case that expected error. changedExpectationBy names a case that passes the same input with another expectation on that version's published source, for a failure on any source; it excuses nothing by itself. clearedBy, on each retired failure that still counts, says what can clear it: ways, the ways open to it; siteAnswer, when it has a changedExpectationBy, the site's own answer for that input a capture must show (results, no_results or refusal), with refusalStatuses for a refusal; and a note.",
       ...(signedIn
         ? {
             signedIn: true,

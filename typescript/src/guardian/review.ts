@@ -56,6 +56,7 @@ import type {
 } from "./review-contracts.js";
 import {
   decisionForKind,
+  guardianOutcomes,
   outcomeAccepted,
   reviewKindOf,
   reviewOutcomesOf,
@@ -748,6 +749,53 @@ export const reviewFollowUpRounds = requiredReadRounds + 3;
 
 /** The longest decode error a follow-up quotes. */
 const decodeErrorLimit = 2000;
+
+/** The indefinite article before a word in the host's text. */
+const article = (word: string) => (/^[aeiou]/i.test(word) ? "an" : "a");
+
+/**
+ * A refused decision's outcome as the host's text names it: one of the shared format's outcomes,
+ * never another string a reviewer sent, which could carry anything into readable records.
+ */
+const refusedOutcome = (raw: unknown): GuardianOutcome | undefined => {
+  const outcome: unknown =
+    typeof raw === "object" && raw !== null ? Reflect.get(raw, "outcome") : undefined;
+  return guardianOutcomes.find((known) => known === outcome);
+};
+
+/**
+ * Which of a built-in kind's own outcomes holds what a reviewer that answers with another kind's
+ * outcome most often means: that what it reviews should change first. A host-defined kind's
+ * policy says that itself.
+ */
+const refusedOutcomeHint: Record<Exclude<ReviewKind, "host">, string> = {
+  execution:
+    "A step that should change before it runs, or that needs the caller first, is a deny or an escalate, as its policy says.",
+  recovery: "A request for a new browser that should not be granted is a deny.",
+  publication: "A tool that should change before it publishes is a deny.",
+  question: "A request that should change before its caller sees it is a reword.",
+  update:
+    "An update that needs the caller's confirmation and lacks it or gives it ambiguously is a clarify, and one that is wrong as written is a reword.",
+};
+
+/**
+ * The follow-up, once in a review, for a decision whose outcome its kind does not return: the
+ * outcome it refused, the outcomes the kind returns, and which of them holds a change first.
+ */
+const outcomeCorrection = (
+  kind: ReviewKind,
+  kindName: string,
+  outcomes: readonly GuardianOutcome[],
+  raw: unknown,
+) => {
+  const refused = refusedOutcome(raw);
+  return [
+    `The host did not accept this decision: ${refused === undefined ? "its outcome is not one" : `${refused} is not an outcome`} ${article(kindName)} ${kindName} review returns.`,
+    `It returns only ${outcomes.join(", ")}, as trusted_review.outcomes lists.`,
+    "Decide this review again under its policy and return one of them.",
+    ...(kind === "host" ? [] : [refusedOutcomeHint[kind]]),
+  ].join(" ");
+};
 
 /**
  * Why a decision fails to decode, when its decode settles at once with `InvalidDecision`.
@@ -1452,7 +1500,7 @@ export const makeGuardian = (
             if (!outcomeCorrected && !privateKind && outcomeRefused(output)) {
               outcomeCorrected = true;
               followUpRounds++;
-              return `The host did not accept this decision: a ${kindName} review returns only the outcome ${outcomes.join(", ")}, as trusted_review.outcomes lists. Decide this review again under its policy and return one of them.`;
+              return outcomeCorrection(kind, kindName, outcomes, output);
             }
             // A label its outcome does not carry fails to decode; this names the labels it carries.
             const carried =
@@ -1506,11 +1554,16 @@ export const makeGuardian = (
           | undefined;
         const raw =
           pushback === undefined ? output : afterGroundPushback(pending, pushback, output);
-        if (outcomeRefused(raw))
+        if (outcomeRefused(raw)) {
+          // A private kind's failure names no outcome, as its decode failures name no value.
+          const refused = privateKind ? undefined : refusedOutcome(raw);
           return yield* decisionFailure(
-            new Error(`The outcome is not one a ${kind} review returns`),
+            new Error(
+              `The outcome${refused === undefined ? "" : ` ${refused}`} is not one ${article(kind)} ${kind} review returns`,
+            ),
             "InvalidOutcome",
           );
+        }
         // Output that is not a decision at all fails to decode as InvalidDecision.
         const decision = yield* decode(decisionForKind(pending, raw)).pipe(
           Effect.tapError((failure) =>

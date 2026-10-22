@@ -1360,7 +1360,8 @@ export type PublicationDenial = typeof PublicationDenial.Type;
  * - `owner_ended`: the owner chose in an answer to end the build.
  * - `site_lacks_capability`, `site_declined`, `policy`, `host_refused`: the minter's blocked ending
  *   of the same name.
- * - `host_unavailable`: the host, not the task, ended the build.
+ * - `host_unavailable`: the host, not the task, ended the build, such as when Guardian twice returned
+ *   no outcome its review allows (`InvalidOutcome`).
  */
 export const mintStopReasons = [
   "final_text_without_tool",

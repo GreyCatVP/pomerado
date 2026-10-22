@@ -1835,6 +1835,28 @@ it("sends a refused-outcome review back to revise once, and ends the attempt at 
   expect(reviews).toBe(3);
 });
 
+// The second refused outcome ended the attempt with no typed ending and no diagnostic naming
+// why, so a host read the build as a missing publication, though its write had applied.
+it("names the ending of an attempt a second refused outcome ends, and the review that did", async () => {
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        const question = textQuestion("Which account type?");
+        yield* turn.actions.requestInput(question);
+        yield* turn.actions.requestInput(question);
+        expect(turn.isComplete()).toBe(true);
+      }),
+    { reviewQuestion: invalidOutcome },
+  );
+  const outcome = await f.run();
+  expect(outcome).toMatchObject({ build: "incomplete", stopReason: "host_unavailable" });
+  // The host ended it, not an outage: nothing requeues it as one.
+  expect(outcome).not.toHaveProperty("hostFailure");
+  expect(phaseDiagnostics(outcome, "review")).toEqual([
+    { phase: "review", reason: "review_unavailable", code: "InvalidOutcome", review: "question" },
+  ]);
+});
+
 // A refused outcome started the review outage clock, so report_blocked was refused until the
 // agent resubmitted the same request.
 it("lets report_blocked through after a refused-outcome review, which starts no outage", async () => {
@@ -1916,7 +1938,10 @@ it("ends a taken-over attempt at its first refused outcome when its checkpoint a
       agentRecovery: { initial: { agent: freshAgent, harness }, save: () => Effect.void },
     },
   );
-  expect((await takeover.run()).build).toBe("incomplete");
+  expect(await takeover.run()).toMatchObject({
+    build: "incomplete",
+    stopReason: "host_unavailable",
+  });
 });
 
 /** The parsed diagnostics a phase recorded. */
@@ -1954,7 +1979,7 @@ it("records a refused-outcome publication review as a revision, then as ended at
     },
   );
   const outcome = await f.run();
-  expect(outcome.build).toBe("incomplete");
+  expect(outcome).toMatchObject({ build: "incomplete", stopReason: "host_unavailable" });
   expect(outcome).not.toHaveProperty("hostFailure");
   expect(recorded).toEqual([
     expect.objectContaining({
@@ -1967,6 +1992,9 @@ it("records a refused-outcome publication review as a revision, then as ended at
   expect(phaseDiagnostics(outcome, "publication")).toEqual([
     expect.objectContaining({ code: "InvalidOutcome" }),
     expect.objectContaining({ code: "InvalidOutcome" }),
+  ]);
+  expect(phaseDiagnostics(outcome, "review")).toEqual([
+    expect.objectContaining({ reason: "review_unavailable", review: "publication" }),
   ]);
 });
 

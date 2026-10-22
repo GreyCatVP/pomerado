@@ -181,9 +181,10 @@ describe("judgeCase", () => {
 });
 
 describe("caseDigest", () => {
-  it("keeps a result when only the case's purpose is reworded", () => {
+  it("keeps a result when only the case's purpose is reworded or its noMatch mark changes", () => {
     const testCase = { id: "a", purpose: "One.", input: { query: "lamp" }, expect: "result" as const };
     expect(caseDigest({ ...testCase, purpose: "Another." })).toBe(caseDigest(testCase));
+    expect(caseDigest({ ...testCase, noMatch: true })).toBe(caseDigest(testCase));
     expect(caseDigest({ ...testCase, expect: "empty" })).not.toBe(caseDigest(testCase));
   });
 });
@@ -197,6 +198,22 @@ describe("decodeCasesFile", () => {
     const { purpose: _purpose, ...unexplained } = one;
     expect(Either.isLeft(decodeCasesFile(JSON.stringify({ cases: [unexplained] })))).toBe(true);
     expect(decodeCasesFile(undefined)).toEqual(Either.right({ cases: [] }));
+  });
+
+  it("keeps a case's noMatch mark, and refuses one that is not a boolean", () => {
+    const zero = {
+      id: "zero",
+      purpose: "A month with no reviews.",
+      input: { month: 2 },
+      expect: "result",
+      noMatch: true,
+    };
+    expect(decodeCasesFile(JSON.stringify({ cases: [zero] }))).toEqual(
+      Either.right({ cases: [zero] }),
+    );
+    expect(
+      Either.isLeft(decodeCasesFile(JSON.stringify({ cases: [{ ...zero, noMatch: "yes" }] }))),
+    ).toBe(true);
   });
 
   it("keeps what the agent chose not to test, with why", () => {

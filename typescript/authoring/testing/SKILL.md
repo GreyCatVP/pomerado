@@ -98,7 +98,10 @@ run no batch before then. Aim for a handful of cases, not dozens:
   apply, never another throw. Skip it for an input that takes a person's or account's name,
   number or code. For one that takes a record's own key, such as an order or ticket number, use
   one made-up key in the site's own format, with a serial past any the site lists, and expect
-  `invalid_input`. Without a no-results answer, move on: it needs no
+  `invalid_input`. For a read whose answer is a count or total, the no-results case expects
+  `result`, sets `noMatch: true` and returns the count or total as 0: prefer an input the site
+  matches nothing for, and name in its `purpose` the capture where the site applied that input and
+  showed zero. Without a no-results answer, move on: it needs no
   `notTested` entry and no question;
 - for a free-text input, one case with a value the example used written another way, such as in
   other case or with other spacing, punctuation or accents;

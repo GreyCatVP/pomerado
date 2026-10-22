@@ -2417,20 +2417,32 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
        * back to the agent to revise or withdraw, never to resubmit unchanged, so it is not
        * `retryable`; once live execution has closed, an execution goes on through its retained
        * receipt instead. The second ends the attempt incomplete without a host failure, since no
-       * outage caused it and running the attempt again would repeat it.
+       * outage caused it and running the attempt again would repeat it. Its ending is the typed
+       * stop `host_unavailable`, the host's and not the task's, with a `review` diagnostic naming
+       * the review kind, so no host reads it as a missing publication.
        */
       const invalidOutcomeAnswer = (kind: keyof typeof invalidOutcomeSubject) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (stopUnavailableHost())
             return invalidOutcomeEnded(
               "Guardian returned no decision its review allows, so nothing was approved, and the host became unavailable, so the attempt has ended. Preserve recorded effects and receipts.",
             );
           if (invalidOutcomeRepeated()) {
-            terminal ??= {
-              build: "incomplete",
-              summary:
-                "Guardian returned no decision its review allows, again, so the host ended the attempt without publishing. Nothing it was reviewing was approved; recorded effects and receipts are preserved.",
-            };
+            // Another outcome already ended the attempt; it stands, and nothing claims otherwise.
+            if (terminal === undefined) {
+              terminal = {
+                build: "incomplete",
+                stopReason: "host_unavailable",
+                summary:
+                  "Guardian returned no decision its review allows, again, so the host ended the attempt without publishing. Nothing it was reviewing was approved; recorded effects and receipts are preserved.",
+              };
+              yield* diagnose({
+                phase: "review",
+                reason: "review_unavailable",
+                code: "InvalidOutcome",
+                review: kind,
+              });
+            }
             return invalidOutcomeEnded(
               "Guardian again returned no decision its review allows, so the attempt has ended and nothing was approved. Preserve recorded effects and receipts.",
             );
@@ -4330,6 +4342,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
               purpose: testCase.purpose,
               expect: testCase.expect,
               ...(testCase.next_page === true ? { nextPage: true } : {}),
+              ...(testCase.noMatch === true ? { noMatch: true } : {}),
               ...(signedInBatch ? { signedIn: true as const } : {}),
             });
           }

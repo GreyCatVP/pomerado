@@ -1686,6 +1686,166 @@ it("restores an older checkpoint's results as the Playwright version's", async (
   expect(record.cases.every((testCase) => testCase.results["http"]?.status === "not_run")).toBe(true);
 });
 
+// A count's honest answer to an input that matches nothing is zero, a filled value the judge reads
+// as a result, never as empty. The minter marks that case `noMatch`, and the record says so.
+const countSchemas = {
+  input: {
+    type: "object",
+    required: ["month", "year"],
+    properties: {
+      month: { type: "integer", minimum: 1, maximum: 12 },
+      year: { type: "integer" },
+    },
+  },
+  output: {
+    type: "object",
+    required: ["month", "year", "start_date", "end_date", "review_count"],
+    properties: {
+      month: { type: "integer" },
+      year: { type: "integer" },
+      start_date: { type: "string" },
+      end_date: { type: "string" },
+      review_count: { type: "integer" },
+    },
+  },
+};
+const monthCount = (month: number, count: number) => ({
+  status: "completed" as const,
+  output: {
+    month,
+    year: 2024,
+    start_date: `2024-0${month}-01`,
+    end_date: `2024-0${month}-28`,
+    review_count: count,
+  },
+});
+const countCases = (noMatch: boolean) => ({
+  cases: [
+    {
+      id: "busy-month",
+      purpose: "A month the site lists reviews for.",
+      input: { month: 4, year: 2024 },
+      expect: "result",
+    },
+    {
+      id: "quiet-month",
+      purpose: "A month the site lists no reviews for; its filtered list shows a total of 0.",
+      input: { month: 2, year: 2024 },
+      expect: "result",
+      ...(noMatch ? { noMatch: true } : {}),
+    },
+  ],
+});
+const countFinish = {
+  ...finish,
+  metadata: { name: "count_reviews", description: "Count a month's reviews" },
+};
+
+it("keeps a case marked noMatch in the publication record, and marking a passed case keeps its result", async () => {
+  const { host } = liveTestHost(
+    { "busy-month": monthCount(4, 351), "quiet-month": monthCount(2, 0) },
+    undefined,
+    { schemasNow: () => countSchemas },
+  );
+  const published = publications();
+  let root = "";
+  const f = await fixture(
+    async (_request, index) => {
+      // After the batch passed, the minter marks its zero case as the no-match case.
+      if (index === 2)
+        await writeWorkspace(root, { "test/cases.json": JSON.stringify(countCases(true)) });
+      return (
+        [
+          call("execute", example, "example"),
+          call("live_tests", runAll, "run"),
+          call("live_tests", plan, "plan"),
+          call("finish_build", countFinish, "finish"),
+        ][index] ?? prose()
+      );
+    },
+    {
+      liveTests: host,
+      deadline: Deadline.after(30 * 60_000),
+      reviewAndExecute: completedExample,
+      publish: published.publish,
+    },
+    read,
+  );
+  root = (f.workspace as unknown as { root: string }).root;
+  await writeWorkspace(root, {
+    "src/tool.ts": toolSource,
+    "test/cases.json": JSON.stringify(countCases(false)),
+  });
+  const outcome = await f.run();
+
+  // The zero is a result, as before, and the case passes as one.
+  const ran = resultOf(f.requests[2], "run")["cases"] as Record<string, unknown>[];
+  expect(ran.find((testCase) => testCase["id"] === "quiet-month")).toMatchObject({
+    status: "pass",
+    got: "a result",
+  });
+  // The flag describes the case, as its purpose does: adding it leaves the result standing.
+  const planned = resultOf(f.requests[3], "plan")["cases"] as Record<string, unknown>[];
+  expect(planned.find((testCase) => testCase["id"] === "quiet-month")).toMatchObject({
+    status: "pass",
+    noMatch: true,
+  });
+  expect(planned.find((testCase) => testCase["id"] === "busy-month")).not.toHaveProperty("noMatch");
+
+  expect(outcome.build).toBe("published");
+  const record = published.seen[0]?.liveTests as {
+    cases: { id: string; noMatch?: boolean; results: Record<string, { status: string }> }[];
+  };
+  expect(record.cases.find((testCase) => testCase.id === "quiet-month")).toMatchObject({
+    noMatch: true,
+    results: { playwright: { status: "pass" } },
+  });
+  // A case without the flag is recorded as it always was.
+  expect(record.cases.find((testCase) => testCase.id === "busy-month")).not.toHaveProperty(
+    "noMatch",
+  );
+});
+
+it("keeps a case's noMatch in its result across a takeover", async () => {
+  const { host } = liveTestHost(
+    { "busy-month": monthCount(4, 351), "quiet-month": monthCount(2, 0) },
+    undefined,
+    { schemasNow: () => countSchemas },
+  );
+  const checkpoints: MintHarnessSnapshot[] = [];
+  const minter = checkpointingMinter(
+    (index) =>
+      [call("execute", example, "example"), call("live_tests", runAll, "run")][index] ?? prose(),
+  );
+  const f = await fixture(() => prose(), {
+    model: minter.model,
+    liveTests: host,
+    deadline: Deadline.after(30 * 60_000),
+    reviewAndExecute: completedExample,
+    agentRecovery: {
+      save: (_agent, harness) =>
+        Effect.sync(() => {
+          checkpoints.push(harness);
+        }),
+    },
+  }, read);
+  await writeWorkspace((f.workspace as unknown as { root: string }).root, {
+    "src/tool.ts": toolSource,
+    "test/cases.json": JSON.stringify(countCases(true)),
+  });
+  await f.run().catch(() => undefined);
+  const saved = checkpoints.find((harness) => (harness.liveTests ?? []).length > 0);
+  if (saved === undefined) throw new Error("No checkpoint with live test results");
+  const restored = Schema.decodeUnknownSync(MintHarnessSnapshot)(JSON.parse(JSON.stringify(saved)));
+  expect(restored.liveTests?.find((result) => result.id === "quiet-month")).toMatchObject({
+    expect: "result",
+    noMatch: true,
+  });
+  expect(restored.liveTests?.find((result) => result.id === "busy-month")).not.toHaveProperty(
+    "noMatch",
+  );
+});
+
 const signInStep = { ...example, purpose: "authenticate", entrypoint: "src/sign-in.ts" };
 const signingIn: MintDependencies["reviewAndExecute"] = (input, beforeDispatch) =>
   input.purpose === "authenticate"
