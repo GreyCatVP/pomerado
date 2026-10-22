@@ -440,7 +440,33 @@ try {
   if (submitKey === null) await submit.locator.click({ timeout: 5000 });
   else await submit.locator.press(submitKey, { timeout: 5000 });
 } catch {
-  return { submit: "failed", url: primary.url() };
+  // Only once a click failed, within a second: what a click at the submit's centre hits instead,
+  // such as a consent notice over the form, by tag, id, two classes and role, as a ready wait
+  // names a cover. Playwright never sends a click another element would take.
+  const covered = submitKey !== null ? null : await Promise.race([
+    submitHandle.evaluate((element) => {
+      // A submit that shows no box has no spot another element could cover.
+      const box = element.getBoundingClientRect();
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      if (box.width <= 0 || box.height <= 0 || !element.checkVisibility({ visibilityProperty: true }) ||
+        !(x >= 0 && y >= 0 && x < innerWidth && y < innerHeight)) return null;
+      let hit = document.elementFromPoint(x, y);
+      while (hit?.shadowRoot) {
+        const inner = hit.shadowRoot.elementFromPoint(x, y);
+        if (inner === null || inner === hit) break;
+        hit = inner;
+      }
+      const root = hit?.getRootNode();
+      if (!hit || element.contains(hit) || [...(element.labels ?? [])].some((label) => label.contains(hit)) ||
+        (root instanceof ShadowRoot && element.contains(root.host))) return null;
+      return hit.localName + (hit.id ? "#" + hit.id : "") +
+        [...hit.classList].slice(0, 2).map((name) => "." + name).join("") +
+        (hit.getAttribute("role") ? '[role="' + hit.getAttribute("role") + '"]' : "");
+    }).catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+  ]);
+  return { submit: "failed", url: primary.url(), ...(typeof covered === "string" ? { covered: clip(covered) } : {}) };
 }
 let submission = await refusedSubmission();
 if (submission === null && (await navigated))

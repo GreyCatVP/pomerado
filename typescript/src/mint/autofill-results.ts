@@ -127,7 +127,7 @@ export const unansweredFailure = ({ cause: unanswered }: Unanswered) =>
 
 const filledNotices = {
   failed:
-    "The host filled the fields, but its click of the submit failed. You may click that one submit yourself in an explore, and nothing else: never read, change or return a field the host filled. Then continue with the next signInStep, or signedIn.",
+    "The host filled the fields, but its click of the submit failed. If a cookie or consent notice covers it, send that notice's own accept or close control as a signInStep with no fields and ifShown: true, then this screen's signInStep again, instead. You may click that one submit yourself in an explore, and nothing else: never read, change or return a field the host filled. Then continue with the next signInStep, or signedIn.",
   none: "The host filled the fields; the screen has no button. Explore read-only to see what it revealed, then send the next signInStep for it.",
   clicked:
     "The host filled the fields and clicked the submit. Explore read-only to read the next screen (never read a field the host filled), then send its signInStep, or signInStep.signedIn with what shows the site signed in.",
@@ -139,6 +139,10 @@ const filledNotices = {
     "The host filled the fields, but the page kept the submit disabled through the host's wait for it to be enabled, so the host never clicked it. Never click it yourself: explore read-only to see what the page still needs before it enables the submit, such as another field, a checkbox or a choice (never read a field the host filled), then correct the sign-in step.",
   page: "The host filled the fields, and the page may have sent them itself: once the last field was filled, the screen moved on, emptied its fields or stopped taking typing before the host clicked anything. Explore read-only to read the next screen (never read a field the host filled), then send its signInStep, or signInStep.signedIn with what shows the site signed in.",
 } as const;
+
+/** A filled step whose submit another element covered (`covered`), shown as `step.coveredBy`. */
+export const coveredNotice =
+  "The host filled the fields, but another element of the page covered the submit (step.coveredBy), so the host's click never reached it and nothing was sent. If it is a cookie or consent notice, check read-only that its own accept or close control shows, send that control as a signInStep with no fields and ifShown: true, then send this screen's signInStep again: the host clicks the notice first, here and on every run where it shows. Otherwise you may click that one submit yourself in an explore, and nothing else: never read, change or return a field the host filled.";
 
 /** A fill whose answer was lost, other than a field's typing call's: the submit's call included. */
 export const lostFillNotice = `The host lost the fill call's answer: the fields and the submit may have reached the site. It never retries a fill by itself. Explore read-only to see the page, then continue with the next signInStep, ${autofillRecovery}.`;
@@ -171,5 +175,6 @@ export const stepNotice = (
     (stepReport.submit === "failed" || stepReport.submit === "clicked")
   )
     return keyNotices[stepReport.submit];
+  if (stepReport.submit === "failed" && stepReport.covered !== undefined) return coveredNotice;
   return filledNotices[stepReport.submit];
 };

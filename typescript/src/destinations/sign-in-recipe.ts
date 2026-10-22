@@ -107,6 +107,8 @@ export interface RecordedSignInStep {
   readonly methods?: AutofillStep["methods"];
   /** The secrets an earlier screen took that this one asks for again with a second factor. */
   readonly refills?: SignInRecipeStep["refills"];
+  /** A notice's own control the page shows on some visits only. */
+  readonly ifShown?: true | undefined;
   /** The page the step ran on, origin and path only. */
   readonly page: string;
 }
@@ -151,6 +153,7 @@ const inStepOrder = (step: SignInRecipeStep): SignInRecipeStep => ({
         },
   ),
   ...(step.refills === undefined ? {} : { refills: step.refills }),
+  ...(step.ifShown === undefined ? {} : { ifShown: step.ifShown }),
   ...(step.submit === undefined ? {} : { submit: step.submit }),
   ...(step.submitKey === undefined ? {} : { submitKey: step.submitKey }),
   ...(step.submittedBy === undefined ? {} : { submittedBy: step.submittedBy }),

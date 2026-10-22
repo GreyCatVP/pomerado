@@ -12,6 +12,7 @@ import { MintFailure, type SignInStep } from "../../src/mint/contracts.js";
 import { makeSignInRecorder } from "../../src/mint/sign-in-recorder.js";
 import type { WebsiteCredentials } from "../../src/runtime/authentication.js";
 import type { InputAsker, InputRequest } from "../../src/runtime/input-request.js";
+import { makeAfterSubmit } from "../../src/standalone/after-submit.js";
 import { makeSignInBrowser } from "../../src/standalone/authentication.js";
 
 const site = "example.test";
@@ -382,6 +383,60 @@ it("counts a screen as sent once the minter goes on after the host's click faile
     }),
   );
   expect(published?.recipe.steps[0]).toMatchObject({ submittedBy: "minter" });
+});
+
+// A consent notice covers the login's submit: the host's click never reached it. The minter sends
+// the notice's own control as an ifShown step, then the login screen again, its one refill, and
+// the recipe clicks the notice first, never the covered attempt.
+it("records a notice's own control before the screen it covered, filled once more", async () => {
+  let fills = 0;
+  const host = harness({
+    report: (step) => {
+      fills += 1;
+      return {
+        outcome: "filled",
+        fields: step.fields.map((field) => ({ slot: field.slot, status: "filled" as const })),
+        submit: fills === 1 ? "failed" : "clicked",
+        ...(fills === 1 ? { covered: "div#consent.notice" } : {}),
+        url: `${origin}/login`,
+      };
+    },
+  });
+  const consent: SignInStep = { fields: [], submit: "#consent .accept", ifShown: true };
+  const published = await host.run((recorder) =>
+    Effect.gen(function* () {
+      const covered = yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      expect(covered.report).toMatchObject({ submit: "failed", covered: "div#consent.notice" });
+      expect(covered.result["nextStep"]).toContain("covered the submit (step.coveredBy)");
+      // The local host shows the cover by the name the notice uses.
+      const afterSubmit = makeAfterSubmit({ workspace: { install: () => Effect.void }, screen: Effect.succeed });
+      const shown = yield* afterSubmit(covered.report!);
+      expect(shown).toMatchObject({ coveredBy: "div#consent.notice" });
+      expect(shown).not.toHaveProperty("covered");
+      yield* recorder.step(consent, undefined, Effect.void);
+      const again = yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      expect(again.report).toMatchObject({ submit: "clicked" });
+      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBe(true);
+      return recorder.published();
+    }),
+  );
+  expect(published?.recipe).toEqual({
+    version: 5,
+    steps: [
+      { page: `${origin}/login`, fields: [], ifShown: true, submit: "#consent .accept", submittedBy: "host" },
+      {
+        page: `${origin}/login`,
+        fields: [
+          { selector: "#user", accepts: ["username"] },
+          { selector: "#password", slot: "password" },
+        ],
+        submit: "#sign-in",
+        submittedBy: "host",
+      },
+    ],
+    signedIn: { selector: "#account-menu" },
+  });
+  expect(host.filled.map(({ values }) => values.length)).toEqual([2, 0, 2]);
 });
 
 // A refused step shows the minter went on from the screen before, as a method chooser shows

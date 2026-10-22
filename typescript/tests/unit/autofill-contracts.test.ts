@@ -2,6 +2,11 @@ import { Either, Schema } from "effect";
 import { expect, it } from "vitest";
 import { RejectedMarker, SecretSlots } from "../../src/destinations/autofill-contracts.js";
 import { autofillSignedInCode } from "../../src/destinations/autofill-page-code.js";
+import {
+  decodeSignInRecipe,
+  signInRecipe,
+  signInRecipeText,
+} from "../../src/destinations/sign-in-recipe.js";
 import { SignInStep } from "../../src/mint/contracts.js";
 
 it("accepts a one-use private answer as a field but never as a recorded rejection", () => {
@@ -63,4 +68,45 @@ it("keeps the signed-in page code's popups fifth, with no challenge check by def
   expect(code).toContain('const popupOrigins = ["https://login.example.test"];');
   expect(code).toContain("const challengeFields = [];");
   expect(code).toContain("const authenticationOrigins = [];");
+});
+
+// A notice the page shows only on some visits, such as a cookie or consent banner over the form,
+// is a step that fills nothing and clicks the notice's own control when it shows.
+const consentStep = { fields: [], submit: "#consent .accept", ifShown: true };
+it("accepts ifShown only on a step that fills no field and clicks one control", () => {
+  expect(Schema.decodeUnknownSync(SignInStep)(consentStep)).toEqual(consentStep);
+  for (const step of [
+    { ...consentStep, fields: [{ selector: "#password", slot: "password" }] },
+    { fields: [], ifShown: true },
+    { ...consentStep, methods: [{ method: "sms", selector: "#consent .accept" }] },
+    { ...consentStep, ifShown: false },
+  ])
+    expect(Either.isLeft(Schema.decodeUnknownEither(SignInStep)(step))).toBe(true);
+});
+
+const loginPage = "https://www.example.test/login";
+const recordedLogin = {
+  page: loginPage,
+  fields: [{ selector: "#password", slot: "password" as const }],
+  submit: "#sign-in",
+  submittedBy: "host" as const,
+};
+const recordedConsent = { page: loginPage, fields: [], submit: "#consent .accept", submittedBy: "host" as const };
+
+// A host that predates ifShown must refuse the step rather than wait for it on every run, so only
+// version 5, which decodes strictly, carries it; every other recipe keeps its version and bytes.
+it("writes ifShown in a version 5 recipe only, and a recipe without it as before", () => {
+  const withNotice = signInRecipe([{ ...recordedConsent, ifShown: true }, recordedLogin], { selector: "#account" });
+  expect(withNotice).toMatchObject({ version: 5, steps: [{ ifShown: true }, { submit: "#sign-in" }] });
+  expect(decodeSignInRecipe(signInRecipeText(withNotice))).toEqual(withNotice);
+  const popup = { opener: "primary" as const, origin: "https://www.example.test" };
+  expect(
+    signInRecipe([{ ...recordedConsent, ifShown: true, popup }, recordedLogin], { selector: "#account" }),
+  ).toMatchObject({ version: 5 });
+  const plain = signInRecipe([recordedConsent, recordedLogin], { selector: "#account" });
+  expect(plain.version).toBe(1);
+  expect(signInRecipeText(plain)).not.toContain("ifShown");
+  // Strict version 5 refuses ifShown on a step that fills a field.
+  const filling = { ...withNotice, steps: [{ ...recordedLogin, ifShown: true }] };
+  expect(decodeSignInRecipe(JSON.stringify(filling))).toBe("invalid");
 });

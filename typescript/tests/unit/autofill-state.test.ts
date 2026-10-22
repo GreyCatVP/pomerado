@@ -1,5 +1,6 @@
 import { Effect } from "effect";
 import { expect, it } from "vitest";
+import { recipeStep } from "../../src/destinations/autofill-recipe.js";
 import { checkAutofillSignedIn } from "../../src/destinations/autofill-step.js";
 import type { AutofillSignInState } from "../../src/runtime/autofill-state.js";
 import {
@@ -128,6 +129,65 @@ it("counts a screen whose host click never ran as submitted by the minter once i
   expect(signIn.steps.at(-1)?.submittedBy).toBe("minter");
   // Settling again moves nothing.
   expect(settleMinterSubmit(signIn)).toEqual([]);
+});
+
+// A screen whose submit another element covered, such as a consent notice: the host's click never
+// reached it. The screen still counts once the minter goes on, and filled again after the notice's
+// own control, it replaces its covered record, so the recipe clicks the notice first.
+const coveredLogin = {
+  fields: [
+    { selector: "#user", slot: "username" as const, accepts: ["username" as const] },
+    { selector: "#password", slot: "password" as const },
+  ],
+  submit: "#go",
+};
+const loginScreen = { ...screen, targets: { fields: [target, target], submit: target } };
+const loginValues = ["synthetic-user", "synthetic-password"];
+const filledLogin = (submit: "failed" | "clicked", covered?: string) => ({
+  outcome: "filled" as const,
+  fields: [
+    { slot: "username" as const, status: "filled" as const },
+    { slot: "password" as const, status: "filled" as const },
+  ],
+  submit,
+  ...(covered === undefined ? {} : { covered }),
+  url: screen.page,
+});
+
+it("marks a screen whose submit was covered, and still counts it once the minter goes on", () => {
+  const signIn = state();
+  Effect.runSync(armStep(signIn, coveredLogin, loginScreen, loginValues, noSecret));
+  recordStep(signIn, coveredLogin, filledLogin("failed", "div#consent"));
+  expect(signIn.steps.at(-1)?.covered).toBe(true);
+  expect(settleMinterSubmit(signIn).toSorted()).toEqual(["password", "username"]);
+  expect(signIn.steps.at(-1)).toMatchObject({ covered: true, submittedBy: "minter" });
+  expect(recipeStep(signIn.steps[0]!)).not.toHaveProperty("covered");
+});
+
+it("records a notice's control before the covered screen once that screen is filled again", () => {
+  const signIn = state();
+  Effect.runSync(armStep(signIn, coveredLogin, loginScreen, loginValues, noSecret));
+  recordStep(signIn, coveredLogin, filledLogin("failed", "div#consent"));
+  settleMinterSubmit(signIn);
+  const consent = { fields: [], submit: "#consent .accept", ifShown: true as const };
+  Effect.runSync(
+    armStep(signIn, consent, { ...screen, targets: { fields: [], submit: target } }, [], noSecret),
+  );
+  recordStep(signIn, consent, { outcome: "filled", fields: [], submit: "clicked", url: screen.page });
+  Effect.runSync(armStep(signIn, coveredLogin, loginScreen, loginValues, noSecret));
+  recordStep(signIn, coveredLogin, filledLogin("clicked"));
+  expect(signIn.steps.map(recipeStep)).toEqual([
+    { page: screen.page, fields: [], ifShown: true, submit: "#consent .accept", submittedBy: "host" },
+    {
+      page: screen.page,
+      fields: [
+        { selector: "#user", accepts: ["username"] },
+        { selector: "#password", slot: "password" },
+      ],
+      submit: "#go",
+      submittedBy: "host",
+    },
+  ]);
 });
 
 // The proof a build's and a run's sign-in needs before it verifies the login: the identifier alone

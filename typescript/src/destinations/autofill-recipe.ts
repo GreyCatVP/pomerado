@@ -168,12 +168,15 @@ export const isSecondFactor = (slot: string) => slot === "code" || slot === "rec
  * step fills a field and names no submit or method choice. It may also list `refills`, the
  * secrets an earlier screen of the sign-in took that this screen asks for again, as a site that
  * wants the password re-entered with a one-time code does: only a screen that takes the refilled
- * field and a second factor may list one.
+ * field and a second factor may list one. A step that fills no field and clicks one control may be
+ * `ifShown`: the control of a notice the page shows on some visits only, which a run clicks where
+ * it shows and goes on without where it does not.
  */
 const KeyRecipeStep = Schema.Struct({
   ...WorkspaceRecipeStep.fields,
   submitKey: Schema.optional(SubmitKey),
   refills: Schema.optional(Schema.Array(RefillSlot).pipe(Schema.minItems(1), Schema.maxItems(1))),
+  ifShown: Schema.optional(Schema.Literal(true)),
 }).pipe(
   Schema.filter(
     (step) =>
@@ -190,12 +193,19 @@ const KeyRecipeStep = Schema.Struct({
         )) ||
       "a step's refills name a field it takes, and it takes a code or recovery code",
   ),
+  Schema.filter(
+    (step) =>
+      step.ifShown === undefined ||
+      (step.fields.length === 0 && step.submit !== undefined && step.methods === undefined) ||
+      "an ifShown step fills no field and clicks one control, with no methods",
+  ),
 );
 /**
- * Version 5: version 4 whose steps may submit with a key (`submitKey`) or refill a secret
- * (`refills`). A host that does not know version 5 refuses it, so it never replays such a step
- * without submitting it or without the refill; a version 5 recipe with a key this host does not
- * know is refused too, as a version 5 host that predates `refills` refuses one that has it.
+ * Version 5: version 4 whose steps may submit with a key (`submitKey`), refill a secret
+ * (`refills`) or click a notice only where it shows (`ifShown`). A host that does not know version
+ * 5 refuses it, so it never replays such a step without submitting it, without the refill or as a
+ * step it must find; a version 5 recipe with a key this host does not know is refused too, as a
+ * version 5 host that predates `refills` or `ifShown` refuses one that has it.
  */
 export const KeySubmitAutofillRecipe = workspacePages(
   Schema.Struct({
@@ -248,6 +258,8 @@ interface RecordedRecipeStep {
   readonly methods?: AutofillRecipeStep["methods"] | undefined;
   /** The secrets an earlier screen took that this one asks for again with a second factor. */
   readonly refills?: AutofillRecipeStep["refills"] | undefined;
+  /** A notice's own control the page shows on some visits only. */
+  readonly ifShown?: true | undefined;
   /** The page the step ran on, origin and path only. */
   readonly page: string;
 }
@@ -279,6 +291,7 @@ export const recipeStep = (step: RecordedRecipeStep): AutofillRecipeStep => ({
       : { selector: field.selector, accepts: field.accepts ?? [field.slot] },
   ),
   ...(step.refills === undefined ? {} : { refills: step.refills }),
+  ...(step.ifShown === undefined ? {} : { ifShown: step.ifShown }),
   ...(step.submit === undefined ? {} : { submit: step.submit }),
   ...(step.submitKey === undefined ? {} : { submitKey: step.submitKey }),
   ...(step.submittedBy === undefined ? {} : { submittedBy: step.submittedBy }),
@@ -286,8 +299,8 @@ export const recipeStep = (step: RecordedRecipeStep): AutofillRecipeStep => ({
 });
 
 /**
- * A verified sign-in's recipe: version 5 only when a step submits with a key or refills a secret
- * (`refills`), else version 4 only when its sign-in may move to a workspace host
+ * A verified sign-in's recipe: version 5 only when a step submits with a key, refills a secret
+ * (`refills`) or is `ifShown`, else version 4 only when its sign-in may move to a workspace host
  * (`origins.workspace`, or a workspace step), else version 2 only with a popup or an approval,
  * else version 1. A security answer's question selector rides in any of them. Versions 4 and 5
  * write `workspace` before `steps`.
@@ -297,7 +310,12 @@ export const autofillRecipe = <SignedIn>(
   signedIn: SignedIn,
   origins: AutofillRecipeOrigins = {},
 ) => {
-  if (steps.some((step) => step.submitKey !== undefined || step.refills !== undefined))
+  if (
+    steps.some(
+      (step) =>
+        step.submitKey !== undefined || step.refills !== undefined || step.ifShown !== undefined,
+    )
+  )
     return {
       version: 5 as const,
       ...(origins.workspace === undefined

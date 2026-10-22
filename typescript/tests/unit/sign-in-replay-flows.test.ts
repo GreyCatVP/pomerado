@@ -1011,3 +1011,60 @@ it("refuses an approval before any request carried the identifier", async () => 
   expect(steps(fake)).toEqual(["ask:missing_credentials"]);
 });
 
+
+// A cookie or consent notice the login page shows a new browser over its form, on the login's own
+// page, which its accept control dismisses for good. A step marked ifShown clicks it where it
+// shows; a run where it does not show goes on once the login screen is ready and the notice
+// stayed away 1.5 s. Any other step that fills nothing still waits for its own screen.
+const consentSite = (shown: boolean) => {
+  const screens: Record<string, readonly string[]> = {
+    login: shown ? [...loginScreen, "#consent .accept"] : loginScreen,
+    account: [],
+  };
+  return scriptedSite({
+    entry: "login",
+    screens,
+    fill: (_page, values) => {
+      if (values.length > 0) return signedLogin(values) ? { next: "account", signIn: true } : {};
+      screens["login"] = loginScreen;
+      return {};
+    },
+  });
+};
+const consentStep = { page: `${origin}/login`, fields: [], submit: "#consent .accept", submittedBy: "host" as const };
+const noticeRecipe: SignInRecipe = {
+  version: 5,
+  steps: [{ ...consentStep, ifShown: true }, loginStep],
+  signedIn: { selector: "#account" },
+};
+
+it("clicks a recorded notice where it shows, then signs in", async () => {
+  const fake = consentSite(true);
+  const { result } = await signIn(noticeRecipe, fake);
+  expect(result).toEqual(Either.right({ alreadySignedIn: false }));
+  expect(fake.fills).toEqual([
+    { page: "login", values: [] },
+    { page: "login", values: [login.username, login.password] },
+  ]);
+});
+
+it("goes on past a recorded notice that does not show once the login screen is ready", { timeout: 30_000 }, async () => {
+  const fake = consentSite(false);
+  const started = Date.now();
+  const { result } = await signIn(noticeRecipe, fake, {}, { stepWaitMs: 10_000, pollMs: 20 });
+  expect(result).toEqual(Either.right({ alreadySignedIn: false }));
+  expect(fake.fills).toEqual([{ page: "login", values: [login.username, login.password] }]);
+  // Each pass, without values and with them, waited the notice's 1.5 s, never the screen's wait.
+  const took = Date.now() - started;
+  expect(took).toBeGreaterThanOrEqual(3_000);
+  expect(took).toBeLessThan(10_000);
+});
+
+it("still waits for a fieldless step not marked ifShown on the login's own page", async () => {
+  const fake = consentSite(false);
+  const { result } = await signIn(recipe(consentStep, loginStep), fake);
+  expect(result).toEqual(
+    Either.left(new SignInRunFailed({ code: "RecipeFailed", reason: "not_found" })),
+  );
+  expect(fake.fills).toEqual([]);
+});

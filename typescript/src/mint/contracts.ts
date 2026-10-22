@@ -558,10 +558,22 @@ export const SignInStep = Schema.Union(
         Schema.maxItems(8),
       ),
     ),
+    ifShown: Schema.optional(
+      Schema.Literal(true).annotations({
+        description:
+          "On a step that fills no field: submit is the own accept or close control of a notice the page shows only on some visits, such as a cookie or consent banner over the sign-in form. The host clicks it when it shows; a run where it does not show goes on to the next screen.",
+      }),
+    ),
   }).pipe(
     Schema.filter((step) => step.fields.length > 0 || step.submit !== undefined, {
       message: () => "a sign-in step fills a field or clicks a control",
     }),
+    Schema.filter(
+      (step) =>
+        step.ifShown === undefined ||
+        (step.fields.length === 0 && step.submit !== undefined && step.methods === undefined),
+      { message: () => "an ifShown step fills no field and clicks one control, with no methods" },
+    ),
     Schema.filter(
       (step) =>
         step.submitKey === undefined ||

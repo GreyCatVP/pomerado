@@ -17,11 +17,18 @@ const failed = (report: AutofillStepReport) =>
   report.outcome !== "filled" ||
   (report.submit !== "clicked" && report.submit !== "none" && report.submit !== "page");
 
+/** A report whose submit another element covered names it as the notice does, cut to 120. */
+const coveredBy = (report: AutofillStepReport) => {
+  if (report.outcome !== "filled" || report.covered === undefined) return report;
+  const { covered, ...shown } = report;
+  return { ...shown, coveredBy: covered.slice(0, 120) };
+};
+
 /**
  * Each sign-in step's result as the minter reads it. After a clicked submit the host saves the
  * page's controls, screened like other workspace data, to `captures/after-submit/<step>.json`
  * (read-only) and names the file in one line. A step that fails carries the last saved controls
- * inline as well, capped.
+ * inline as well, capped, and one whose submit another element covered names it as `coveredBy`.
  */
 export const makeAfterSubmit = (options: {
   readonly workspace: Pick<LocalWorkspace, "install">;
@@ -43,8 +50,9 @@ export const makeAfterSubmit = (options: {
         last = { path, saved };
         return { ...shown, nextScreen: `The next screen's controls are in ${path}.` };
       }
+      const named = coveredBy(report);
       return failed(report) && last !== undefined
-        ? { ...report, lastScreen: inlineControls(last.path, last.saved) }
-        : report;
+        ? { ...named, lastScreen: inlineControls(last.path, last.saved) }
+        : named;
     });
 };

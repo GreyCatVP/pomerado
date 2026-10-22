@@ -350,6 +350,42 @@ for (const [name, controls] of [
     expect(received).toEqual([]);
   });
 
+/** A cookie or consent notice laid over the whole page, with its own accept control. */
+const consentNotice = (id: string) =>
+  `<div id="${id}" class="notice banner extra" role="dialog" style="position:fixed;inset:0;z-index:10;background:#fff"><button class="accept">Accept</button></div>`;
+
+// Playwright never sends a click that another element would take, so nothing reaches the site,
+// and the report names what covers the submit: its tag, id, first two classes and role.
+test("a submit a consent notice covers fails unsent, naming the notice", async ({ page }) => {
+  const received = await serve(page, `<button id="continue">Sign in</button>${consentNotice("consent")}`);
+  const inspection = await inspect(page);
+  if ("outcome" in inspection) throw new Error(`Inspection refused: ${inspection.reason}`);
+  const report = await fill(page, inspection);
+  expect(report).toMatchObject({
+    outcome: "filled",
+    fields: [{ slot: "password", status: "filled" }],
+    submit: "failed",
+    covered: 'div#consent.notice.banner[role="dialog"]',
+  });
+  expect(received).toEqual([]);
+});
+
+// Page code can copy a typed value into an element's id or class, so a cover that names one of the
+// step's values is never reported.
+test("a covered submit names no notice whose id holds a typed value", async ({ page }) => {
+  const received = await serve(
+    page,
+    `<label>Username<input id="username" name="username"></label><button id="continue">Sign in</button>${consentNotice("consent-Synthetic-User")}`,
+  );
+  const inspection = await inspect(page, usernameAndPassword);
+  if ("outcome" in inspection) throw new Error(`Inspection refused: ${inspection.reason}`);
+  const report = await fill(page, inspection, usernameAndPassword, ["synthetic-user", password]);
+  expect(report).toMatchObject({ outcome: "filled", submit: "failed" });
+  expect(report).not.toHaveProperty("covered");
+  expect(JSON.stringify(report).toLowerCase()).not.toContain("synthetic-user");
+  expect(received).toEqual([]);
+});
+
 test("a changed anchor destination is refused after typing without sending the form", async ({
   page,
 }) => {

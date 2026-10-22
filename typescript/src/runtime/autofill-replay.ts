@@ -66,6 +66,7 @@ const screenFor = <E extends YieldableError, V extends string, L extends Autofil
     const step: AutofillStep = replay.resolve({
       fields: recorded.fields,
       ...screenSubmit(recorded),
+      ...(recorded.ifShown === undefined ? {} : { ifShown: recorded.ifShown }),
     });
     if (recorded.methods === undefined) return step;
     // The choice screen shows before a method is picked; its first option finds it.

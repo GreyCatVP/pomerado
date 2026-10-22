@@ -108,6 +108,8 @@ export interface AutofillStepRequest {
   /** A two-factor method choice: every method offered, and `submit` the one picked. */
   readonly methods?:
     readonly { readonly method: SignInMethodChoice; readonly selector: string }[] | undefined;
+  /** A notice's own control the page shows on some visits only; see `AutofillStep.ifShown`. */
+  readonly ifShown?: true | undefined;
 }
 
 /**
@@ -126,6 +128,12 @@ export interface AutofillStep<Slot extends FillSlot = AutofillSlot> {
   /** A two-factor method choice: every method offered, and `submit` the one picked. */
   readonly methods?:
     readonly { readonly method: SignInMethodChoice; readonly selector: string }[] | undefined;
+  /**
+   * A step that fills no field and whose `submit` is the own control of a notice the page shows
+   * on some visits only, such as a cookie or consent banner over the form: a run clicks it where
+   * it shows and goes on without it where it does not.
+   */
+  readonly ifShown?: true | undefined;
 }
 
 /** Whether the host submits the step itself: it clicks its submit or presses its submit key. */
@@ -393,6 +401,12 @@ export type AutofillStepReport =
        * to a workspace file for the minter (`afterSubmitPath`) rather than showing them inline.
        */
       readonly controls?: PageControls;
+      /**
+       * Host-only: on a `failed` click, the element a click at the submit's centre hit instead,
+       * as `tag#id.class.class[role="..."]`, such as a consent notice over the form: never one
+       * that names a value of the step.
+       */
+      readonly covered?: string;
     }
   | {
       readonly outcome: "uncertain";

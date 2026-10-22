@@ -319,6 +319,32 @@ const holdShown = <V extends string>(
     });
 };
 
+/**
+ * One screen wait's pass over a step the page shows on some visits only (`ifShown`), such as a
+ * consent notice's own control: true once the next recorded screen is ready and has stayed so, the
+ * step absent all along, `landingSettleMs` (1.5 s) or until the wait's deadline. Only then: any
+ * other step waits for its own screen as before.
+ */
+const passUnshown = <E>(
+  hooks: Pick<AutofillHooks<E>, "inspect">,
+  resolve: (request: AutofillStepRequest) => AutofillStep,
+  screens: ReplayScreens,
+) => {
+  let readySince: number | undefined;
+  return (step: AutofillStep, next: AutofillRecipeStep, until: number) =>
+    Effect.gen(function* () {
+      if (step.ifShown !== true) return false;
+      const found = yield* hooks.inspect(resolve(next));
+      if ("outcome" in found || !screens.matches(found.page, next)) {
+        readySince = undefined;
+        return false;
+      }
+      const now = yield* Clock.currentTimeMillis;
+      readySince ??= now;
+      return now - readySince >= landingSettleMs || now >= until;
+    });
+};
+
 /** What a screen's wait reads of the replay's input. */
 type ScreenWaitInput<E extends YieldableError, V extends string> = Pick<
   AutofillReplayInput<E, V>,
@@ -410,12 +436,23 @@ export const makeReplayScreenWait = <
       const entry = { at: undefined as OffScreens | undefined };
       let waitUntil = until;
       const held = holdShown(input, progress, timing);
+      const unshown = passUnshown(hooks, resolve, screens);
+      const nextScreen = later[0];
       while (true) {
         const stage = yield* inspectStage(step, currentPage, later, alternatives);
         if (stage === "extra_retried") continue;
         if (typeof stage === "string") return stage;
         if (yield* held(step, stage.found, waitUntil)) continue;
         if (stage.found !== undefined) return { found: stage.found } as const;
+        if (
+          nextScreen !== undefined &&
+          stage.waiting !== undefined &&
+          (yield* unshown(step, nextScreen, waitUntil))
+        ) {
+          const nextStep = recipe.steps.indexOf(nextScreen);
+          yield* input.emit({ stage: "skipped", reason: "not_shown", nextStep });
+          return "skipped" as const;
+        }
         const inspected = stage.waiting ?? stage.pageError;
         const here = yield* checkHere;
         const at = yield* now;

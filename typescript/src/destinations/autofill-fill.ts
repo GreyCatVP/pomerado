@@ -78,6 +78,8 @@ const FillAnswer = Schema.Union(
     submit: Schema.Literal("clicked", "failed", "disabled", "none"),
     url: Schema.String,
     controls: Schema.optional(PageControls),
+    /** What a failed click's spot showed instead of the submit, by tag, id, classes and role. */
+    covered: Schema.optional(Schema.String),
   }),
   GuardRefusal,
 );
@@ -216,6 +218,10 @@ const filledReport = (
   ...trustedByHost(progress),
 });
 
+/** Whether a text holds any of the step's values, whatever its case. */
+const holdsValue = (text: string, values: readonly string[]) =>
+  values.some((value) => value !== "" && text.toLowerCase().includes(value.toLowerCase()));
+
 /** The labels a failed call that held a value keeps of its error, by their names in its context. */
 const errorLabels = { code: "errorCode", reason: "errorReason", method: "errorMethod" } as const;
 
@@ -224,12 +230,10 @@ const errorLabels = { code: "errorCode", reason: "errorReason", method: "errorMe
  * only when no value of the step appears in it. Never the error's message or parameters.
  */
 const valueFreeLabels = (error: Error, values: readonly string[]) => {
-  const held = values.filter((value) => value !== "").map((value) => value.toLowerCase());
   const labels: Record<string, string> = {};
   for (const [key, name] of Object.entries(errorLabels)) {
     const label: unknown = Reflect.get(error, key);
-    if (typeof label === "string" && !held.some((value) => label.toLowerCase().includes(value)))
-      labels[name] = label;
+    if (typeof label === "string" && !holdsValue(label, values)) labels[name] = label;
   }
   return labels;
 };
@@ -768,5 +772,14 @@ export const fillAutofillStep = (input: FillInput): Effect.Effect<AutofillStepRe
         }),
       );
     const report = filledReport(step, progress, answer.submit, answer.url);
-    return answer.controls === undefined ? report : { ...report, controls: answer.controls };
+    // Page code may copy a typed value into an element's id or class, so such a cover is dropped.
+    const covered =
+      answer.covered === undefined || holdsValue(answer.covered, input.values)
+        ? {}
+        : { covered: answer.covered };
+    return {
+      ...report,
+      ...covered,
+      ...(answer.controls === undefined ? {} : { controls: answer.controls }),
+    };
   });

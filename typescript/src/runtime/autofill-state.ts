@@ -167,6 +167,13 @@ interface AutofillRecordedStep {
   readonly methods?: AutofillRecipeStep["methods"];
   /** The password an earlier screen took that this one asked for again beside a second factor. */
   readonly refills?: AutofillRecipeStep["refills"];
+  /** A notice's own control the page shows on some visits only. */
+  readonly ifShown?: true;
+  /**
+   * Host-only, never in a recipe: another element covered the submit, so the host's click never
+   * reached it. Filled again, the screen replaces this record (`armScreened`).
+   */
+  readonly covered?: true;
   /** The page the step ran on, origin and path only. */
   readonly page: string;
 }
@@ -393,6 +400,17 @@ const armScreened = (
     const identity = identities[index];
     return identity === undefined ? field : { ...field, identity };
   };
+  // The same screen filled again after its submit was covered replaces that record, so a step
+  // between them, such as the covering notice's own control, comes first in the recipe.
+  const selectors = JSON.stringify(step.fields.map((field) => field.selector));
+  const covered = state.steps.findIndex(
+    (recorded) =>
+      recorded.covered === true &&
+      recorded.page === inspection.page &&
+      recorded.submit === step.submit &&
+      JSON.stringify(recorded.fields.map((field) => field.selector)) === selectors,
+  );
+  if (covered !== -1) state.steps.splice(covered, 1);
   state.steps.push({
     ...(step.popup === undefined ? {} : { popup: step.popup }),
     ...(step.rejectedMarkers === undefined ? {} : { rejectedMarkers: step.rejectedMarkers }),
@@ -405,6 +423,7 @@ const armScreened = (
     ...(step.submit === undefined ? {} : { submit: step.submit }),
     ...(step.submitKey === undefined ? {} : { submitKey: step.submitKey }),
     ...(step.methods === undefined ? {} : { methods: step.methods }),
+    ...(step.ifShown === undefined ? {} : { ifShown: step.ifShown }),
     page: inspection.page,
   });
   state.securityAnswers?.arm(step, values);
@@ -460,8 +479,9 @@ export const noteRefill = (state: AutofillSignInState) => {
 
 /**
  * Records what a fill did once it returns: a field it did not fill is not held as filled, nor a
- * saved security answer typed, a step that reached nothing leaves the recipe, and a step the host
- * clicked records it. Returns whether anything reached the page.
+ * saved security answer typed, a step that reached nothing leaves the recipe, a step the host
+ * clicked records it, and one whose submit another element covered is marked `covered`. Returns
+ * whether anything reached the page.
  */
 export const recordStep = (
   state: AutofillSignInState,
@@ -483,5 +503,7 @@ export const recordStep = (
   if (!reached && submit !== "clicked" && submit !== "uncertain") state.steps.pop();
   else if (submit === "clicked" && last)
     state.steps[state.steps.length - 1] = { ...last, submittedBy: "host" };
+  else if (stepReport.outcome === "filled" && stepReport.covered !== undefined && last)
+    state.steps[state.steps.length - 1] = { ...last, covered: true };
   return reached || submit === "clicked" || submit === "uncertain";
 };
