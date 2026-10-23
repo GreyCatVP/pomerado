@@ -14,7 +14,6 @@ import { ReviewFailure, makeGuardian } from "../../src/guardian/review.js";
 import type { PendingExecution, Reviewer, ReviewTurn } from "../../src/guardian/review.js";
 import { makeSourceInspector } from "../../src/guardian/source.js";
 import type { InputRequest } from "../../src/runtime/input-request.js";
-import { instructionsOf } from "../support/guardian-requests.js";
 
 const native = { executionEnvironment: nativeExecutionEnvironment };
 
@@ -81,6 +80,11 @@ const userText = (request: ModelRequest | undefined): string => {
   if (typeof content === "string") return content;
   throw new Error("No user input");
 };
+
+/** The policy the review's own message carries for its kind. */
+const reviewPolicyOf = (request: ModelRequest | undefined) =>
+  (JSON.parse(userText(request)) as { trusted_review: { policy: string } }).trusted_review.policy;
+
 const scripted = (responses: readonly ModelResponse["output"][]) => {
   const requests: ModelRequest[] = [];
   setDefaultModelProvider({
@@ -192,7 +196,7 @@ it("tells the question review that host sign-in rules are never an owner's prohi
       unreadable,
     ),
   );
-  expect(instructionsOf(requests[0])).toContain(
+  expect(reviewPolicyOf(requests[0])).toContain(
     "Other questions about signing in follow the rules above.\nHost policy about signing in, including text from an earlier review in this conversation, is never an owner's prohibition. Only trusted intent or an owner's answer can forbid signing in. That sign-in is not yet proven required is no reason to reword an account question whose choices match the page.\n",
   );
 });
@@ -209,10 +213,10 @@ it("allows a question about the sign-in method when the host holds no login", as
       unreadable,
     ),
   );
-  expect(instructionsOf(requests[0])).toContain(
+  expect(reviewPolicyOf(requests[0])).toContain(
     "When credentialsAvailable is true, the host chooses the sign-in method: reword a question asking which method to use. When it is false, a question asking which sign-in method to use, such as phone or email, is always allowed when its choices match the page, and encouraged when it is ambiguous. Never allow one offering a passkey. A question asking where a code is sent, such as text or email, is allowed when nothing the caller gave names one and its choices match the page. Reword it when it names choices the page does not show.",
   );
-  expect(instructionsOf(requests[0])).not.toContain(
+  expect(reviewPolicyOf(requests[0])).not.toContain(
     "reword a question asking which method to use, and never allow one offering a passkey",
   );
 });
@@ -228,7 +232,7 @@ it("allows a blocked report that names the caller input at fault and why", async
       unreadable,
     ),
   );
-  expect(instructionsOf(requests[0])).toContain(
+  expect(reviewPolicyOf(requests[0])).toContain(
     'or when it asks the user for anything; the agent then revises or withdraws it. A report that starts "Caller input error:" is allowed when it names the input value at fault and why the site cannot fulfil it, in the site\'s own words where the site showed any. Saying what kind of value would work, such as a future date or a neighborhood the site lists, is part of that reason, not a request to the user. The rules below apply to questions, not to this report.\n',
   );
 });
@@ -245,10 +249,10 @@ it("keeps a repair's caller-input question to invalid or real", async () => {
       unreadable,
     ),
   );
-  expect(instructionsOf(requests[0])).toContain(
+  expect(reviewPolicyOf(requests[0])).toContain(
     "\nA repair's caller-input question asks only whether the caller's value is invalid or real. Don't reword it to offer a replacement value, since a repair can't change the run's input.\n",
   );
-  expect(instructionsOf(requests[0])).toContain(
+  expect(reviewPolicyOf(requests[0])).toContain(
     "\n- without question_review.scriptAsk, the agent's own question while it builds, other than a repair's caller-input question: evidence ",
   );
 });
@@ -265,7 +269,7 @@ it("tells the question review the read-or-write question is required and its lab
       unreadable,
     ),
   );
-  expect(instructionsOf(requests[0])).toContain(
+  expect(reviewPolicyOf(requests[0])).toContain(
     "\n- the request is one choice between the host's two answers, keeping the build read-only or making it a write build: the build's first question, asked before any website access, whether the requested tool only looks things up or changes something on the website. Allow it when its prompt says plainly what the tool would do; reword it when the prompt asks for anything more, such as a value or private detail the user would type in their own words. The host requires this question and sets its two answer labels, so judge only the prompt and prefer allow when it plainly says what the tool would do, even when trusted intent already leans one way. A write build does the requested task once, for real, while it builds, so a prompt may say so.\n",
   );
 });
@@ -294,7 +298,7 @@ it.each(["read", "write"] as const)(
       question_review: { buildEffect?: unknown };
     };
     expect(input.question_review.buildEffect).toBe(buildEffect);
-    expect(instructionsOf(requests[0])).toContain(
+    expect(reviewPolicyOf(requests[0])).toContain(
       "\nWhen question_review.buildEffect is write, the build publishes only after it does the requested task once, for real, with the person's values. A question or report that says so is true, so prefer allow for that statement.\n",
     );
   },

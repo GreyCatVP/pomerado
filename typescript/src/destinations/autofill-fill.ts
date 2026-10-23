@@ -126,6 +126,7 @@ const properties = [
   "editable",
   "control",
   "actions",
+  "scriptAction",
   "methods",
   "explicitGet",
   "submitMethod",
@@ -682,6 +683,7 @@ const afterFieldCall = (
             documentOrigin: progress.judged.fields[index]?.documentOrigin ?? "",
           },
           value,
+          input.step.fields[index]?.slot === "phone" ? { phone: true } : undefined,
         ),
       );
       if (typing._tag === "Left")
@@ -696,6 +698,13 @@ const afterFieldCall = (
         progress.statuses.push("filled");
         progress.check = [index];
         return undefined;
+      }
+      // The phone went in, but the field kept other digits: the host types and clicks nothing more.
+      if (typing.right === "changed") {
+        progress.typed = true;
+        progress.typedIn = answer.document;
+        progress.statuses.push("changed");
+        return filledReport(input.step, progress, "not_attempted", answer.url);
       }
       insertion = typing.right;
     }
@@ -719,7 +728,10 @@ const afterFieldCall = (
  * clicked: the host waits for the page to enable it once the fields are filled, and when it stays
  * disabled the report says so (`stayed_disabled`). A step whose code the host typed one character
  * per box into several code fields is submitted only once every box holds exactly one character;
- * otherwise that box fails and the submit is not attempted. On a step with fields and no submit, a
+ * otherwise that box fails and the submit is not attempted. A phone field is read back once typed
+ * (`InsertionOptions.phone`): one that kept other digits than the number, as under a country picker
+ * set to another country, is `changed`, and the fill types nothing more and never clicks the
+ * submit. On a step with fields and no submit, a
  * page that moves on once every field is typed sent what was typed itself (`page`), never a refusal:
  * the step's fields went away or were all disabled, its popup closed, its address moved to another
  * path, or a step of several fields came back emptied. The host gives the page up to `pageSendMs`

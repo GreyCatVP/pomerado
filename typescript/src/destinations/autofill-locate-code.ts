@@ -112,9 +112,39 @@ const controlShapeCode = String.raw`(element) => {
   }`;
 
 /**
+ * Page code: whether an address is a script that does nothing, the only script action a sign-in
+ * form may have: `javascript:`, `javascript:;`, `javascript:void(0)` or `javascript:void 0`, with
+ * or without a closing semicolon, read as the browser runs it (the address as parsed, its body
+ * percent-decoded). The scheme may be in any case, and whitespace may stand only between the
+ * body's words and signs, where script reads it as whitespace: one inside `void` could split it into
+ * two statements, the second a call of the page's own function. `void` is lowercase, as script
+ * reads it; `Void(0)` calls a function of the page's. Any other body runs what it says, so it is
+ * judged as any action off the site; one that does not decode, too. The step call and the
+ * submission guard both judge by it.
+ */
+export const noOpScriptCode = String.raw`(address) => {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "javascript:") return false;
+  let body;
+  try {
+    body = decodeURIComponent(url.href.slice("javascript:".length));
+  } catch {
+    return false;
+  }
+  return /^\s*(?:void\s*\(\s*0\s*\)|void\s+0)?\s*;?\s*$/.test(body);
+}`;
+
+/**
  * Page code: what a step call reads of one control it found (`readControls`): every form action
- * and method it could submit with, its link destination, whether it is disabled, inert or editable,
- * whether it is empty, its shape and the words that label it, never its value.
+ * and method it could submit with, its form's own action first, whether that action is a script
+ * that does nothing (`scriptAction`, `noOpScriptCode`), its link destination, whether it is
+ * disabled, inert or editable, whether it is empty, its shape and the words that label it, never
+ * its value.
  */
 const controlReadCode = `(element) => {
   const associated =
@@ -123,8 +153,11 @@ const controlReadCode = `(element) => {
   // shadows the property of that name on the form itself.
   const formProperty = (name) =>
     Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, name).get.call(associated);
+  // The form's own action comes first.
   const actions = associated ? [formProperty("action")] : [];
   const methods = associated ? [formProperty("method")] : [];
+  // Whether the form's own action is a script that does nothing, which sends nothing by itself.
+  const scriptAction = associated !== null && (${noOpScriptCode})(actions[0]);
   // Whether the form or a control in it says GET itself: a bare form reads as GET too, but a
   // page that submits it with code sends nothing in an address.
   let explicitGet = associated ? (associated.getAttribute("method") ?? "").trim().toLowerCase() === "get" : false;
@@ -167,7 +200,7 @@ const controlReadCode = `(element) => {
     disabled,
     inert,
     shape: (${controlShapeCode})(element),
-    target: { documentOrigin: self.origin, actions, methods, explicitGet, submitMethod, editable, empty },
+    target: { documentOrigin: self.origin, actions, scriptAction, methods, explicitGet, submitMethod, editable, empty },
     described: {
       role: element.getAttribute("role"),
       formMethod: methods.join(",") || null,

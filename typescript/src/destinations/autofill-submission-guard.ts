@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { Schema } from "effect";
 import type { AutofillFillCall } from "./autofill-page-code.js";
 import { foundEvidence, namedOrigin, refused, withCheck } from "./autofill-refusal.js";
+import { noOpScriptCode } from "./autofill-locate-code.js";
 import type { FillSlot, Targets } from "./autofill-step.js";
+import { isCardSlot } from "./payment-frames.js";
 
 /**
  * Page code: arms the guard on a filled field's own window for one submit call (`call`), and says
@@ -23,6 +25,11 @@ import type { FillSlot, Targets } from "./autofill-step.js";
  *   each hold one character are one code, their values joined in field order, so a code split into
  *   one-character boxes is found whole and never one character at a time; a longer code field is a
  *   code of its own. Both ignore case, since a URL's host is lowercased as it is parsed.
+ * - On a sign-in step's submit (`scriptSubmit`), a submission by GET whose action is a script that
+ *   does nothing (`noOpScriptCode`) is not refused for its method: navigating to such an action
+ *   puts no entry in an address and runs nothing. Any other script action is refused by GET as
+ *   before, its action may still not carry a filled secret, and a card-fill step's submit has no
+ *   such exception.
  * - A refused submit event is canceled. `form.submit()` fires no submit event, but its entry
  *   list's `formdata` event comes once the browser fixed the method and action; it cannot be
  *   canceled, so the guard stops the event, empties the entry list and takes the form out of the
@@ -35,11 +42,11 @@ import type { FillSlot, Targets } from "./autofill-step.js";
  * `HTMLFormElement.prototype.submit` would not. The guard records only the refusal's method and
  * action origin, as found; the host names that origin only when no typed value can be in it.
  */
-export const submissionGuardCode = `(field, { key, call, actions, match, submit, submitInForm, submitGet, fieldGet }) => {
+export const submissionGuardCode = `(field, { key, call, actions, match, submit, submitInForm, submitGet, fieldGet, scriptSubmit }) => {
   const view = field.ownerDocument.defaultView;
   let guard = view[key];
   if (guard === undefined) {
-    guard = { call: null, refused: null, fields: [], secrets: [], actions: [] };
+    guard = { call: null, refused: null, fields: [], secrets: [], actions: [], scriptSubmit: false };
     Object.defineProperty(view, key, { value: guard });
     const submitters = new WeakMap();
     // The form's own getters: a control named "method", "action" or "elements" shadows the form's.
@@ -109,8 +116,15 @@ export const submissionGuardCode = `(field, { key, call, actions, match, submit,
       method: submitter?.hasAttribute("formmethod") ? submitter.formMethod : formMethod.call(form),
       action: submitter?.hasAttribute("formaction") ? submitter.formAction : formAction.call(form),
     });
+    // A sign-in's submission to a script that does nothing navigates to the script alone, with no
+    // entry in it.
+    const noOpScript = ${noOpScriptCode};
     const refused = ({ method, action }, held) =>
-      method === "get" && held ? "method" : method !== "dialog" && inUrl(action) ? "action" : null;
+      method === "get" && held && !(guard.scriptSubmit && noOpScript(action))
+        ? "method"
+        : method !== "dialog" && inUrl(action)
+          ? "action"
+          : null;
     const originOf = (url) => {
       try {
         return new URL(url).origin;
@@ -157,7 +171,14 @@ export const submissionGuardCode = `(field, { key, call, actions, match, submit,
     }, true);
   }
   if (guard.call !== call)
-    Object.assign(guard, { call, refused: null, fields: [], secrets: [], actions });
+    Object.assign(guard, {
+      call,
+      refused: null,
+      fields: [],
+      secrets: [],
+      actions,
+      scriptSubmit: scriptSubmit === true,
+    });
   // The form a control belongs to, as inspection read it.
   const formOf = (element) =>
     "form" in element && element.form instanceof view.HTMLFormElement ? element.form : element.closest("form");
@@ -201,7 +222,8 @@ const secretMatch: Partial<Record<FillSlot, "within" | "token">> = {
 /**
  * A step's submit call, whose guard judges the submission by the methods as judged (`judged`) and
  * the destinations the page kept under `inspection`, or with `exempt` only those origins, whose
- * scheme and host no page chose.
+ * scheme and host no page chose. A sign-in step's, with no part of a payment card, lets a
+ * submission to a script that does nothing fire by GET (`scriptSubmit`).
  */
 export const guardedSubmit = (
   step: { readonly fields: readonly { readonly slot: FillSlot }[] },
@@ -224,6 +246,7 @@ export const guardedSubmit = (
   inspection: call.inspection,
   exempt: call.exempt,
   secretMatch: step.fields.map((field) => secretMatch[field.slot] ?? null),
+  ...(step.fields.some((field) => isCardSlot(field.slot)) ? {} : { scriptSubmit: true as const }),
   submitInForm: (judged.submit?.submitMethod ?? null) !== null,
   submitGet: judged.submit?.submitMethod === "get",
   fieldGet: judged.fields.map((target) => target.submitMethod === "get"),

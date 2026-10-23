@@ -373,7 +373,11 @@ const credential = (
           }
         },
       });
-      return yield* keyboard.insertText(request.target, request.text);
+      return yield* keyboard.insertText(
+        request.target,
+        request.text,
+        request.phone === true ? { phone: true } : undefined,
+      );
     }).pipe(
       Effect.ensuring(
         Effect.suspend(() =>

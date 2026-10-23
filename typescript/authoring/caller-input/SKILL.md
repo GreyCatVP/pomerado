@@ -81,20 +81,24 @@ separately are both applied as given, even when they're far apart.
      error on a read, `InvalidInput` with `available` on a write (core skill, "Configure, then
      read"); a write follows the site's preselected substitute only when the caller's own task
      asks for whatever the site ends up with (writes skill).
+   - A read whose site says no to the whole request, such as a product it no longer sells,
+     prefers returning that no as a declared refusal with `site_message` over throwing (writes
+     skill).
    - A write that declines the task because the caller's own limit or the page's state rules it
-     out, such as a total over the caller's price limit, an item out of stock, a variant the
-     page does not offer or a product number whose page names another item than the caller's:
-     `InvalidInput`, thrown before the mark of the commit it guards (writes skill). Pass
-     `field`, the input the caller would change, `kind`, the reason as a stable lowercase token
-     such as `over_price_limit`, `out_of_stock`, `variant_unavailable` or `item_mismatch`, and
-     `available` where the page lists choices, and give in the message the values the caller
-     needs, such as the total the page shows beside the limit. That is a refusal: the run
-     reports why, and that it changed nothing unless an earlier marked step ran, and the caller
-     can run again with corrected input. It differs from a failure, a tool that broke, and from
-     a write that may have changed the site and could not confirm it (both below). A write
-     returns a refusal as its output only when its output schema declares that refusal, and
-     only before its first mark (writes skill): any other output a write returns without
-     `verified()` reports a possible change.
+     out, such as a total over the caller's price limit or a product number whose page names
+     another item than the caller's: `InvalidInput`, thrown before the mark of the commit it
+     guards (writes skill). Pass `field`, the input the caller would change, `kind`, the reason
+     as a stable lowercase token such as `over_price_limit` or `item_mismatch`, and `available`
+     where the page lists choices, and give in the message the values the caller needs, such as
+     the total the page shows beside the limit. That is a refusal: the run reports why, and that
+     it changed nothing unless an earlier marked step ran, and the caller can run again with
+     corrected input. It differs from a failure, a tool that broke, and from a write that may
+     have changed the site and could not confirm it (both below). A write returns a refusal as
+     its output only when its output schema declares that refusal, and only where the writes
+     skill says one completes the run, such as before its first mark: any other output a write
+     returns without `verified()` reports a possible change.
+   - When the site itself says no to a valid request, such as an item out of stock or a variant
+     it does not offer, prefer the writes skill's refusal quoting the site.
    - A write whose steps may have changed the site and then failed or could not confirm the
      change: let it end as a possible change, which is never retried. Never throw
      `InvalidInput` or `InputNotApplied` to make it look untouched (writes skill).
@@ -107,7 +111,7 @@ separately are both applied as given, even when they're far apart.
    `stem: true`, returning the option it used (forms skill), and never report a refused or
    unapplied value in the output instead of throwing, such as a `sort_applied: false` flag or a
    "best-effort" or "lookup-only" description. The cases above that return results with what
-   applied are the only exceptions.
+   applied, and a declared refusal, are the only exceptions.
 
 ## Ask the caller during a run
 

@@ -1,13 +1,13 @@
-// Failure modes covered: a build's own request in the instructions every build shares, so no
-// build reads another's cached prefix; top-level instructions, which cannot hold a cache
-// breakpoint; a review message that repeats a kind's or host's policy the instructions hold; a
-// per-review effort that changes the request's own effort and with it the whole cached prefix; a
-// configuration update next to another, combined with provider-side automatic compaction, or lost
-// at a compaction; a review without a session whose later calls cannot read its earlier ones
-// from the cache; a session that changed its effort left with no compaction at all when its own
-// compaction cannot run, after a failed compaction or a restore;
-// the provider's split of cache writes by lifetime dropped from usage; the outcome reviewer's
-// fixed instructions sent where no breakpoint can hold them.
+// Failure modes covered: a build's own request in the instructions every build shares, so no build
+// reads another's cached prefix; top-level instructions, which cannot hold a cache breakpoint; a
+// review's kind policy, or another kind's, in the shared instructions instead of the review's own
+// message; a per-review effort that changes the request's own effort and with it the whole cached
+// prefix; a configuration update next to another, combined with provider-side automatic compaction,
+// or lost at a compaction; a review without a session whose later calls cannot read its earlier
+// ones from the cache; a session that changed its effort left with no compaction at all when its
+// own compaction cannot run, after a failed compaction or a restore; the provider's split of cache
+// writes by lifetime dropped from usage; the outcome reviewer's fixed instructions sent where no
+// breakpoint can hold them.
 import OpenAI from "openai";
 import { OpenAIProvider, setDefaultModelProvider } from "@openai/agents";
 import { Effect } from "effect";
@@ -16,6 +16,8 @@ import { lunaModel } from "../../src/models/models.js";
 import { makeOpenAIReviewer } from "../../src/guardian/openai.js";
 import type { GuardianModelOptions } from "../../src/guardian/openai.js";
 import { nativeExecutionEnvironment } from "../../src/guardian/execution-policy.js";
+import { guardianPublicationPolicy } from "../../src/guardian/publication.js";
+import { publicationDeltaPolicy } from "../../src/guardian/publication-delta.js";
 import { makeGuardian } from "../../src/guardian/review.js";
 import type { GuardianDiagnostics, PendingExecution } from "../../src/guardian/review.js";
 import type { GuardianSessionOptions } from "../../src/guardian/session.js";
@@ -183,6 +185,7 @@ const breakpointOf = (item: WireItem | undefined) =>
 const hostPolicies = {
   execution: "Synthetic host execution policy.",
   question: "Synthetic host question policy.",
+  update: "Synthetic host update policy.",
   publication: "Synthetic host publication policy.",
 };
 
@@ -244,12 +247,14 @@ it("sends two builds the same prefix through the shared instructions' 12-hour br
   }
 });
 
-it("states each kind's and host's policy once, before every review, and only appends reviews", async () => {
+it("carries each review's own kind policy in its review message, never another kind's in the shared prefix", async () => {
   const bodies = wire();
+  const listingPolicy = "Synthetic listing policy.";
   await build("Read the listed opening hours", {
-    policies: { ...hostPolicies, hostKinds: { catalog_listing: "Synthetic listing policy." } },
+    policies: { ...hostPolicies, hostKinds: { catalog_listing: listingPolicy } },
   });
 
+  // Each request only appends to the one before it, so the conversation stays cached.
   for (let index = 1; index < bodies.length; index++) {
     const before = itemsOf(bodies[index - 1]);
     expect(JSON.stringify(itemsOf(bodies[index]).slice(0, before.length))).toBe(
@@ -257,27 +262,142 @@ it("states each kind's and host's policy once, before every review, and only app
     );
   }
   const last = bodies.at(-1);
-  const whole = JSON.stringify(last);
-  // Each host policy reaches the model exactly once, in the shared instructions.
-  for (const policy of [...Object.values(hostPolicies), "Synthetic listing policy."]) {
-    expect(whole.split(policy)).toHaveLength(2);
-    expect(JSON.stringify(itemsOf(last)[0])).toContain(policy);
+  const [shared, own] = itemsOf(last);
+  const kindPolicies = [
+    ...Object.values(hostPolicies),
+    listingPolicy,
+    guardianPublicationPolicy,
+    publicationDeltaPolicy,
+  ];
+  // Neither developer message carries any kind's policy: only the policy every review shares.
+  for (const policy of kindPolicies) {
+    expect(JSON.stringify(shared)).not.toContain(JSON.stringify(policy).slice(1, -1));
+    expect(JSON.stringify(own)).not.toContain(JSON.stringify(policy).slice(1, -1));
   }
-  // Each review's request names its kind and carries no policy.
-  const requests = itemsOf(last)
+  // Each review's own message carries its kind's policy, and no other kind's.
+  const reviews = itemsOf(last)
     .filter((item) => item.role === "user")
     .map(
       (item) =>
         (JSON.parse(String(item.content)) as { trusted_review: Record<string, unknown> })
           .trusted_review,
     );
-  expect(requests.map((review) => review["kind"])).toEqual([
-    "execution",
-    "question",
-    "update",
-    "publication",
-  ]);
-  for (const review of requests) expect(review).not.toHaveProperty("policy");
+  const ownPolicies: Record<string, readonly string[]> = {
+    execution: [hostPolicies.execution],
+    question: [hostPolicies.question],
+    update: [hostPolicies.update],
+    publication: [hostPolicies.publication],
+  };
+  expect(reviews.map((review) => review["kind"])).toEqual(Object.keys(ownPolicies));
+  for (const review of reviews) {
+    const policy = String(review["policy"]);
+    const mine = ownPolicies[String(review["kind"])] ?? [];
+    for (const expected of mine) expect(policy).toContain(expected);
+    for (const other of kindPolicies.filter((text) => !mine.includes(text)))
+      expect(policy).not.toContain(other);
+  }
+});
+
+it("sends a registered host policy once, in its own kind's review, before that review's own policy", async () => {
+  const bodies = wire();
+  const execution = "Synthetic registered execution policy.";
+  const listing = "Synthetic registered listing policy.";
+  const note = "Synthetic per-review listing note.";
+  const guardian = makeGuardian(
+    reviewer({
+      policies: { execution, hostKinds: { catalog_listing: listing } },
+      // The deprecated per-review policy, repeating the registered one for executions.
+      specialize: (turn) => (turn.pending.hostReview === undefined ? { policy: execution } : {}),
+    }),
+    undefined,
+    {},
+  );
+  const hostKind = (policy: string) => ({
+    kind: "catalog_listing",
+    policy,
+    evidence: { synthetic: true },
+    outcomes: ["allow", "deny"] as const,
+  });
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* guardian.review(pending, readCurrent);
+      yield* guardian.reviewHostKind(pending, hostKind(listing));
+      yield* guardian.reviewHostKind(pending, hostKind(note));
+    }),
+  );
+
+  const last = bodies.at(-1);
+  const leading = JSON.stringify(itemsOf(last).slice(0, 2));
+  for (const policy of [execution, listing, note]) expect(leading).not.toContain(policy);
+  const [ofExecution, sameText, otherText] = itemsOf(last)
+    .filter((item) => item.role === "user")
+    .map((item) =>
+      String(
+        (JSON.parse(String(item.content)) as { trusted_review: Record<string, unknown> })
+          .trusted_review["policy"],
+      ),
+    );
+  expect(ofExecution?.split(execution)).toHaveLength(2);
+  expect(ofExecution).not.toContain(listing);
+  expect(sameText?.split(listing)).toHaveLength(2);
+  expect(otherText?.split(listing)).toHaveLength(2);
+  expect(otherText?.split(note)).toHaveLength(2);
+  expect(otherText?.indexOf(listing)).toBeLessThan(otherText?.indexOf(note) ?? -1);
+  expect(otherText).not.toContain(execution);
+});
+
+it.each([
+  ["with a registered host policy", "Synthetic registered recovery policy."],
+  ["with no registered host policy", undefined],
+])("carries a recovery review's policy once, in its review message, %s", async (_name, host) => {
+  const bodies = wire();
+  const guardian = makeGuardian(
+    reviewer({ policies: host === undefined ? {} : { recovery: host } }),
+    undefined,
+    {},
+  );
+  await Effect.runPromise(guardian.reviewRecovery(pending, "Synthetic stalled browser", readCurrent));
+
+  const [request] = bodies;
+  const review = itemsOf(request)
+    .filter((item) => item.role === "user")
+    .map(
+      (item) =>
+        (JSON.parse(String(item.content)) as { trusted_review: Record<string, unknown> })
+          .trusted_review,
+    )
+    .find((candidate) => candidate["kind"] === "recovery");
+  const policy = review?.["policy"];
+  if (typeof policy !== "string") throw new Error("the recovery review carries no policy");
+  // The core policy comes first, then the host's, which appears exactly once.
+  const core = host === undefined ? policy : policy.slice(0, policy.indexOf(host)).trimEnd();
+  expect(core).not.toBe("");
+  if (host !== undefined) {
+    expect(policy.split(host)).toHaveLength(2);
+    expect(policy.endsWith(host)).toBe(true);
+  }
+  // No developer message, shared or the build's own, carries it.
+  const developers = JSON.stringify(itemsOf(request).filter((item) => item.role === "developer"));
+  for (const text of [core, host].filter((part) => part !== undefined))
+    expect(developers).not.toContain(JSON.stringify(text).slice(1, -1));
+});
+
+it("sends the core publication policy with a publication review, outside the shared prefix", async () => {
+  const bodies = wire();
+  await build("Read the listed opening hours");
+  const last = bodies.at(-1);
+  const publicationReview = itemsOf(last)
+    .filter((item) => item.role === "user")
+    .map(
+      (item) =>
+        (JSON.parse(String(item.content)) as { trusted_review: Record<string, unknown> })
+          .trusted_review,
+    )
+    .find((review) => review["kind"] === "publication");
+  expect(String(publicationReview?.["policy"])).toContain(guardianPublicationPolicy);
+  expect(JSON.stringify(itemsOf(last).slice(0, 2))).not.toContain(
+    JSON.stringify(guardianPublicationPolicy).slice(1, -1),
+  );
 });
 
 it("re-adds the effort after a compaction, never next to another update or with automatic compaction", async () => {

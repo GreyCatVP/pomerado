@@ -20,20 +20,19 @@ export const agentNoteLimit = 500;
 const absentWhenEmpty = <T>(list: readonly T[]) => (list.length === 0 ? undefined : list);
 
 /**
- * The per-review user message: the review's kind and its own input. Every kind's policy is in the
- * instructions, which every review shares, so switching kinds keeps the conversation cached and
- * no review repeats a policy. `policy` is only host policy for this one review that the
- * instructions do not hold.
+ * The per-review user message. Everything that differs between review kinds is here, its policy
+ * included, never in the instructions, tools or output format, so switching kinds keeps the
+ * conversation cached.
  */
 export const guardianReviewInput = (
   turn: ReviewTurn,
-  policy: string | undefined,
+  policy: string,
   extra: Readonly<Record<string, unknown>> = {},
 ) =>
   JSON.stringify({
     trusted_review: {
       kind: turn.pending.hostReview?.kind ?? reviewKindOf(turn.pending),
-      ...(policy === undefined || policy === "" ? {} : { policy }),
+      policy,
       // The outcomes the host accepts from this review, the same list it checks the decision with.
       outcomes: reviewOutcomesOf(turn.pending),
       // Marks the exchange so later readable records withhold it, even after a takeover.

@@ -107,6 +107,22 @@ export type Found =
     };
 
 /**
+ * The screen's own instruction for its code, which the first code field that names one
+ * (`questionSelector`) read at inspection, such as to call a number or approve in an app; none
+ * when the host could not read it.
+ */
+const codeInstruction = (step: AutofillStep, screen: readonly ShownAnswerField[] | undefined) =>
+  step.fields.flatMap((field, index) => {
+    const shown = screen?.[index];
+    return field.slot === "code" &&
+      field.questionSelector !== undefined &&
+      shown?.questionUnread !== true &&
+      shown?.questionText !== undefined
+      ? [shown.questionText]
+      : [];
+  })[0];
+
+/**
  * The step's values in field order, the step with the kind each identifier field was sent, which
  * an answer to a field that accepts several kinds decides, and the recovery codes it took. A later
  * field the owner did not answer, or that failed, fills nothing: the codes it took go back.
@@ -128,7 +144,15 @@ const valuesInOrder =
     // A screen carries one code: its code fields, such as one-digit boxes, share it, asked or
     // read once. A screen that asked for two different codes would get the first in both.
     const boxes = step.fields.filter((field) => field.slot === "code").length;
-    const codeLogin = boxes > 1 ? { ...login, codeBoxes: boxes } : login;
+    const instruction = codeInstruction(step, screen);
+    const codeLogin =
+      boxes > 1 || instruction !== undefined
+        ? {
+            ...login,
+            ...(boxes > 1 ? { codeBoxes: boxes } : {}),
+            ...(instruction === undefined ? {} : { codeInstruction: instruction }),
+          }
+        : login;
     return Effect.gen(function* () {
       const values: string[] = [];
       const fields: AutofillField[] = [];
@@ -217,6 +241,11 @@ export interface AutofillLogin {
    * again.
    */
   readonly codeBoxes?: number;
+  /**
+   * The code screen's own instruction for the code, such as to call a number within a few minutes,
+   * which the owner is asked for the code with.
+   */
+  readonly codeInstruction?: string;
   /** Whether an asked field may be kept with the login, with the owner's yes (`SaveOffer`). */
   readonly offerSave?: boolean;
   /** Whether a corrected answer to a rejected field may be kept, with the owner's yes. */

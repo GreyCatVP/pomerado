@@ -275,7 +275,8 @@ exception: it is optional unless the task can't run without it (below).
     output field, `<input>_note`, such as `zip_note`, set only on this fallback, which also says
     why when the applied value is null. Never present it as the answer for the caller's value. A location the site says it
     does not serve is such a case: return the site's own answer with its message. A write throws
-    `InputNotApplied` (above) before its first commit step instead.
+    `InputNotApplied` (above) before its first commit step instead; for a location the site
+    says it does not serve, it prefers the writes skill's refusal quoting the site.
   - Inputs that narrow the results (filters, sort, dates) stay strict: a value the page ignores
     throws `InputNotApplied` (above).
   - Give a tailoring input a limited use, such as a postal code used only to look up nearby

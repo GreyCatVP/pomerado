@@ -958,6 +958,49 @@ it("ends the sign-in as AccountLocked once the site visibly refused the account 
   expect(host.logins).toEqual(["missing_credentials"]);
 });
 
+// A phone field the site's country picker preset to another country keeps other digits than the
+// number: the fill stops before its submit, and the agent hears the number's calling code, so it
+// sets the picker and sends the step again. Nobody is asked to correct the number.
+it("tells the agent the calling code of a phone the field changed, asking nobody and sending nothing", async () => {
+  let sends = 0;
+  const host = harness({
+    held: { ...account, phone: "+7 912 345-67-89" },
+    report: (step) => {
+      sends += 1;
+      return {
+        outcome: "filled",
+        fields: step.fields.map((field) => ({
+          slot: field.slot,
+          status: sends === 1 ? ("changed" as const) : ("filled" as const),
+        })),
+        submit: sends === 1 ? "not_attempted" : "clicked",
+        url: `${origin}/login`,
+        ...(sends === 1 ? { typed: true as const } : {}),
+      };
+    },
+  });
+  const phoneScreen: SignInStep = {
+    fields: [{ selector: "#phone", accepts: ["phone"] }],
+    submit: "#next",
+  };
+  const [changed, again] = await host.run((recorder) =>
+    Effect.all([
+      recorder.step(phoneScreen, undefined, Effect.void),
+      recorder.step(phoneScreen, undefined, Effect.void),
+    ]),
+  );
+  expect(changed.result["nextStep"]).toBe(
+    "The phone field kept different digits than the number the host typed, as when the site's country picker is set to another country. Nothing was submitted and nobody was asked. The number's country calling code is +7. If the screen has a country picker, prefer setting it to that country with an explore step, then send this signInStep again.",
+  );
+  expect(JSON.stringify(changed.result)).not.toContain("912");
+  expect(again.report).toMatchObject({ submit: "clicked" });
+  expect(host.asked).toEqual([]);
+  expect(host.filled.map(({ values }) => values)).toEqual([
+    ["+7 912 345-67-89"],
+    ["+7 912 345-67-89"],
+  ]);
+});
+
 it("refuses a code step that names only some of the screen's one-character boxes, asking nothing", async () => {
   const host = harness({ held: account, codeBoxes: 6, answers: { code: ["482913"] } });
   const result = await host.run((recorder) =>

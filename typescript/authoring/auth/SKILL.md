@@ -167,7 +167,9 @@ attribute.
     once, types one character into each and submits only once each box holds one. A step that
     names only some of the boxes, or names them out of order, comes back refused as
     `code_boxes_incomplete`, typing nothing: its `codeBoxes` says how many boxes the screen shows
-    and which ones the step named; send the step again with all of them.
+    and which ones the step named; send the step again with all of them. When a code screen asks
+    the person to do something, such as call a number or approve in an app, prefer naming the
+    element with that instruction as the code field's `questionSelector`.
   - `slot: "date_of_birth"` for a date of birth, with `format`, how the field takes it, read from
     its placeholder, label, input mask or hint: `MM/DD/YYYY`, `DD/MM/YYYY`, `M/D/YYYY`,
     `D/M/YYYY`, `MM-DD-YYYY`, `DD-MM-YYYY`, `DD.MM.YYYY`, `YYYY-MM-DD`, `YYYY/MM/DD`, `MMDDYYYY`,
@@ -242,7 +244,9 @@ Guardian checks each step against the screen: that every field takes the kinds i
 submit is the right sign-in action, including a fieldless continuation or verification-method
 choice, and that a step without one advances by itself. The host checks that each control is unique
 and visible and that its frame, form actions and link destination are on the site or a configured
-sign-in origin. A refused step typed and sent nothing and spends no sign-in: fix it from the evidence.
+sign-in origin. A sign-in form whose own action is a script that does nothing (`javascript:`,
+`javascript:void(0)`, `javascript:;`) is the page's own submit, so the host judges it by where its
+fields sit. A refused step typed and sent nothing and spends no sign-in: fix it from the evidence.
 
 Sign-in pages are often slow, and the next screen can take a while to show. Wait for its field with
 a bounded readiness wait (such as `locator.waitFor` with a timeout of about 30 seconds) before you

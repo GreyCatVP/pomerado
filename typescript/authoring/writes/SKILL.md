@@ -137,6 +137,14 @@ During the session:
   after the step's first click, the click saved nothing but a field it flagged is one no
   site-field question may ask, such as a card or bank field: call `notCommitted` for the step,
   then throw `InvalidInput` that names the field by its label, and don't click again.
+- On a write saved across several pages, when the site's own option lists for a later page can
+  be read before the first save and do not depend on what an earlier page saves, such as the
+  form definitions or option data an earlier page loads, prefer reading them and checking every
+  caller value for those fields against them before the first commit mark, in the session and
+  on every run of the composed script. Match each value by the site's option value as well as
+  its label (forms skill), and refuse with `InvalidInput` and `available` before anything is
+  saved when a value matches neither. A refusal after an earlier save leaves a half-made record
+  and an outcome the caller can't know.
 - A pop-up, banner or interstitial on the path, such as an upsell, is conditional unless the
   page always opens it in answer to an action: handle it as the forms skill says, so the tool
   still works for a caller who never sees it.
@@ -212,10 +220,24 @@ too. Run each step with `execute` purpose `act`, target `liveBrowser`.
   as a filter, a pick or a new table row, with `waitForOutcome` naming the element
   the next step uses.
 - When a step waits for the site's answer, wait for every answer the site can give, such
-  as results, a no-results message or an out-of-area notice, and throw `InvalidInput`
-  naming the field the site refused, with the options the site offers as `available` when
-  it lists them, before the mark of the commit it guards, rather than waiting for results
-  alone.
+  as results, a no-results message or an out-of-area notice, rather than waiting for
+  results alone. A message about a value the caller gave, such as a field error, is the
+  caller's input error: throw `InvalidInput` naming the field, with the options the site
+  offers as `available` when it lists them.
+- When the site says no to a valid request, such as sold out, no availability, not
+  eligible, not offered for these facts or not served in this area, that no is the task's
+  answer. Prefer returning it as a refusal the output schema declares (below), with a
+  `reason` code of the tool's own, listed in the tool's description, `site_message`, the
+  site's own words exactly as the page shows them, and any alternatives the site offers,
+  exactly as shown. Return it only from what the site shows in this run, never from a rule
+  copied into the tool's own checks, and never from a challenge, block, access-denied,
+  error or maintenance page, which is a failure (`OperationFailure`). After a commit mark,
+  return it only where the declared-refusal rule below says one returned there completes
+  the run; otherwise prefer throwing `InvalidInput` with the site's words.
+- When the site swaps the request for something the caller didn't ask for, such as another
+  product, a later date or a higher amount, stop before the step that would confirm it and
+  return the refusal as above, with the site's words and its offer, unless the caller's own
+  task asks for whatever the site ends up with.
 - Report a confirm popup to `decideDialog` with a literal `step` name, and keep that
   literal in the helper the composed script imports. Runs accept a popup without
   asking only at the step the session accepted it at, so the host refuses to publish
@@ -546,7 +568,8 @@ An `unverifiable` write reports <!-- pomerado:section writes.unverifiable-status
 `may_have_applied`
 pomerado:section writes.unverifiable-status:end --> too, and nothing repairs it.
 A script that throws `errors.InvalidInput` (core skill) fails as the caller's input; with
-`available`, the host ends the run at once with those choices. Before any commit
+`available`, the host ends the run at once with those choices. <!-- pomerado:section writes.declared-refusal:start
+Before any commit
 mark is entered, the run reports that it changed nothing, so throw a refusal before the
 mark. A write may instead declare its refusals in its output schema: a branch that requires
 `status` `"refused"` and a `reason` from a listed set of stable lowercase codes, such as
@@ -555,6 +578,7 @@ no other branch whose `status` could be `"refused"`. Returned before the first c
 declared refusal completes the run with that output and reports the write not applied. A
 refusal returned in a shape the schema does not declare, or returned or thrown after a mark,
 reports a possible change.
+pomerado:section writes.declared-refusal:end -->
 
 See `references/write-session.ts` for two steps and the composed script, and
 `references/write-readback.ts` for a write confirmed from its own commit request.

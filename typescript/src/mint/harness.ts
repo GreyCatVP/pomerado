@@ -1213,6 +1213,14 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
        */
       let hostRefusalPassed = recovered?.hostRefusalPassed === true;
       /**
+       * The host's latest answer to `signInDestinationRefused`, read after each authenticate: it
+       * refused a sign-in screen at its destination check, as a step result, and nothing it
+       * counts cleared that since. A `host_refused` block stands on it. A takeover restores it, so
+       * a successor whose host kept no record of the refusal still has it until its own next
+       * authenticate.
+       */
+      let signInDestinationRefused = recovered?.signInDestinationRefused === true;
+      /**
        * This build's Guardian denials, the oldest first to go past the bound, for the blocked
        * explanation's review; a takeover restores them. A checkpoint from an older worker kept
        * none, so the ledger is partial from then on.
@@ -3274,7 +3282,9 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         // ending; the minter's reading of its own instructions is none. A host_refused block
         // stands on a host check's refusal the host recorded in this attempt that no later
         // finish_build got past to Guardian's review, or on a sign-in screen the host refused
-        // because the password's fills are spent, while they still are. The owner's no to a
+        // because the password's fills are spent, while they still are, or at its destination
+        // check, until a later screen that takes a password or code passed it or a sign-in
+        // verified. Neither of those two answers is cleared by a finish_build. The owner's no to a
         // confirm question, or to a login, is `owner_declined`; a question handed back unanswered
         // is `question_unanswered`: no answer is no consent, so the minter may end the build
         // safely instead of going on past what it asked. A policy report that stands only on
@@ -3288,7 +3298,8 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
               typeof answer === "object" && "confirmed" in answer && !answer.confirmed,
           );
         const unanswered = noAnswerHandBacks > 0;
-        const hostRefusing = hostRefused || dependencies.signInRefillRefused?.() === true;
+        const hostRefusing =
+          hostRefused || dependencies.signInRefillRefused?.() === true || signInDestinationRefused;
         if (reason === "owner_declined" && !ownerRefused)
           return refused(
             "owner_not_declined",
@@ -4753,8 +4764,14 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
               ).pipe(
                 Effect.onExit((result) =>
                   Effect.suspend(() => {
-                    if (submitted.purpose === "authenticate")
+                    if (submitted.purpose === "authenticate") {
                       noteSignIn(result, crossedDispatchBoundary);
+                      // A screen the host refused at its destination check comes back as the
+                      // step's result, so the host's own record is the basis, read as it stands
+                      // after this sign-in step.
+                      if (dependencies.signInDestinationRefused !== undefined)
+                        signInDestinationRefused = dependencies.signInDestinationRefused();
+                    }
                     if (
                       (!effectful && submitted.purpose !== "authenticate") ||
                       Exit.isSuccess(result)
@@ -6704,6 +6721,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         ...(signInRefusalOnly ? { signInRefusalOnly: true as const } : {}),
         ...(hostRefused ? { hostRefused: true as const } : {}),
         ...(hostRefusalPassed ? { hostRefusalPassed: true as const } : {}),
+        ...(signInDestinationRefused ? { signInDestinationRefused: true as const } : {}),
         ...(noAnswerHandBacks === 0 ? {} : { noAnswerHandBacks }),
         ...(loginHeld ? { loginHeld: true as const } : {}),
         ...(loginDeclined === undefined ? {} : { loginDeclined }),

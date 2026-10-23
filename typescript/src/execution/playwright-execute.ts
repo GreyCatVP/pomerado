@@ -3,7 +3,7 @@ import { Worker } from "node:worker_threads";
 import type { Browser, BrowserServer } from "playwright";
 import { Cause, Effect, Exit, Fiber, Schema, type Scope } from "effect";
 import {
-  CredentialInsertion,
+  CredentialReadBack,
   type CredentialKeyboard,
 } from "../destinations/credential-keyboard.js";
 import { BrowserExecuteResponse, type BrowserExecute } from "../runtime/browser-execution.js";
@@ -424,9 +424,12 @@ export const makePlaywrightExecutor = (
         }),
       );
     const keyboard: CredentialKeyboard = {
-      insertText: (target, text) =>
-        call({ kind: "credential", target, text }, 15).pipe(
-          Effect.flatMap((value) => Schema.decodeUnknown(CredentialInsertion)(value)),
+      insertText: (target, text, options) =>
+        call(
+          { kind: "credential", target, text, ...(options?.phone === true ? { phone: true } : {}) },
+          15,
+        ).pipe(
+          Effect.flatMap((value) => Schema.decodeUnknown(CredentialReadBack)(value)),
           Effect.mapError(asError),
         ),
     };

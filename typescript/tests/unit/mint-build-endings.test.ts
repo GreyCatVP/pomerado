@@ -155,6 +155,30 @@ it("ends a build the site declined for the example's own facts as site_declined"
   });
 });
 
+// A site that is temporarily down for the failing input ends under its own reason, so a host can
+// tell its caller to try again later instead of reading it as a site that lacks the capability.
+it("ends a build whose site is temporarily down as site_unavailable", async () => {
+  const explanation =
+    "The site is showing its own maintenance page instead of the search, so nothing can be checked until it is back.";
+  const f = await fixture(
+    (_request, index) =>
+      [call("report_blocked", { reason: "site_unavailable", explanation })][index] ??
+      prose("Stopping."),
+  );
+  expect(await f.run()).toMatchObject({
+    build: "incomplete",
+    blocked: { reason: "site_unavailable", explanation },
+    stopReason: "site_unavailable",
+  });
+  // The model is offered the reason, with what it covers.
+  const offered = JSON.stringify(
+    f.requests[0]?.tools.find((tool) => "name" in tool && tool.name === "report_blocked"),
+  );
+  expect(offered).toContain("site_unavailable when the site is temporarily down for the failing input");
+  expect(offered).toContain("never a 5xx answer only to the request the tool made");
+  expect(f.requests).toHaveLength(1);
+});
+
 // Guardian's refusal stays a policy block, even when a question also went unanswered.
 it("keeps a policy block that stands on a Guardian refusal", async () => {
   const explanation = "Guardian refused the only way to reach the requested page.";

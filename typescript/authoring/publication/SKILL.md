@@ -212,9 +212,11 @@ pomerado:section publication.saved-files:end -->.
    - a pop-up that shows only for some accounts, states or visits is handled when present and
      never required;
    - declared questions ask only what the page or the caller uniquely knows, never a login;
-   - a write runs every check that can refuse, such as a limit on its total, before the mark of
+   <!-- pomerado:section publication.declared-refusal:start
+- a write runs every check that can refuse, such as a limit on its total, before the mark of
      the commit it guards, and refuses with `InvalidInput`, or returns a refusal its output
      schema declares before its first mark, never in an undeclared output shape;
+pomerado:section publication.declared-refusal:end -->
    - a composed write reproduces the session's flow and returns the confirmation or read-back it
      declares, without committing twice, and its checks reject no correct write: a
      before-and-after comparison that compares whole objects or serialized text, reads through
