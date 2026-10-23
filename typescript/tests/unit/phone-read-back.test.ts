@@ -178,7 +178,11 @@ it.each([
   ["+7 912 345-67-89", "7"],
   ["+1 (415) 555-0134", "1"],
   ["+44 7911 123456", "44"],
+  ["0044 7911 123456", "44"],
   ["0049 1512 3456789", "49"],
+  ["011 44 7911 123456", "44"],
+  ["01149 1512 3456789", "49"],
+  ["011 380 44 123 4567", "380"],
   ["+380 44 123 4567", "380"],
   ["+86 138 0013 8000", "86"],
   ["+213 555 12 34 56", "213"],
@@ -187,7 +191,15 @@ it.each([
   expect(changedPhoneNotice(number)).toContain(`The number's country calling code is +${code}.`);
 });
 
-it.each(["912 345 6789", "8 912 345-67-89", "+0 123 4567", "+12"])(
+it.each([
+  "912 345 6789",
+  "8 912 345-67-89",
+  "+0 123 4567",
+  "+12",
+  "011",
+  "0110 123 4567",
+  "01112",
+])(
   "names no calling code for %s, which does not say it",
   (number) => {
     expect(callingCode(number)).toBeUndefined();
@@ -200,6 +212,12 @@ it.each(["912 345 6789", "8 912 345-67-89", "+0 123 4567", "+12"])(
 it("tells the minter what to do about a changed phone, naming only its calling code", () => {
   expect(changedPhoneNotice("+7 912 345-67-89")).toBe(
     "The phone field kept different digits than the number the host typed, as when the site's country picker is set to another country. Nothing was submitted and nobody was asked. The number's country calling code is +7. If the screen has a country picker, prefer setting it to that country with an explore step, then send this signInStep again.",
+  );
+});
+
+it("tells the minter what to do about a changed phone dialed with 011", () => {
+  expect(changedPhoneNotice("011 44 7911 123456")).toBe(
+    "The phone field kept different digits than the number the host typed, as when the site's country picker is set to another country. Nothing was submitted and nobody was asked. The number's country calling code is +44. If the screen has a country picker, prefer setting it to that country with an explore step, then send this signInStep again.",
   );
 });
 
