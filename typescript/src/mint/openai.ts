@@ -7,7 +7,7 @@ import {
   effectiveReasoningContext,
   withReasoningContinuity,
 } from "../models/reasoning-settings.js";
-import { modelUsageCounts } from "../models/model-usage.js";
+import { flatUsage, modelUsageCounts } from "../models/model-usage.js";
 import {
   promptCacheDiagnostics,
   withAllowedTools,
@@ -1471,7 +1471,9 @@ const openAIMinter = (
                               },
                             ),
                           );
-                          return response;
+                          // What the call returns is what a host's recovery boundary saves and
+                          // replays, so it carries the numeric-only usage the SDK's schemas take.
+                          return { ...response, usage: flatUsage(response.usage) };
                         }
                         const error = outcome.left;
                         const now = yield* Clock.currentTimeMillis;
@@ -1504,7 +1506,10 @@ const openAIMinter = (
                       modelCalls++;
                       return turn.runTool(respond);
                     };
-                    const noteCalls = (response: ModelResponse) => {
+                    const noteCalls = (returned: ModelResponse) => {
+                      // The run state the SDK keeps this usage in saves only numeric token
+                      // details; `reportUsage` already read the provider's nested split.
+                      const response = { ...returned, usage: flatUsage(returned.usage) };
                       const calls: ResponseCalls = {
                         output: response.output,
                         edits: response.output.flatMap((item, index) =>
