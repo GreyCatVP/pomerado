@@ -209,11 +209,11 @@ export const hostKeyboard = async (
     fixtureBindingWorld,
   );
   const keyboard: typeof native = {
-    insertText: (target, text) =>
+    insertText: (target, text, options) =>
       Effect.suspend(() => {
         const values = typed.get(page) ?? new Set<string>();
         if (text !== "") typed.set(page, values.add(text));
-        return native.insertText(target, text);
+        return native.insertText(target, text, options);
       }),
   };
   return { keyboard };

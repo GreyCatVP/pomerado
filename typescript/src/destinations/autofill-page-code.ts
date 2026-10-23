@@ -174,6 +174,12 @@ export type AutofillFillCall =
       readonly submitGet: boolean;
       /** Whether each field's own form was judged to submit by GET. */
       readonly fieldGet: readonly boolean[];
+      /**
+       * A sign-in step's submit: its guard lets a submission to a script that does nothing
+       * (`javascript:`, `javascript:void(0)`, `javascript:;`) fire by GET, since navigating there
+       * puts no entry in an address and runs nothing.
+       */
+      readonly scriptSubmit?: true;
       /** Only look: a call that finds the step's fields clicks nothing and answers `none`. */
       readonly look?: true;
       /**
@@ -226,6 +232,7 @@ const same = (found, expected, editable = true) =>
     : found.ownerUrl === expected.ownerUrl &&
       JSON.stringify(found.ancestors ?? []) === JSON.stringify(expected.ancestors ?? []) &&
       (found.explicitGet ?? false) === (expected.explicitGet ?? false) &&
+      (found.scriptAction ?? false) === (expected.scriptAction ?? false) &&
       found.documentOrigin === expected.documentOrigin &&
       (!editable || found.editable === expected.editable) &&
       found.control === expected.control &&
@@ -528,6 +535,7 @@ for (const [index, field] of fields.entries()) {
     submitInForm: ${JSON.stringify(call.submitInForm)},
     submitGet: ${JSON.stringify(call.submitGet)},
     fieldGet: fieldGet[index] === true,
+    scriptSubmit: ${JSON.stringify(call.scriptSubmit === true)},
   });
   if (guarding) guarded.push(handle);
 }
@@ -666,6 +674,20 @@ const primary = matches[0];
 `;
 
 /**
+ * The question selector a step call reads for a field: a private answer's question, which every
+ * call reads and the fill checks has not changed before it types the answer, and, at inspection
+ * only, a code's instruction, which the host puts in the code question and never checks again,
+ * since a screen may count down its time in it.
+ */
+const questionRead = (
+  field: { readonly slot?: string | undefined; readonly questionSelector?: string | undefined },
+  inspection: boolean,
+) =>
+  field.slot === "private_answer" || (inspection && field.slot === "code")
+    ? (field.questionSelector ?? null)
+    : null;
+
+/**
  * One host call for a step: its inspection, or with `fill`, one call of its fill. What it finds,
  * the page keeps under `observed`; a fill call compares against what it kept under `judged`.
  */
@@ -706,7 +728,7 @@ ${locateCode}
 ${fill === undefined ? "" : documentStartCode}
 const observed = ${JSON.stringify(observed)};
 const selectors = ${JSON.stringify(step.fields.map((field) => field.selector))};
-const questionSelectors = ${JSON.stringify(step.fields.map((field) => field.slot === "private_answer" ? field.questionSelector ?? null : null))};
+const questionSelectors = ${JSON.stringify(step.fields.map((field) => questionRead(field, fill === undefined)))};
 const codeSlots = ${JSON.stringify(step.fields.map((field) => field.slot === "code"))};
 const submitSelector = ${JSON.stringify(step.submit ?? null)};
 const submitKey = ${JSON.stringify(step.submitKey ?? null)};

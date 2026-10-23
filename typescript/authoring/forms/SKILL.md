@@ -83,6 +83,10 @@ use its named phase and current evidence before diagnosing or changing the locat
 
 Drive every field from the input. Choose the option that matches the input value, by
 the option's value or its observed label pattern, and read back that the field took it.
+When the control shows only labels, prefer matching against the site's own table of option
+values and labels, such as the form definitions or option data the page or an earlier page
+loads, over the visible words alone, so an input holding the site's code for an option picks
+that option.
 Never click a label or option copied from the example, and never reject an input value
 the schema accepts. Enums and typeahead matching follow the core skill's input schema; a
 caller's answer picks an option but does not show which exist. Prefer matching an existing

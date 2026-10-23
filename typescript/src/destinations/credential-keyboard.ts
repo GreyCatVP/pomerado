@@ -42,17 +42,70 @@ export const InsertionRefusal = Schema.Literal(
 export type InsertionRefusal = typeof InsertionRefusal.Type;
 /** A native insertion's answer: inserted, or why not. */
 export const CredentialInsertion = Schema.Union(Schema.Literal("inserted"), InsertionRefusal);
+/**
+ * An insertion's answer when the host asked it to read a phone field back (`InsertionOptions`):
+ * also `changed`, inserted, but the field then held other digits than the number's.
+ */
+export const CredentialReadBack = Schema.Union(CredentialInsertion, Schema.Literal("changed"));
+
+/** What the host asks of an insertion besides typing. */
+export interface InsertionOptions {
+  /**
+   * The field takes a phone number: once the page had `phoneReadBackMs` to reformat it, read the
+   * field back and answer `changed` when it holds other digits than the number's
+   * (`phoneDigitsCode`). A read that fails or finds no value answers `inserted`, as without it.
+   */
+  readonly phone?: true | undefined;
+}
 
 /**
  * Inserts only into the original field, or refuses with the finite cause. It fails only at or after
- * the call that carries the value, so a failure may have typed it.
+ * the call that carries the value, so a failure may have typed it. A keyboard that does not read
+ * back (`options`) answers as it would without them: `changed` comes only from one that does.
  */
 export interface CredentialKeyboard {
   readonly insertText: (
     target: CredentialTarget,
     text: string,
-  ) => Effect.Effect<typeof CredentialInsertion.Type, Error>;
+    options?: InsertionOptions,
+  ) => Effect.Effect<typeof CredentialReadBack.Type, Error>;
 }
+
+/**
+ * How long a page has to reformat a phone number once it was typed, as an input mask, a country
+ * picker's formatter or a framework's next render does, before the host reads the field back.
+ */
+export const phoneReadBackMs = 250;
+
+/**
+ * Page code, called on the field the host typed `text`, a phone number, into: whether the field
+ * kept its digits. A field may drop up to three leading digits of the number, its country calling
+ * code or trunk prefix, and may show up to three of its own before them, such as the picker's
+ * calling code: what follows must be the rest of the number, every digit to the last. A number
+ * dialed with an international prefix (`00`, or `011`) may also drop the prefix with them. A
+ * number shifted into another country's digits or cut short is `changed`. A field gone from its
+ * document, one with no text value or no digits, or a number with no digits is `unread`, so a
+ * field the page emptied stays the empty-field failure the next call finds. Only digits 0 to 9
+ * count.
+ */
+export const phoneDigitsCode = `function(text) {
+  const field = this;
+  if (!field.isConnected || typeof field.value !== "string") return "unread";
+  const digits = (value) => value.replace(/[^0-9]/g, "");
+  const typed = digits(text);
+  const kept = digits(field.value);
+  if (typed.length === 0 || kept.length === 0) return "unread";
+  const numbers = [typed];
+  if (typed.startsWith("00")) numbers.push(typed.slice(2));
+  if (typed.startsWith("011")) numbers.push(typed.slice(3));
+  for (const number of numbers)
+    for (let dropped = 0; dropped <= 3; dropped++)
+      for (let shown = 0; shown <= 3; shown++) {
+        const rest = number.slice(dropped);
+        if (rest.length > 0 && rest === kept.slice(shown)) return "kept";
+      }
+  return "changed";
+}`;
 
 /**
  * The execution context a host's page calls bound the field in, for a host whose page calls
@@ -236,9 +289,40 @@ const findBinding = (
   });
 
 /**
+ * A phone field read back once the page had `phoneReadBackMs` to reformat it: `changed` when it
+ * kept other digits than the number's (`phoneDigitsCode`), else `inserted`. The number goes in as
+ * an argument on the private socket, as the insertion's did, and only the finite answer comes
+ * back. A read that fails or answers anything else can't tell, so it answers `inserted`.
+ */
+const readBackPhone = (
+  cdp: PrivateCredentialCdp,
+  bound: { readonly sessionId: string; readonly objectId: string },
+  text: string,
+) =>
+  Effect.sleep(phoneReadBackMs).pipe(
+    Effect.zipRight(
+      command(cdp, bound.sessionId, "Runtime.callFunctionOn", {
+        objectId: bound.objectId,
+        functionDeclaration: phoneDigitsCode,
+        arguments: [{ value: text }],
+        returnByValue: true,
+      }),
+    ),
+    Effect.map((value) =>
+      Option.getOrUndefined(Schema.decodeUnknownOption(RemoteResult)(value))?.result.value ===
+      "changed"
+        ? ("changed" as const)
+        : ("inserted" as const),
+    ),
+    // error-reporting-allow: typed-recovery the value is already typed and a read that fails can't tell what the field kept, so the fill goes on as it did before reading back
+    Effect.orElseSucceed(() => "inserted" as const),
+  );
+
+/**
  * The credential-only native DOM reads and Runtime calls on the private socket resolve the original
  * field binding, insert atomically into that remote object, then release it. No parameters enter
- * recorder history or logs, and the secret is an argument, never Kernel REST script text.
+ * recorder history or logs, and the secret is an argument, never Kernel REST script text. A phone
+ * number (`InsertionOptions.phone`) is read back from that same object before its release.
  */
 export const makeCredentialKeyboard = (
   cdp: PrivateCredentialCdp,
@@ -246,10 +330,11 @@ export const makeCredentialKeyboard = (
   release: (effect: Effect.Effect<unknown, Error>) => Effect.Effect<void> = Effect.ignore,
   bindingWorld?: CredentialBindingWorld,
 ): CredentialKeyboard => ({
-  insertText: (target, text) =>
+  insertText: (target, text, options) =>
     Effect.gen(function* () {
       const bound = yield* findBinding(cdp, target, bindingWorld);
       if (typeof bound === "string") return bound;
+      let readBack: "inserted" | "changed" = "inserted";
       const value = yield* command(cdp, bound.sessionId, "Runtime.callFunctionOn", {
         objectId: bound.objectId,
         functionDeclaration: atomicInsert,
@@ -260,6 +345,14 @@ export const makeCredentialKeyboard = (
         ],
         returnByValue: true,
       }).pipe(
+        Effect.tap((inserted) =>
+          Effect.gen(function* () {
+            if (options?.phone !== true) return;
+            const answer = Option.getOrUndefined(Schema.decodeUnknownOption(RemoteResult)(inserted));
+            if (answer?.exceptionDetails === undefined && answer?.result.value === "inserted")
+              readBack = yield* readBackPhone(cdp, bound, text);
+          }),
+        ),
         Effect.ensuring(
           release(
             command(cdp, bound.sessionId, "Runtime.releaseObject", { objectId: bound.objectId }),
@@ -272,8 +365,9 @@ export const makeCredentialKeyboard = (
           error instanceof Error ? error : new Error("Credential insertion unavailable"),
       });
       // An answer outside the finite set leaves whether the value landed unknown.
-      return yield* Schema.decodeUnknown(CredentialInsertion)(answer).pipe(
+      const inserted = yield* Schema.decodeUnknown(CredentialInsertion)(answer).pipe(
         Effect.mapError((cause) => new Error("Credential insertion unavailable", { cause })),
       );
+      return inserted === "inserted" ? readBack : inserted;
     }),
 });

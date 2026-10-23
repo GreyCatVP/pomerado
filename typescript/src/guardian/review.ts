@@ -274,9 +274,8 @@ export interface HostReview {
   /** The host's name for the kind, sent as trusted_review.kind. */
   readonly kind: string;
   /**
-   * The host's policy for the kind, sent as trusted_review.policy, unless the reviewer's
-   * `GuardianHostPolicies.hostKinds` registers this same text for the kind, which its shared
-   * instructions then hold.
+   * The host's policy for the kind, sent as trusted_review.policy, after the policy the
+   * reviewer's `GuardianHostPolicies.hostKinds` registers for the kind, if that is other text.
    */
   readonly policy: string;
   /** What the kind judges, sent as host_review. Untrusted unless the policy says otherwise. */

@@ -159,7 +159,14 @@ const Target = Schema.Struct({
   /** Its form's `method` attribute, or a control's `formmethod` attribute, says GET. */
   explicitGet: Schema.optional(Schema.Boolean),
   documentOrigin: Schema.String,
+  /** Its form's own action first, when it is in a form, then its link and each `formaction`. */
   actions: Schema.Array(Schema.String),
+  /**
+   * Its form's own action, the first of `actions`, is a script that does nothing (`javascript:`,
+   * `javascript:void(0)`, `javascript:;`): the page's own code does whatever sending the form does.
+   * A step call that finds it changed judges the controls again.
+   */
+  scriptAction: Schema.optional(Schema.Boolean),
   methods: Schema.Array(Schema.String),
   /**
    * The method its form submits by with it: a submit button's own `formmethod` when it has one,
@@ -415,8 +422,14 @@ export interface AutofillInspection {
   };
 }
 
-/** Kernel's fill vocabulary: a field after the first failed one is never attempted. */
-export type AutofillFieldStatus = "filled" | "failed" | "not_attempted";
+/**
+ * Kernel's fill vocabulary: a field after the first failed one is never attempted. `changed`: a
+ * phone field the host typed into kept other digits than the number's once the page reformatted
+ * it, as under a country picker set to another country (`InsertionOptions.phone`), so the host
+ * typed nothing after it and never clicked the submit. A keyboard that does not read back never
+ * reports it.
+ */
+export type AutofillFieldStatus = "filled" | "failed" | "not_attempted" | "changed";
 
 /**
  * What one host fill did, with no value in it. `filled` typed the fields in order and says what
@@ -572,7 +585,10 @@ export const notingHostTrust = (
  * field for a part of a payment card may also sit in a frame on one of `paymentFrameOrigins`,
  * exactly; no other field ever counts one as trusted. A sign-in step's controls may also sit and
  * submit on an address the host's own `trustSignInUrl` trusts, within core's floor for it (see
- * `inspectAutofillStep`); a card-fill step's never do.
+ * `inspectAutofillStep`); a card-fill step's never do. A sign-in step's control whose form's own
+ * action is a script that does nothing (`scriptAction`) is judged by its frame, document and other
+ * destinations: navigating to such an action sends nothing, and the page's code, which can read the
+ * field anyway, does the sending. A card-fill step's never is, nor any other script action.
  */
 export const untrustedTarget = (
   targets: typeof Targets.Type,
@@ -587,6 +603,7 @@ export const untrustedTarget = (
   named?: ReadonlySet<string>,
 ) => {
   const predicate = signInUrlTrust(trust, step);
+  const signIn = !step.fields.some((field) => isCardSlot(field.slot));
   const trusted = (url: string, card: boolean) =>
     trustedUrl(trust.siteOrigin, trust.authenticationOrigins, url) ||
     (card && onPaymentFrameOrigin(url, trust.paymentFrameOrigins ?? [])) ||
@@ -594,7 +611,11 @@ export const untrustedTarget = (
   const untrustedPart = (target: Target, action: string, card = false) => {
     if (!trusted(target.ownerUrl ?? "", card)) return "frame";
     if (!trusted(target.documentOrigin, card)) return "document_origin";
-    return target.actions.every((url) => trusted(url, card)) ? undefined : action;
+    // A sign-in form's own action that is a script doing nothing sends nothing itself; its other
+    // destinations still count.
+    const script = signIn && target.scriptAction === true && target.actions[0] === "javascript:";
+    const destinations = script ? target.actions.slice(1) : target.actions;
+    return destinations.every((url) => trusted(url, card)) ? undefined : action;
   };
   /**
    * A card field's own checks: every frame above its own is on the site or on its own frame's
@@ -649,7 +670,9 @@ export const untrustedTarget = (
  * any value is typed. The contract is Kernel's vault fill, with our own
  * vault and our own fill: the minter found the fields, and this trusted controller authorizes the
  * destination. A credential goes only into a field whose frame, form actions and submit's link
- * destination are on the site's registrable domain or a configured sign-in origin. A form that
+ * destination are on the site's registrable domain or a configured sign-in origin; a sign-in
+ * form's own action that is a script doing nothing, which sends nothing itself, is judged by where
+ * the field sits and the form's other destinations. A form that
  * submits by GET is allowed when it is clearly the login form, which Guardian judges; its values
  * land in a URL that stays byte-exact. Once the host typed into the page
  * (`judgedBeforeTyping` given), a refusal names only the origins `namedAfterTyping` allows.

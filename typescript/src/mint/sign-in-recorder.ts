@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Effect, Schema } from "effect";
 import { recipeStep } from "../destinations/autofill-recipe.js";
 import { maySend, typingRefusal } from "../destinations/autofill-refusal.js";
+import { refusalEvidence } from "../destinations/autofill-refusal-evidence.js";
 import {
   codeBoxesRefusal,
   type AutofillInspection,
@@ -32,6 +33,7 @@ import {
   isExtraSecret,
   isIdentifier,
   isSecret,
+  provesLogin,
   noteRefill,
   passwordFillsSpent,
   reasksPassword,
@@ -81,6 +83,8 @@ import {
 } from "./autofill-rejected.js";
 import {
   type AutofillHost,
+  changedField,
+  changedPhoneNotice,
   emit,
   refusedStep,
   result,
@@ -122,11 +126,21 @@ const shown = (answer: ReturnType<typeof result>): SignInStepResult => ({
   result: Schema.decodeUnknownSync(Shown)(new TextDecoder().decode(answer.result)).output.value,
 });
 
-/** What the minter does after a screen the host inspected and maybe filled. */
-const notice = (report: AutofillStepReport, step?: Pick<AutofillStep, "submitKey">) =>
-  report.outcome === "refused" && report.codeBoxes !== undefined
+/**
+ * What the minter does after a screen the host inspected and maybe filled, with the values the
+ * fill typed (`typed`), which name a changed phone's calling code.
+ */
+const notice = (
+  report: AutofillStepReport,
+  step?: Pick<AutofillStep, "submitKey">,
+  typed?: readonly string[],
+) => {
+  const changed = changedField(report);
+  if (changed !== -1) return changedPhoneNotice(typed?.[changed]);
+  return report.outcome === "refused" && report.codeBoxes !== undefined
     ? `This screen splits its code across ${report.codeBoxes.boxes} one-character boxes, and the step's code fields named only the boxes at places ${report.codeBoxes.named.join(", ")}, in that order (codeBoxes.named, counted from 1). The host typed and clicked nothing, so nothing reached the site, no code was asked for and no sign-in was spent. Send the step again with one code field per box, all ${report.codeBoxes.boxes} of them in order from the first box to the last; the host asks for the code once and types one character into each box.`
     : stepNotice(report, step);
+};
 
 /** A web address a run can open, without credentials or fragment; undefined for anything else. */
 const entryOf = (url: string | undefined) => {
@@ -290,6 +304,27 @@ export const makeSignInRecorder = (input: {
    * it unspent clears this.
    */
   let passwordRefillRefused = false;
+  /**
+   * The host refused a screen at its destination check, typing nothing because a field, its form
+   * or its submit would send the login somewhere credentials may not go, and no later screen that
+   * takes a password or code passed the check and no sign-in verified since.
+   */
+  let destinationRefused = false;
+  /**
+   * A screen's inspection: one refused at the destination check sets `destinationRefused`, and one
+   * that passed clears it when the screen takes a password or code. A screen with no such field,
+   * such as an identifier screen, says nothing of where the password would go.
+   */
+  const noteInspection = (step: AutofillStep, inspected: AutofillInspection | AutofillStepReport) => {
+    if (!("outcome" in inspected)) {
+      if (step.fields.some((field) => provesLogin(field.slot))) destinationRefused = false;
+    } else if (
+      inspected.outcome === "refused" &&
+      inspected.reason === "credential_target_refused" &&
+      refusalEvidence(inspected)["check"] === "destination"
+    )
+      destinationRefused = true;
+  };
   let afterSubmit:
     | { readonly open: AutofillSignInState; readonly slots: readonly CredentialRejectedField[] }
     | undefined;
@@ -438,6 +473,7 @@ export const makeSignInRecorder = (input: {
           yield* refusedStep(h, "selector_names_contact", holding, identityNotices.selectors),
         );
       const inspected = yield* browser.inspect(step);
+      noteInspection(step, inspected);
       if ("outcome" in inspected)
         return { report: inspected, result: { nextStep: notice(inspected) } };
       yield* input.review(step, inspected);
@@ -498,6 +534,7 @@ export const makeSignInRecorder = (input: {
       }
       const refills = filledBefore(h, step);
       const inspected = yield* browser.inspect(step);
+      noteInspection(step, inspected);
       if ("outcome" in inspected)
         return { report: inspected, result: { nextStep: notice(inspected) } };
       // A code split across one-character boxes goes out whole only when the step names every
@@ -565,7 +602,7 @@ export const makeSignInRecorder = (input: {
         return yield* autofillRefusalFailure(refusal, {
           nothingSubmitted: state.mayHaveSent !== true && state.submittedSlots.size === 0,
         });
-      return { report, result: { nextStep: notice(report, step) } };
+      return { report, result: { nextStep: notice(report, step, filled) } };
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => {
@@ -809,6 +846,7 @@ export const makeSignInRecorder = (input: {
       h.autofillSecretsFilled.current = [];
       h.autofillSecretsRefilled.current = [];
       h.autofillCodeRejected.current = false;
+      destinationRefused = false;
       return { result: checked, verified: true as const };
     });
 
@@ -853,6 +891,11 @@ export const makeSignInRecorder = (input: {
      * password as often as it may, and the password is still spent.
      */
     passwordRefillRefused: () => passwordRefillRefused && passwordFillsSpent(h),
+    /**
+     * Whether the host refused a screen at its destination check, and no later screen that takes a
+     * password or code passed the check and no sign-in verified since.
+     */
+    destinationRefused: () => destinationRefused,
     /** The latest verified sign-in, while no later sign-in reached the site; else none. */
     published: (): PublishedSignIn | undefined => {
       if (verified === undefined || verified.signIn !== signIns) return undefined;

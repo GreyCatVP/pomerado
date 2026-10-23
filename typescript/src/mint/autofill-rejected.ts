@@ -195,7 +195,10 @@ export const recordAutofillValues = (
     }
   });
 
-/** A definitive refusal/not-attempted fill cannot introduce rejection evidence for that value. */
+/**
+ * A definitive refusal/not-attempted fill cannot introduce rejection evidence for that value, nor
+ * can a phone the field changed before any submit (`changed`).
+ */
 export const settleAutofillValues = (
   h: Pick<AutofillHost, "autofillSentValues" | "autofillPrimaryIdentifierKind">,
   step: AutofillStep,
@@ -206,7 +209,11 @@ export const settleAutofillValues = (
     if (!rejectableSlot(field.slot)) continue;
     if (
       report.outcome !== "refused" &&
-      !(report.outcome === "filled" && report.fields[index]?.status === "not_attempted")
+      !(
+        report.outcome === "filled" &&
+        (report.fields[index]?.status === "not_attempted" ||
+          report.fields[index]?.status === "changed")
+      )
     )
       continue;
     const key = logicalRejectedField(

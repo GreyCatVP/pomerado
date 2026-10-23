@@ -690,7 +690,8 @@ describe("OpenAI reviewer policy and trusted authority", () => {
       expect(writeRule).toContain(`${anchor} ${sentence} `);
     }
     // The action label agrees, beside its pointer to the signed-out session state.
-    expect(instructionsOf(requests[0])).toContain(
+    const input = modelInput(requests) as { trusted_review: { policy: string } };
+    expect(input.trusted_review.policy).toContain(
       "Changing a signed-out session's own state, as the execution policy lists it, is a read. So is a public site's own record of a view, as the execution policy says.",
     );
   });

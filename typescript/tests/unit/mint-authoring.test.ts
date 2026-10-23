@@ -567,6 +567,42 @@ it("names the local host's own status for a run's uncertain write", async () => 
   }
 });
 
+/*
+ * When a write's declared refusal completes a run is the host's own rule, so the writes skill's
+ * declared-refusal sentences and the publication review's refusal check are host sections. Their
+ * standalone text is the local host's rule, unchanged, and a composing host replaces each one.
+ */
+it("lets a host replace when a write's declared refusal completes the run", async () => {
+  const text = (texts: Map<string, string>, name: string) =>
+    (texts.get(name) ?? "").replace(/\s+/g, " ");
+  const local = await renderedTexts("typescript/authoring");
+  expect(text(local, "writes")).toContain(
+    'with those choices. Before any commit mark is entered, the run reports that it changed nothing, so throw a refusal before the mark. A write may instead declare its refusals in its output schema: a branch that requires `status` `"refused"` and a `reason` from a listed set of stable lowercase codes, such as `over_price_limit`, beside the values the caller needs, such as the total and the limit, with no other branch whose `status` could be `"refused"`. Returned before the first commit mark, a declared refusal completes the run with that output and reports the write not applied. A refusal returned in a shape the schema does not declare, or returned or thrown after a mark, reports a possible change. See `references/write-session.ts`',
+  );
+  expect(text(local, "publication")).toContain(
+    "never a login; - a write runs every check that can refuse, such as a limit on its total, before the mark of the commit it guards, and refuses with `InvalidInput`, or returns a refusal its output schema declares before its first mark, never in an undeclared output shape; - a composed write",
+  );
+  const replaced = new Set(["writes.declared-refusal", "publication.declared-refusal"]);
+  const root = await authoringCopy((_path, file) =>
+    file.replace(sectionMarker, (marker: string, id: string) =>
+      replaced.has(id) ? `HOST TEXT FOR ${id}` : marker,
+    ),
+  );
+  try {
+    const composed = await renderedTexts(root);
+    expect(text(composed, "writes")).toContain(
+      "with those choices. HOST TEXT FOR writes.declared-refusal See `references/write-session.ts`",
+    );
+    expect(text(composed, "writes")).not.toContain("Returned before the first commit mark");
+    expect(text(composed, "publication")).toContain(
+      "never a login; HOST TEXT FOR publication.declared-refusal - a composed write",
+    );
+    expect(text(composed, "publication")).not.toContain("never in an undeclared output shape");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // A read build becomes a write through `mint_update`; `request_input` takes no write upgrade.
 it("asks for no write upgrade through request_input anywhere in the shared text", async () => {
   const texts = await renderedTexts("typescript/authoring");
@@ -892,9 +928,10 @@ it("has a write mark only the steps that send and wait for every answer the site
   expect(writes).toContain(
     "- Mark the commit at the step that submits the booking or order; a hold that expires on its own, such as a reserved table or a cart timer, is not the commit.",
   );
-  // The wait is its own rule, and a refusal it reads ends as the caller's input before any mark.
+  // The wait is its own rule, and a field error it reads on the caller's value is the caller's
+  // input error.
   expect(writes).toContain(
-    "the next step uses. - When a step waits for the site's answer, wait for every answer the site can give, such as results, a no-results message or an out-of-area notice, and throw `InvalidInput` naming the field the site refused, with the options the site offers as `available` when it lists them, before the mark of the commit it guards, rather than waiting for results alone.",
+    "the next step uses. - When a step waits for the site's answer, wait for every answer the site can give, such as results, a no-results message or an out-of-area notice, rather than waiting for results alone. A message about a value the caller gave, such as a field error, is the caller's input error: throw `InvalidInput` naming the field, with the options the site offers as `available` when it lists them.",
   );
   // The narrower click-only rule it replaces is gone, so the two never disagree.
   expect(writes).not.toContain("Mark only the step whose click saves or submits.");
@@ -904,6 +941,32 @@ it("has a write mark only the steps that send and wait for every answer the site
   expect(writes).not.toContain("Prefer marking the commit");
   expect(writes).not.toContain("a control whose handler calls the site");
   expect(writes).not.toContain("return the site's refusal with the caller's options");
+});
+
+/*
+ * A write saved over several pages refused the site's own code for an option on a later page,
+ * which showed only labels, after earlier pages had saved, so a value problem became an outcome
+ * the caller could not know. The site's option values and labels could be read before the first
+ * save, from the form definitions an earlier page loaded.
+ */
+it("has a write check caller values against the site's own option lists before its first save", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "- On a write saved across several pages, when the site's own option lists for a later page can be read before the first save and do not depend on what an earlier page saves, such as the form definitions or option data an earlier page loads, prefer reading them and checking every caller value for those fields against them before the first commit mark, in the session and on every run of the composed script. Match each value by the site's option value as well as its label (forms skill), and refuse with `InvalidInput` and `available` before anything is saved when a value matches neither. A refusal after an earlier save leaves a half-made record and an outcome the caller can't know.",
+  );
+  // A check that can only run after an earlier save keeps its honest possible change.
+  expect(text("writes")).toContain(
+    "A check that can only run after an earlier marked step, such as a total that shows only once a saved address step has run, runs before the later step's mark;",
+  );
+  // It sits after the refusal rule and its exceptions, so that rule's "those checks" still names
+  // the checks before it.
+  expect(text("writes")).toContain(
+    "then throw `InvalidInput` that names the field by its label, and don't click again. - On a write saved across several pages,",
+  );
+  expect(text("forms")).toContain(
+    "Choose the option that matches the input value, by the option's value or its observed label pattern, and read back that the field took it. When the control shows only labels, prefer matching against the site's own table of option values and labels, such as the form definitions or option data the page or an earlier page loads, over the visible words alone, so an input holding the site's code for an option picks that option.",
+  );
 });
 
 /*
@@ -1088,7 +1151,45 @@ it("has every unoffered-value rule name the task-asked substitute exception", as
     `it follows .agents/core/SKILL.md ("Configure, then read"), which never substitutes another value; ${only} Asking the owner`,
   );
   expect(text("caller-input")).toContain(
-    `- An option the page lists but greys out, such as a booked date or a sold-out size: not an error on a read, \`InvalidInput\` with \`available\` on a write (core skill, "Configure, then read"); ${only} - A write that declines`,
+    `- An option the page lists but greys out, such as a booked date or a sold-out size: not an error on a read, \`InvalidInput\` with \`available\` on a write (core skill, "Configure, then read"); ${only} - A read whose site says no`,
+  );
+});
+
+/*
+ * The site's own no to a valid request, such as sold out or not offered for these facts, is the
+ * task's answer, not a broken tool and not the caller's input error. A tool prefers returning it
+ * as a refusal its output schema declares, quoting the site's words in `site_message`, from what
+ * the site shows in that run only. A field error on the caller's value stays the caller's input
+ * error, and a challenge, block or error page stays a failure. After a commit mark the tool
+ * returns the refusal only where the declared-refusal rule says it completes the run there, which
+ * the standalone rule never does, so the standalone text never contradicts itself.
+ */
+it("has a tool return the site's no to a valid request as a declared refusal quoting the site", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "when it lists them. - When the site says no to a valid request, such as sold out, no availability, not eligible, not offered for these facts or not served in this area, that no is the task's answer. Prefer returning it as a refusal the output schema declares (below), with a `reason` code of the tool's own, listed in the tool's description, `site_message`, the site's own words exactly as the page shows them, and any alternatives the site offers, exactly as shown. Return it only from what the site shows in this run, never from a rule copied into the tool's own checks, and never from a challenge, block, access-denied, error or maintenance page, which is a failure (`OperationFailure`). After a commit mark, return it only where the declared-refusal rule below says one returned there completes the run; otherwise prefer throwing `InvalidInput` with the site's words. - When the site swaps the request for something the caller didn't ask for, such as another product, a later date or a higher amount, stop before the step that would confirm it and return the refusal as above, with the site's words and its offer, unless the caller's own task asks for whatever the site ends up with. - Report a confirm popup",
+  );
+  expect(text("writes")).not.toContain("naming the field the site refused");
+  // The standalone rule completes no refusal returned after a mark.
+  expect(text("writes")).toContain(
+    "A refusal returned in a shape the schema does not declare, or returned or thrown after a mark, reports a possible change.",
+  );
+  expect(text("caller-input")).toContain(
+    "- A write that declines the task because the caller's own limit or the page's state rules it out, such as a total over the caller's price limit or a product number whose page names another item than the caller's: `InvalidInput`, thrown before the mark of the commit it guards (writes skill). Pass `field`, the input the caller would change, `kind`, the reason as a stable lowercase token such as `over_price_limit` or `item_mismatch`, and `available` where the page lists choices,",
+  );
+  expect(text("caller-input")).toContain(
+    "A write returns a refusal as its output only when its output schema declares that refusal, and only where the writes skill says one completes the run, such as before its first mark: any other output a write returns without `verified()` reports a possible change. - When the site itself says no to a valid request, such as an item out of stock or a variant it does not offer, prefer the writes skill's refusal quoting the site. - A write whose steps",
+  );
+  expect(text("caller-input")).toContain(
+    "(writes skill). - A read whose site says no to the whole request, such as a product it no longer sells, prefers returning that no as a declared refusal with `site_message` over throwing (writes skill). - A write that declines",
+  );
+  expect(text("caller-input")).toContain(
+    "The cases above that return results with what applied, and a declared refusal, are the only exceptions.",
+  );
+  expect(text("caller-input")).not.toContain("`out_of_stock`");
+  expect(text("core")).toContain(
+    "A write throws `InputNotApplied` (above) before its first commit step instead; for a location the site says it does not serve, it prefers the writes skill's refusal quoting the site.",
   );
 });
 
@@ -1121,17 +1222,17 @@ it("renders the pinned standalone authoring", async () => {
       .filter(([path]) => path !== "reference/publication-review.md")
       .map(([path, text]) => [sha256(text), `workspace/${path}`]),
   ]).toStrictEqual([
-    ["92db9c4c22a4abf5cc51200f267e9dcaba133d213a0b0181ad12f3973b7ae619", "core"],
+    ["0a5bfdc51403a6265bd610332d4c3f57415852697ff252890c216126791c637d", "core"],
     ["a896a59d7b924a2940a90437b8d4488cd515c4f4afc70da9fe14953b1583dd93", "search"],
-    ["4685c83739eac20c5ee28d64c8dace6df03d12e4e6ced6c93e08479fd7b855fd", "auth"],
+    ["c159f24ef544d14892cb66027ff52ebaed2a08f1345a6e46c5b5466e515d15f1", "auth"],
     ["ea6e7780a9a9028d806436de84488f20687fd292bb0d39ea01652b521c705772", "testing"],
     ["3cc71d02f70447f1de02e062695095682a0cabab4ed668abe1309d017bc0cf83", "pagination"],
-    ["1e5ba533a9a77f6ebeda8ab82979f82d085b84540bb0b0ce7f37722e32366de3", "forms"],
-    ["dc3002bcc8fbab8c7956e16c7a7bf297b746e245f37c4e746f4ad280040b7c4d", "writes"],
+    ["a34d8f0e21e946e62f88819faf422eabcc7a6f75e766d0186ce5f19f367ac055", "forms"],
+    ["919a6de3e6b6c336e7acd8ebd478f823e25adab54b9a3f8b1e08e1d0f880c896", "writes"],
     ["01eb1c98d8945987929ca3d8c68d4d848e64415d2042fc844166a490ca9457cb", "cart"],
-    ["4423c6fd332f1c3d3b17e3e5ea988aa564e3bb9d0d94838d85558cdecd987fb9", "caller-input"],
+    ["43dab7f4261a0ff7196a4b91c5eafbc87cd35408dbad3a66b681b8a20a050fcd", "caller-input"],
     ["6a6c8e632adfa6d7a95640498fc006fe904b5b569010c836c21b37f38fbf290a", "publication"],
-    ["7afa42f757e1cbafa0fbdda2ecb1d70a9ad7cc01ed11f1cf7d6400b7fb27be37", "workspace/AGENTS.md"],
+    ["e80841525cfc668f952e39b896056afc66283feb2564dbcb910ea7db38c72122", "workspace/AGENTS.md"],
     ["9501ae9c273d5d4db8976a544879f7aee44212c8a616b00e74263dcd3c593035", "workspace/README.md"],
   ]);
 });
@@ -1252,7 +1353,7 @@ it("renders the search URL fast path only when a host turns it on", async () => 
     [sha256(on.agents), "workspace/AGENTS.md"],
   ]).toStrictEqual([
     ["ea3c3bc8472c8c9db7aa9dd9b99b682f525f5ab55c091b944946dcf75f5ec83e", "search"],
-    ["2717309c2761b3e5984e09e9178e6dbd58395a447c97395f4f5abfead9b1e045", "workspace/AGENTS.md"],
+    ["b5337b22f040b8420d94ff682661576387f5f5c7cba8eab07027e2d29f574670", "workspace/AGENTS.md"],
   ]);
   expect(on.digests.filter(([, name]) => name !== "search")).toStrictEqual(
     off.digests.filter(([, name]) => name !== "search"),
