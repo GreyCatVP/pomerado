@@ -1,3 +1,4 @@
+import { makeRunSecrets } from "../../src/inputs/secrets.js";
 import { Effect, TestClock, TestContext } from "effect";
 import { describe, expect, it } from "vitest";
 import type { InputAsker, InputRequest } from "../../src/runtime/input-request.js";
@@ -15,9 +16,13 @@ import {
 } from "../../src/runtime/session-sign-in.js";
 import { SignInRunFailed } from "../../src/runtime/sign-in-replay.js";
 import {
+  makeLocalSessionSignIn,
   mintSessionSignInFailure,
   SessionSignInFailed,
 } from "../../src/standalone/session-sign-in.js";
+import type { AutofillSignedInCheck } from "../../src/destinations/autofill-step.js";
+import type { SignInRecipe } from "../../src/destinations/sign-in-recipe.js";
+import type { SignInReplayBrowser } from "../../src/runtime/sign-in-replay.js";
 
 it("allows a mint one automatic sign-in per check and four per attempt", () => {
   expect(sessionSignInAllowance(mintSessionSignIns, { attempt: 0, scope: 0 })).toBe("allowed");
@@ -231,6 +236,74 @@ it("preserves origin matching so trailing-slash normalization does not match acr
 
   expect(markerCantTell(missing("https://example.test/login/"), recipe)).toBe(false);
   expect(markerCantTell(missing("https://other.test/login/"), recipe)).toBe(true);
+});
+
+it("recognizes a recorded workspace login screen as signed out and not can't tell", () => {
+  const recipe = {
+    steps: [
+      { page: "https://example.test/login" },
+      { origin: "workspace" as const, page: "/login/password" },
+    ],
+    signedIn: {},
+    workspace: { parent: "example.test" },
+    workspaceOrigin: "https://acme.example.test",
+  };
+  const missing = (url: string) => ({ signedIn: false, url, failed: "indicator_not_visible" }) as const;
+
+  // On the pinned workspace login screen, the sign-in is not can't tell, and reads signed out
+  expect(markerCantTell(missing("https://acme.example.test/login/password"), recipe)).toBe(false);
+  expect(sessionOnPage(missing("https://acme.example.test/login/password"), recipe)).toBe("signed_out");
+
+  // An off-site check on the recorded workspace screen reads signed out
+  expect(
+    sessionOnPage(
+      { signedIn: false, failed: "off_site", url: "https://acme.example.test/login/password" },
+      recipe,
+    ),
+  ).toBe("signed_out");
+
+  // Trailing slashes on workspace screens are normalized
+  expect(markerCantTell(missing("https://acme.example.test/login/password/"), recipe)).toBe(false);
+  expect(sessionOnPage(missing("https://acme.example.test/login/password/"), recipe)).toBe("signed_out");
+
+  // An unrecorded intermediate page on the workspace host retains can't tell
+  expect(markerCantTell(missing("https://acme.example.test/choose-account"), recipe)).toBe(true);
+  expect(sessionOnPage(missing("https://acme.example.test/choose-account"), recipe)).toBe("unknown");
+
+  // When pinned to acme, a login screen of another tenant does not match this login's screen
+  expect(markerCantTell(missing("https://globex.example.test/login/password"), recipe)).toBe(true);
+  expect(sessionOnPage(missing("https://globex.example.test/login/password"), recipe)).toBe("unknown");
+
+  // An unrelated domain never matches a workspace screen
+  expect(markerCantTell(missing("https://attacker.test/login/password"), recipe)).toBe(true);
+  expect(sessionOnPage(missing("https://attacker.test/login/password"), recipe)).toBe("unknown");
+
+  // When unpinned, any valid tenant sibling on the recipe's parent domain matches
+  const unpinned = {
+    steps: [
+      { page: "https://example.test/login" },
+      { origin: "workspace" as const, page: "/login/password" },
+    ],
+    signedIn: {},
+    workspace: { parent: "example.test" },
+  };
+  expect(markerCantTell(missing("https://acme.example.test/login/password"), unpinned)).toBe(false);
+  expect(sessionOnPage(missing("https://acme.example.test/login/password"), unpinned)).toBe("signed_out");
+  expect(markerCantTell(missing("https://attacker.test/login/password"), unpinned)).toBe(true);
+
+  // A workspace screen with anySegments wildcard matches any segment in that position
+  const wildcardWorkspace = {
+    steps: [
+      { page: "https://example.test/login" },
+      { origin: "workspace" as const, page: "/team/placeholder/password", anySegments: [1] },
+    ],
+    signedIn: {},
+    workspace: { parent: "example.test" },
+    workspaceOrigin: "https://acme.example.test",
+  };
+  expect(markerCantTell(missing("https://acme.example.test/team/marketing/password"), wildcardWorkspace)).toBe(false);
+  expect(sessionOnPage(missing("https://acme.example.test/team/marketing/password"), wildcardWorkspace)).toBe("signed_out");
+  expect(markerCantTell(missing("https://acme.example.test/team/marketing/other"), wildcardWorkspace)).toBe(true);
 });
 
 it("fills a login into an execution's browser only while that execution waits in its own sign-in", () => {
@@ -461,4 +534,89 @@ describe("mintSessionSignInFailure", () => {
       },
     });
   });
+});
+
+it("re-authenticates via ensureSignedIn when the browser is on a recorded workspace login screen", async () => {
+  let confirmCalled = false;
+  let openCalled = false;
+
+  const recipe: SignInRecipe = {
+    version: 4,
+    steps: [
+      {
+        page: "https://example.test/login",
+        fields: [{ selector: "#username", accepts: ["username" as const] }],
+        submit: "#next",
+      },
+      {
+        origin: "workspace",
+        page: "/login/password",
+        fields: [{ selector: "#password", slot: "password" as const }],
+        submit: "#submit",
+      },
+    ],
+    signedIn: { selector: "#account" },
+    workspace: { parent: "example.test" },
+  };
+
+  const browser: SignInReplayBrowser<Error> = {
+    authenticationOrigins: [],
+    confirm: () =>
+      Effect.sync(() => {
+        confirmCalled = true;
+        return {
+          signedIn: false,
+          failed: "indicator_not_visible",
+          url: "https://acme.example.test/login/password",
+        } as AutofillSignedInCheck;
+      }),
+    inspect: () => Effect.dieMessage("unexpected inspect"),
+    fill: () => Effect.dieMessage("unexpected fill"),
+    open: () =>
+      Effect.sync(() => {
+        openCalled = true;
+      }),
+    markerVisible: () => Effect.succeed(false),
+  };
+
+  const secrets = makeRunSecrets();
+  const sessionSignIn = makeLocalSessionSignIn({
+    browser,
+    recorded: () => ({
+      recipe,
+      entryUrl: "https://example.test/login",
+    }),
+    login: {
+      login: {
+        held: () => undefined,
+        values: Effect.succeed({ credentials: [] } as any),
+        correct: () => Effect.dieMessage("unexpected correct"),
+      },
+    },
+    asks: {
+      ask: () => Effect.dieMessage("unexpected ask"),
+      within: (_bound, effect) => effect,
+    },
+    secrets,
+    site: "example.test",
+    siteOrigin: "https://example.test",
+    limits: runSessionSignIns,
+    scope: "attempt",
+    workspace: { origin: "https://acme.example.test" },
+  });
+
+  const bound = { untilMs: Date.now() + 60_000, stop: new AbortController().signal };
+  const hook = sessionSignIn.hook();
+  // First call is the initial execution hook (answers signed_in without a check)
+  const first = await Effect.runPromise(hook(bound));
+  expect(first).toEqual({ outcome: "signed_in", signedInAgain: false });
+  expect(confirmCalled).toBe(false);
+
+  // Second call invokes ensureSignedIn, which evaluates sessionOn
+  // sessionOn recognizes https://acme.example.test/login/password as signed_out
+  // and initiates re-authentication, which calls open
+  await Effect.runPromise(hook(bound));
+
+  expect(confirmCalled).toBe(true);
+  expect(openCalled).toBe(true);
 });

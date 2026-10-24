@@ -6,7 +6,8 @@ import type {
   AutofillStep,
   AutofillStepReport,
 } from "../destinations/autofill-step.js";
-import { pageMatches } from "../destinations/autofill-recipe.js";
+import { pageMatches, pathMatches } from "../destinations/autofill-recipe.js";
+import { workspaceHost } from "./workspace-origin.js";
 import { failureDetail, type FailureDetail } from "./failure-detail.js";
 import {
   InputRequestFailure,
@@ -67,9 +68,32 @@ export const placeOf = (page: string | undefined) => {
   return url === null ? undefined : `${url.origin}${pathOf(url.pathname)}`;
 };
 
-/** Whether the page is one of the recorded sign-in screens (`pageMatches`). */
-const onSignInScreen = (url: string | undefined, steps: SessionCheckRecipe["steps"]) =>
-  url !== undefined && steps.some((step) => pageMatches(url, step));
+/**
+ * Whether the page is one of the recorded sign-in screens: an exact screen's recorded origin and
+ * path (`pageMatches`), or for a workspace screen its path on the workspace origin or on a workspace
+ * host on the recipe's parent domain.
+ */
+const onSignInScreen = (
+  url: string | undefined,
+  recipe: Pick<SessionCheckRecipe, "steps" | "workspace" | "workspaceOrigin" | "siteOrigin">,
+) => {
+  if (url === undefined) return false;
+  const at = URL.parse(url);
+  if (at === null) return false;
+  const site =
+    recipe.siteOrigin ??
+    recipe.steps
+      .map((step) => (step.origin !== "workspace" ? URL.parse(step.page)?.origin : undefined))
+      .find((origin): origin is string => origin !== undefined);
+  return recipe.steps.some((step) => {
+    if (step.origin !== "workspace") return pageMatches(url, step);
+    if (!pathMatches(at.pathname, step.page, step.anySegments)) return false;
+    if (recipe.workspaceOrigin !== undefined) return at.origin === recipe.workspaceOrigin;
+    if (recipe.workspace !== undefined && site !== undefined)
+      return workspaceHost(site, recipe.workspace.parent, at.origin);
+    return false;
+  });
+};
 
 const markerFailure = (failed: string) =>
   failed === "indicator_not_visible" ||
@@ -92,10 +116,14 @@ const onMarkerPath = (url: string | undefined, urlPath: string, failed: string) 
 /** What a session check reads of a recorded sign-in: its screens and its marker's path. */
 export interface SessionCheckRecipe {
   readonly steps: readonly {
+    readonly origin?: "workspace" | undefined;
     readonly page: string;
     readonly anySegments?: readonly number[] | undefined;
   }[];
   readonly signedIn: { readonly urlPath?: string | undefined };
+  readonly siteOrigin?: string | undefined;
+  readonly workspace?: { readonly parent: string } | undefined;
+  readonly workspaceOrigin?: string | undefined;
 }
 
 /**
@@ -117,7 +145,7 @@ export const sessionOnPage = (
   recipe: SessionCheckRecipe,
 ): "signed_in" | "signed_out" | "unknown" => {
   if (check.signedIn) return "signed_in";
-  const signInScreen = onSignInScreen(check.url, recipe.steps);
+  const signInScreen = onSignInScreen(check.url, recipe);
   if (check.failed === "off_site") return signInScreen ? "signed_out" : "unknown";
   if (!markerFailure(check.failed)) return "unknown";
   const { urlPath } = recipe.signedIn;
@@ -141,7 +169,7 @@ export const markerCantTell = (check: AutofillSignedInCheck, recipe: SessionChec
     check.failed === "path_mismatch" ||
     check.failed === "off_site") &&
   check.passwordFieldVisible !== true &&
-  !onSignInScreen(check.url, recipe.steps) &&
+  !onSignInScreen(check.url, recipe) &&
   sessionOnPage(check, recipe) === "unknown";
 
 /**
