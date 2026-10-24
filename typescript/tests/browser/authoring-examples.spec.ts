@@ -22,6 +22,7 @@ import readCatalog, {
   searchThenRead,
 } from "../../authoring/examples/navigation.js";
 import searchListings, { readRooms } from "../../authoring/examples/pagination.js";
+import searchOrigin from "../../authoring/examples/picker-first.js";
 import assignOwner from "../../authoring/examples/picker.js";
 import selectStatus from "../../authoring/examples/selection.js";
 import readInvoiceIds from "../../authoring/examples/variants.js";
@@ -928,7 +929,7 @@ test("native select example selects a canonical value and reads it back", async 
   await expect(page.locator("output")).toHaveText("1");
 });
 
-test("picker example picks a suggested person and refuses one the site does not suggest", async ({
+test("picker example picks a suggested person, refuses one the site does not suggest and lets the caller choose among a shared name", async ({
   page,
 }) => {
   await page.setContent(`
@@ -938,7 +939,7 @@ test("picker example picks a suggested person and refuses one the site does not 
       const input = document.getElementById("owner"), list = document.getElementById("people");
       input.oninput = () => setTimeout(() => {
         list.hidden = false;
-        list.innerHTML = ["Jordan Reyes", "Quinn Avery", "Casey Lund"].filter((name) => name.toLowerCase().includes(input.value.toLowerCase()))
+        list.innerHTML = ["Jordan Reyes", "Quinn Avery", "Casey Lund", "Jordan Lee"].filter((name) => name.toLowerCase().includes(input.value.toLowerCase()))
           .map((name) => '<li role="option">' + name + "</li>").join("");
       }, 80);
       list.onmousedown = (event) => event.preventDefault();
@@ -952,6 +953,39 @@ test("picker example picks a suggested person and refuses one the site does not 
     _tag: "InvalidInput",
     field: "owner",
     available: ["Casey Lund"],
+    kind: "option_missing",
+  });
+  expect(failure((await runExample(page, assignOwner, { owner: "Jordan" })).result)).toMatchObject({
+    _tag: "InvalidInput",
+    field: "owner",
+    available: ["Jordan Reyes", "Jordan Lee"],
+    kind: "option_ambiguous",
+  });
+});
+
+test("picker example that takes the first of a shared name returns the one it used", async ({
+  page,
+}) => {
+  await page.setContent(`
+    <label for="from">From</label><input id="from" role="combobox" aria-controls="stations" autocomplete="off">
+    <ul id="stations" role="listbox" hidden></ul>
+    <script>
+      const input = document.getElementById("from"), list = document.getElementById("stations");
+      input.oninput = () => setTimeout(() => {
+        list.hidden = false;
+        list.innerHTML = ["Fernhill", "Springfield, IL", "Springfield, MA"].filter((name) => name.toLowerCase().includes(input.value.toLowerCase()))
+          .map((name) => '<li role="option">' + name + "</li>").join("");
+      }, 80);
+      list.onmousedown = (event) => event.preventDefault();
+      list.onclick = (event) => { input.value = event.target.textContent; list.hidden = true; };
+    </script>`);
+  expect((await runExample(page, searchOrigin, { origin: "Springfield" })).result).toEqual(
+    Either.right({ origin: "Springfield, IL" }),
+  );
+  await expect(page.getByRole("combobox", { name: "From" })).toHaveValue("Springfield, IL");
+  expect(failure((await runExample(page, searchOrigin, { origin: "Ashby" })).result)).toMatchObject({
+    _tag: "InvalidInput",
+    field: "origin",
     kind: "option_missing",
   });
 });

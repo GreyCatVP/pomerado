@@ -411,7 +411,9 @@ the caller asked for, in the form the site saves it.
   did not run, prove it in an `act` step that only reads, while the session is open (below),
   never by committing again.
   When no entry matches, throw `InvalidInput` with `field` and `available`; when several match
-  equally, ask the caller (core skill, the input schema). Write that ID or pick that entry, and
+  equally, take the first in the site's order and return the one it used, as the site labels
+  it, or list them for the caller to choose one, as the tool decides (core skill, the input
+  schema). Write that ID or pick that entry, and
   compare the read-back by ID, never a label against an ID. Return the reference as
   `{ id, label }` (records skill). Do not drop a reference field only because the site saves an
   ID: the lookup is the fix. When the site shows no ID and offers no list to resolve one, compare

@@ -270,6 +270,229 @@ list.addEventListener("click", (event) => { input.value = event.target.textConte
   await expect(page.getByLabel("Destination")).toHaveValue("Madrid");
 });
 
+/**
+ * A search box that loads its search when it first takes focus, in a chain of its own requests
+ * lasting about 2 s. Until they finish, typing draws only the box's "Search with AI" row, which the
+ * author's `option` selector leaves out, and asks the site nothing; once they finish, typing also
+ * asks the site for places.
+ */
+const startingUp = `
+<form><label for="where">Destination</label>
+<input id="where" role="combobox" aria-controls="where-list" aria-expanded="false" autocomplete="off">
+<ul id="where-list" role="listbox" hidden></ul><input type="hidden" name="where"></form>
+<script>
+const input = document.getElementById("where"), list = document.getElementById("where-list");
+let ready = false, loading = false, generation = 0;
+input.addEventListener("focus", async () => {
+  if (loading) return;
+  loading = true;
+  for (let step = 0; step < 8; step++) await fetch("/api/start?step=" + step);
+  ready = true;
+});
+const draw = (places) => {
+  list.innerHTML = places.map((place) => '<li role="option" data-value="' + place + '">' + place + "</li>").join("") +
+    '<li role="option" aria-label="' + input.value + ' Search with AI">' + input.value + " · Search with AI</li>";
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+};
+input.addEventListener("input", async () => {
+  const mine = ++generation;
+  draw([]);
+  if (!ready || input.value === "") return;
+  const places = await (await fetch("/api/places?q=" + encodeURIComponent(input.value))).json();
+  if (mine === generation) draw(places);
+});
+list.addEventListener("mousedown", (event) => event.preventDefault());
+list.addEventListener("click", (event) => {
+  const option = event.target.closest("[role=option]");
+  if (!option || !option.dataset.value) return;
+  input.value = option.dataset.value;
+  document.querySelector("[name=where]").value = option.dataset.value;
+  list.hidden = true;
+  input.setAttribute("aria-expanded", "false");
+});
+</script>`;
+const startingUpApi = (params: URLSearchParams, path: string) =>
+  path === "/api/start"
+    ? { delayMs: 250, body: {} }
+    : {
+        delayMs: 60,
+        body: ["Tokyo", "Tokyo Bay", "Toronto", "Toulouse"].filter((place) =>
+          place.toLowerCase().startsWith((params.get("q") ?? "").toLowerCase()),
+        ),
+      };
+const notAiRow = `'[role="option"]:not([aria-label$="Search with AI"])'`;
+
+test("pickValue types again key by key, once the page's own requests go quiet, when its option selector left no row", async ({ page }) => {
+  await serve(page, startingUp, startingUpApi);
+  expect(
+    await call(page, `return await pickValue(page.getByLabel("Destination"), "Tokyo", { ...fast, tie: "first", option: ${notAiRow} });`),
+  ).toEqual({ result: { picked: true, kind: "typeahead", label: "Tokyo", value: "Tokyo", rank: "exact", refills: 0 } });
+  expect(await submitted(page)).toEqual({ where: "Tokyo" });
+});
+
+test("pickValue still refuses a place a starting-up page never offers, and its option selector's left-out row is no choice", async ({ page }) => {
+  await serve(page, startingUp, startingUpApi);
+  expect(
+    await call(page, `return await pickValue(page.getByLabel("Destination"), "Qxzvw", { ...fast, tie: "first", option: ${notAiRow} });`),
+  ).toEqual({ result: { picked: false, reason: "option_missing", wanted: "Qxzvw", available: [], matches: [] } });
+  expect(await submitted(page)).toEqual({ where: "" });
+});
+
+/**
+ * A search box that asks the site for its default list, with an empty term, when it takes focus,
+ * and for matches as you type, drawing each answer as it lands. A new visitor's default list is
+ * empty, and the slower empty-term answer lands after the typed term's. A term that matches no
+ * city answers with popular cities.
+ */
+const defaultList = `
+<form><label>City <input id="city" role="combobox" aria-controls="city-list" autocomplete="off"></label>
+<ul id="city-list" role="listbox"></ul></form>
+<script>
+const input = document.getElementById("city"), list = document.getElementById("city-list");
+const draw = (names) => { list.innerHTML = names.map((name) => '<li role="option">' + name + "</li>").join(""); };
+const ask = async (term) => draw(await (await fetch("/api/suggest?q=" + encodeURIComponent(term))).json());
+input.addEventListener("focus", () => ask(""));
+input.addEventListener("input", () => { if (input.value !== "") ask(input.value); });
+list.addEventListener("mousedown", (event) => event.preventDefault());
+list.addEventListener("click", (event) => { input.value = event.target.textContent; draw([]); });
+</script>`;
+const defaultListApi = (params: URLSearchParams) => {
+  const term = (params.get("q") ?? "").toLowerCase();
+  if (term === "") return { delayMs: 400, body: [] };
+  const found = ["Chicago", "Charlotte", "Cincinnati"].filter((name) => name.toLowerCase().startsWith(term));
+  return { delayMs: 40, body: found.length > 0 ? found : ["Lisbon", "Porto"] };
+};
+
+test("pickValue types again key by key when an empty default list replaced the list", async ({ page }) => {
+  await serve(page, defaultList, defaultListApi);
+  expect(await call(page, `return await pickValue(page.getByLabel("City"), "Chicago", fast);`)).toEqual({
+    result: { picked: true, kind: "typeahead", label: "Chicago", value: "", rank: "exact", refills: 0 },
+  });
+  await expect(page.getByLabel("City")).toHaveValue("Chicago");
+});
+
+test("pickValue still refuses a city the site lacks after an empty default list, listing the cities it offered", async ({ page }) => {
+  await serve(page, defaultList, defaultListApi);
+  expect(await call(page, `return await pickValue(page.getByLabel("City"), "Qxzvw", fast);`)).toEqual({
+    result: { picked: false, reason: "option_missing", wanted: "Qxzvw", available: ["Lisbon", "Porto"], matches: [] },
+  });
+});
+
+test("pickValue leaves an empty list's typing to the author's type hook", async ({ page }) => {
+  await serve(page, defaultList, defaultListApi);
+  expect(
+    await call(
+      page,
+      `const steps = [];
+      const outcome = await pickValue(page.getByLabel("City"), "Chicago", { ...fast, type: async (field, query, step) => { steps.push(step); await field.fill(query); } });
+      return { outcome, steps };`,
+    ),
+  ).toEqual({ result: { outcome: { picked: false, reason: "option_missing", wanted: "Chicago", available: [], matches: [] }, steps: [0] } });
+});
+
+test("pickValues with create makes the typed tag at once when the list shows nothing for it", async ({ page }) => {
+  await serve(page, `<form><label for="tag-entry">Tags</label><div class="tag-input"><input id="tag-entry" role="combobox" aria-controls="tag-list" autocomplete="off"></div>
+<ul id="tag-list" role="listbox" hidden></ul><input type="hidden" name="tags"></form>
+<script>
+const input = document.getElementById("tag-entry"), box = document.querySelector(".tag-input"), list = document.getElementById("tag-list");
+window.keys = [];
+input.addEventListener("input", () => { list.hidden = false; list.innerHTML = '<li class="no-results">No matches</li>'; });
+input.addEventListener("keydown", (event) => {
+  window.keys.push(event.key);
+  if (event.key !== "Enter" || input.value.trim() === "") return;
+  event.preventDefault();
+  input.insertAdjacentHTML("beforebegin", '<span class="tag">' + input.value.trim() + '<button type="button" aria-label="Remove">×</button></span>');
+  input.value = "";
+  list.hidden = true;
+  document.querySelector("[name=tags]").value = [...box.querySelectorAll(".tag")].map((tag) => tag.firstChild.textContent).join(",");
+});
+</script>`);
+  expect(await call(page, `return await pickValues(page.getByLabel("Tags"), ["urgent"], { ...fast, create: true });`)).toEqual({
+    result: { picked: true, kind: "typeahead", values: [{ label: "urgent", value: "", added: true }], removed: [] },
+  });
+  expect(await submitted(page)).toEqual({ tags: "urgent" });
+  // Filled once and committed with Enter: never typed again key by key.
+  expect(await page.evaluate(() => (window as unknown as { keys: string[] }).keys)).toEqual(["Enter"]);
+});
+
+test("pickValue types an empty list's search box again key by key, never with Enter", async ({ page }) => {
+  // A popup search box in no form: any text the site lacks shows "No results", and an emptied box
+  // changes nothing. Enter there would run the site's own search.
+  await serve(page, `<button type="button" aria-label="Region" aria-haspopup="listbox" aria-controls="region-popup" aria-expanded="false">Choose</button>
+<div id="region-popup" hidden><input aria-label="Find region" autocomplete="off">
+<ul role="listbox" id="regions"><li role="option">North</li><li role="option">South</li></ul></div>
+<script>
+const button = document.querySelector("button"), popup = document.getElementById("region-popup"), search = popup.querySelector("input");
+window.pressed = [];
+button.addEventListener("click", () => { popup.hidden = false; button.setAttribute("aria-expanded", "true"); });
+search.addEventListener("input", () => { if (search.value !== "") document.getElementById("regions").innerHTML = '<li class="no-results">No results</li>'; });
+search.addEventListener("keydown", (event) => { if (event.key === "Enter") window.pressed.push(event.key); });
+</script>`);
+  expect(await call(page, `return await pickValue(page.getByRole("button", { name: "Region" }), "Qxzvw", fast);`)).toEqual({
+    result: { picked: false, reason: "option_missing", wanted: "Qxzvw", available: ["North", "South"], matches: [] },
+  });
+  expect(await page.evaluate(() => (window as unknown as { pressed: string[] }).pressed)).toEqual([]);
+});
+
+test("pickValue refuses as the empty list did when typing it again runs out of time", async ({ page }) => {
+  // Typing draws "No matches" at once; each key also asks the site, which never answers.
+  await serve(
+    page,
+    `<form><label>Branch <input id="branch" role="combobox" aria-controls="branches" autocomplete="off"></label>
+<ul id="branches" role="listbox" hidden></ul></form>
+<script>
+const input = document.getElementById("branch"), list = document.getElementById("branches");
+input.addEventListener("input", () => { list.hidden = false; list.innerHTML = '<li class="no-results">No matches</li>'; });
+input.addEventListener("keydown", () => { fetch("/api/branches?q=" + encodeURIComponent(input.value)); });
+</script>`,
+    () => ({ delayMs: 20_000, body: [] }),
+  );
+  expect(await call(page, `return await pickValue(page.getByLabel("Branch"), "Northside", { ...fast, timeout: 3000 });`)).toEqual({
+    result: { picked: false, reason: "option_missing", wanted: "Northside", available: [], matches: [] },
+  });
+});
+
+test("pickValue still refuses, and never types again, when too little of its time is left", async ({ page }) => {
+  // The site answers every term with nothing, after 2.3 s of the call's 3 s.
+  await serve(
+    page,
+    `<form><label>Branch <input id="branch" role="combobox" aria-controls="branches" autocomplete="off"></label>
+<ul id="branches" role="listbox" hidden></ul></form>
+<script>
+const input = document.getElementById("branch"), list = document.getElementById("branches");
+window.inputs = 0;
+input.addEventListener("input", async () => {
+  window.inputs++;
+  await (await fetch("/api/branches?q=" + encodeURIComponent(input.value))).json();
+  list.hidden = false;
+  list.innerHTML = '<li class="no-results">No matches</li>';
+});
+</script>`,
+    () => ({ delayMs: 2300, body: [] }),
+  );
+  expect(await call(page, `return await pickValue(page.getByLabel("Branch"), "Northside", { ...fast, timeout: 3000 });`)).toEqual({
+    result: { picked: false, reason: "option_missing", wanted: "Northside", available: [], matches: [] },
+  });
+  expect(await page.evaluate(() => (window as unknown as { inputs: number }).inputs)).toBe(1);
+});
+
+test("pickValue's wait for the page to go quiet is bounded on a page that never does", async ({ page }) => {
+  // The page keeps a request of its own in flight, each to a new address, so none is a poll.
+  await serve(
+    page,
+    `${defaultList}<script>let beat = 0; setInterval(() => fetch("/api/beacon?n=" + beat++), 100);</script>`,
+    (params, path) => (path === "/api/beacon" ? { delayMs: 150, body: {} } : defaultListApi(params)),
+  );
+  const started = Date.now();
+  expect(await call(page, `return await pickValue(page.getByLabel("City"), "Chicago", { ...fast, timeout: 10_000 });`)).toMatchObject({
+    result: { picked: true, label: "Chicago" },
+  });
+  // About 1.3 s for each wait the page's requests stretch, and 2 s for the quiet the page never
+  // reaches; waiting on until a third of the call is left would take over 9 s.
+  expect(Date.now() - started).toBeLessThan(9000);
+});
+
 test("pickValue waits for debounced suggestions that show no loading sign", async ({ page }) => {
   await serve(page, `<form><label>Fruit <input id="fruit" autocomplete="off"></label><div class="suggestions"></div></form>
 <script>

@@ -2881,6 +2881,211 @@ it("sends a read below the bar to review when no further batch fits after its la
   expect(outcome.build).toBe("published");
 });
 
+/**
+ * A host that caps its batches at `regular` and keeps one more in reserve past the cap, each case
+ * in it allowed `reservedMs`, until a batch runs on it.
+ */
+const cappedWithReserve = (
+  host: LiveTestHost,
+  batches: readonly LiveTestBatch[],
+  { regular, caseMs = 60_000, reservedMs = 60_000 }: { regular: number; caseMs?: number; reservedMs?: number },
+): LiveTestHost => ({
+  ...host,
+  get caseTimeoutMs() {
+    return batches.length < regular ? caseMs : Number.POSITIVE_INFINITY;
+  },
+  get reservedCaseTimeoutMs() {
+    return batches.length === regular ? reservedMs : undefined;
+  },
+});
+const pageCases = (id: string) =>
+  JSON.stringify({
+    cases: [
+      { id: "repeat-1", purpose: "The example on a fresh browser.", input: { query: "lamp" }, expect: "result" },
+      { id, purpose: "Page two of thirty results.", input: { query: "lamp 30" }, expect: "result", next_page: true },
+    ],
+  });
+const pageTimeout = {
+  status: "failed" as const,
+  errorClass: "TimeoutError",
+  message: "locator.click: Timeout 5000ms exceeded",
+  frame: "src/tool.ts:3",
+};
+const runCases = (ids: readonly string[]) => ({ ...runAll, cases: ids });
+
+/**
+ * A read whose next-page case failed and was rebuilt under a new id with the same input, which
+ * passed on fixed source; then the source changed again, all within a host's cap of two batches.
+ * Then each of `calls` and a publication. Each batch's cases run through `outcomes`.
+ */
+const pastTheCap = async (
+  outcomes: (batch: number) => Readonly<Record<string, LiveTestOutcome>>,
+  calls: readonly ModelResponse[],
+  reserve: { readonly reservedMs?: number; readonly caseMs?: number; readonly attemptMs?: number } = {},
+) => {
+  const { host, batches } = liveTestHost(outcomes);
+  const published = publications();
+  let root = "";
+  const edits: Readonly<Record<number, Readonly<Record<string, string>>>> = {
+    1: { "src/tool.ts": `${toolSource}// pages fixed\n`, "test/cases.json": pageCases("page-30") },
+    2: { "src/tool.ts": `${toolSource}// pages fixed\n// filters fixed\n` },
+  };
+  const steps = [
+    call("live_tests", runAll, "first"),
+    call("live_tests", runAll, "rebuilt"),
+    ...calls,
+    call("execute", example, "example"),
+    call("finish_build", finish, "finish"),
+  ];
+  const f = await fixture(
+    async (_request, index) => {
+      const edit = edits[index];
+      if (edit !== undefined) await writeWorkspace(root, edit);
+      return steps[index] ?? prose();
+    },
+    {
+      liveTests: cappedWithReserve(host, batches, { regular: 2, ...reserve }),
+      deadline: Deadline.after(reserve.attemptMs ?? 30 * 60_000),
+      reviewAndExecute: completedExample,
+      publish: published.publish,
+    },
+    read,
+  );
+  root = (f.workspace as unknown as { root: string }).root;
+  await writeWorkspace(root, { "src/tool.ts": toolSource, "test/cases.json": pageCases("page-and-next") });
+  const outcome = await f.run();
+  const record = published.seen[0]?.liveTests as {
+    readonly outOfTime?: boolean;
+    readonly cases: readonly { readonly id: string }[];
+    readonly retired: readonly Record<string, unknown>[];
+  };
+  const stepOf = new Map(steps.map((step, index) => [(step.output[0] as { callId?: string }).callId, index]));
+  /** What the call `callId` returned, as the model request after it carries it. */
+  const answer = (callId: string) => resultOf(f.requests[(stepOf.get(callId) ?? -1) + 1], callId);
+  return { outcome, batches, record, answer };
+};
+const failsFirst = (batch: number) => (batch === 0 ? { "page-and-next": pageTimeout } : {});
+
+// Past a host's batch cap, the review still needs a case of a retired failure's exact input to pass
+// on the source it publishes, or it holds publication back on that failure. The host's reserved
+// batch runs that case, and only cases a failure is pending on, once.
+it("runs the cases a failure is pending on in the host's reserved batch past its cap", async () => {
+  const { outcome, batches, record, answer } = await pastTheCap(failsFirst, [
+    call("live_tests", runAll, "all"),
+    call("live_tests", runCases(["page-30"]), "reserved"),
+    call("live_tests", runCases(["page-30"]), "again"),
+  ]);
+  // Every case at once is no reserved batch: the refusal names the case a failure is pending on.
+  expect(answer("all")).toMatchObject({ status: "no_time", reservedFor: ["page-30"] });
+  expect(answer("reserved")).toMatchObject({ status: "ran" });
+  // The reserve is spent: the host offers none again.
+  expect(answer("again")).toMatchObject({ status: "no_time" });
+  expect(answer("again")).not.toHaveProperty("reservedFor");
+  expect(batches.map((batch) => batch.cases.map((testCase) => testCase.id))).toEqual([
+    ["repeat-1", "page-and-next"],
+    ["repeat-1", "page-30"],
+    ["page-30"],
+  ]);
+  // The exact input passed on the published source, so the retired failure no longer counts.
+  expect(record.retired).toEqual([
+    expect.objectContaining({ id: "page-and-next", lastVerdict: "fail", excusedBy: "page-30" }),
+  ]);
+  expect(record.retired[0]).not.toHaveProperty("clearedBy");
+  expect(outcome.build).toBe("published");
+});
+
+it("keeps a failure counting when its case still fails in the reserved batch", async () => {
+  const { batches, record, answer } = await pastTheCap(
+    (batch) => (batch === 0 ? { "page-and-next": pageTimeout } : batch === 2 ? { "page-30": pageTimeout } : {}),
+    [call("live_tests", runCases(["page-30"]), "reserved"), call("live_tests", runCases(["page-30"]), "again")],
+  );
+  expect(answer("reserved")).toMatchObject({ status: "ran" });
+  expect(answer("again")).toMatchObject({ status: "no_time" });
+  expect(answer("again")).not.toHaveProperty("reservedFor");
+  expect(batches).toHaveLength(3);
+  // The review reads the case failing on the source it publishes, and the retired failure still
+  // counting.
+  expect(record.cases).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: "page-30", results: { playwright: expect.objectContaining({ status: "fail" }) } }),
+    ]),
+  );
+  expect(record.retired).toEqual([
+    expect.objectContaining({ id: "page-and-next", clearedBy: expect.anything() }),
+  ]);
+  expect(record.retired[0]).not.toHaveProperty("excusedBy");
+});
+
+// A run on the source a case failed on clears nothing: a pass there is flaky, and the failure keeps
+// counting. So the reserve waits for an edit after the failure.
+it("keeps the reserve while a case's failure is on the current source, and runs it after an edit", async () => {
+  const { host, batches } = liveTestHost((batch) => (batch === 0 ? { "page-30": pageTimeout } : {}));
+  const published = publications();
+  let root = "";
+  const steps = [
+    call("live_tests", runAll, "first"),
+    call("live_tests", runCases(["page-30"]), "unchanged"),
+    call("live_tests", runCases(["page-30"]), "edited"),
+    call("execute", example, "example"),
+    call("finish_build", finish, "finish"),
+  ];
+  const f = await fixture(
+    async (_request, index) => {
+      if (index === 2) await writeWorkspace(root, { "src/tool.ts": `${toolSource}// pages fixed\n` });
+      return steps[index] ?? prose();
+    },
+    {
+      liveTests: cappedWithReserve(host, batches, { regular: 1 }),
+      deadline: Deadline.after(30 * 60_000),
+      reviewAndExecute: completedExample,
+      publish: published.publish,
+    },
+    read,
+  );
+  root = (f.workspace as unknown as { root: string }).root;
+  await writeWorkspace(root, { "src/tool.ts": toolSource, "test/cases.json": pageCases("page-30") });
+  await f.run();
+  const unchanged = resultOf(f.requests[2], "unchanged");
+  expect(unchanged).toMatchObject({ status: "no_time" });
+  expect(unchanged).not.toHaveProperty("reservedFor");
+  expect(resultOf(f.requests[3], "edited")).toMatchObject({ status: "ran" });
+  expect(batches.map((batch) => batch.cases.map((testCase) => testCase.id))).toEqual([
+    ["repeat-1", "page-30"],
+    ["page-30"],
+  ]);
+});
+
+// No regular batch fits once the reserve runs, so the record says time ran out even when no batch
+// was refused first, and the review notes the untested gaps in its rationale only.
+it("records that time ran out when the reserved batch runs before any refusal", async () => {
+  const { answer, record } = await pastTheCap(failsFirst, [
+    call("live_tests", runCases(["page-30"]), "reserved"),
+  ]);
+  expect(answer("reserved")).toMatchObject({ status: "ran" });
+  expect(record.outOfTime).toBe(true);
+});
+
+it("refuses a reserved batch that names a case no failure is pending on, or that the attempt has no time for", async () => {
+  const mixed = await pastTheCap(failsFirst, [
+    call("live_tests", runCases(["repeat-1"]), "passing"),
+    call("live_tests", runCases(["page-30", "repeat-1"]), "mixed"),
+  ]);
+  expect(mixed.answer("passing")).toMatchObject({ status: "no_time", reservedFor: ["page-30"] });
+  expect(mixed.answer("mixed")).toMatchObject({ status: "no_time", reservedFor: ["page-30"] });
+  expect(mixed.batches).toHaveLength(2);
+  expect(mixed.record.outOfTime).toBe(true);
+  // The attempt keeps two minutes after a batch: three minutes leave room for a 30 s case, not
+  // for the reserve's two-minute one.
+  const late = await pastTheCap(failsFirst, [call("live_tests", runCases(["page-30"]), "reserved")], {
+    caseMs: 30_000,
+    reservedMs: 120_000,
+    attemptMs: 3 * 60_000,
+  });
+  expect(late.answer("reserved")).toMatchObject({ status: "no_time" });
+  expect(late.answer("reserved")).not.toHaveProperty("reservedFor");
+  expect(late.batches).toHaveLength(2);
+});
+
 // A signed-in read is held to the bar on the cases it ran signed in, the only ones its record
 // holds: its combined case failing beside the one other case it ran is 1 of 2.
 it("holds a signed-in read to the bar on the cases it ran signed in", async () => {

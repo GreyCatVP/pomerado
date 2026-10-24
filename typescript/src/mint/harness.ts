@@ -129,6 +129,7 @@ import {
   LiveTestOutputChecks,
   maximumBatchCases,
   outputExcerpt,
+  pendingFailureCases,
   primaryListOf,
   reviewPassPercent,
   signedInTestInputLimit,
@@ -4150,6 +4151,29 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
           Clock.currentTimeMillis,
           (now) => deadlineAt - now >= (host.caseTimeoutMs ?? defaultLiveTestCaseMs),
         );
+      /**
+       * The cases a batch on the host's reserve may run once no batch fits
+       * (`LiveTestHost.reservedCaseTimeoutMs`): those a failure is pending on, when a batch ending
+       * at `deadlineAt` has time for one case there; none without a reserve.
+       */
+      const reservedBatchCases = (
+        host: LiveTestHost,
+        deadlineAt: number,
+        file: LiveTestCasesFile,
+        entrypoint: string,
+        digest: string,
+      ) =>
+        Effect.map(Clock.currentTimeMillis, (now) => {
+          const reserved = host.reservedCaseTimeoutMs;
+          if (reserved === undefined || deadlineAt - now < reserved) return [];
+          const version = liveTestVersion(entrypoint);
+          return pendingFailureCases(
+            file,
+            recordsFor(entrypoint),
+            liveTestReplaced.filter((record) => liveTestVersion(record.entrypoint) === version),
+            digest,
+          );
+        });
       const runLiveTests = (request: LiveTestsRequest) =>
         Effect.gen(function* () {
           const host = dependencies.liveTests;
@@ -4220,15 +4244,33 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
             });
           const { deadlineAt, attemptBound } = yield* liveTestDeadline;
           // A batch with less time left than one case may take could only end every case
-          // inconclusive, so it runs nothing.
+          // inconclusive, so it runs nothing. A host's reserve past its batch cap still runs the
+          // cases a failure is pending on, so the review sees them on the source it judges.
           if (!(yield* liveTestBatchFits(host, deadlineAt))) {
+            // No regular batch fits from here on, whether or not the reserve runs this one.
             liveTestsOutOfTime = true;
-            return JSON.stringify({
-              kind: "host_live_tests",
-              status: "no_time",
-              instruction:
-                "Too little of this attempt is left to run a batch. Run the example last and publish, and say in coverage which cases did not run; the host's record says time ran out. Nothing was executed.",
-            });
+            const reserved = yield* reservedBatchCases(
+              host,
+              deadlineAt,
+              file,
+              request.entrypoint,
+              digest,
+            );
+            if (!selected.every((testCase) => reserved.includes(testCase.id))) {
+              // With time left past the batch's ten minutes, the host's own batch cap stopped it.
+              const stopped = attemptBound
+                ? "Too little of this attempt is left to run a batch"
+                : "This attempt has run every live test batch its host allows";
+              return JSON.stringify({
+                kind: "host_live_tests",
+                status: "no_time",
+                ...(reserved.length === 0 ? {} : { reservedFor: reserved }),
+                instruction:
+                  reserved.length === 0
+                    ? `${stopped}. Run the example last and publish, and say in coverage which cases did not run; the host's record says time ran out. Nothing was executed.`
+                    : `${stopped}, except one reserved batch for only the cases a failure is still pending on: ${reserved.join(", ")}. Prefer to make your last edit, then run those cases together in that one batch, and no other case, named in cases, so publication review reads their results on the source you publish. Then run the example last and publish, and say in coverage which cases did not run; the host's record says time ran out. Nothing was executed.`,
+              });
+            }
           }
           // A signed-in read's cases run on the build's own signed-in browser, one at a time.
           const workers = signedInBatch

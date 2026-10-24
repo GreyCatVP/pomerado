@@ -851,6 +851,17 @@ export interface LiveTestHost {
    */
   readonly caseTimeoutMs?: number;
   /**
+   * How long one case may run in the one batch a host that caps its batches keeps in reserve past
+   * its cap, in milliseconds, while that batch has not run; absent otherwise. Once no batch fits
+   * under `caseTimeoutMs`, the harness still runs a batch whose every case is one a failure is
+   * pending on (`pendingFailureCases`), when this much is left before the batch's deadline, and its
+   * `no_time` refusal of any other batch names those cases (`reservedFor`). The host counts such a
+   * batch as its reserve. Whether tests can run again before publication still follows
+   * `caseTimeoutMs` alone. Absent, a capped host refuses every batch past its cap, as before this
+   * field existed.
+   */
+  readonly reservedCaseTimeoutMs?: number | undefined;
+  /**
    * Receives a reader of this attempt's latest live test batches as the harness judged them, for
    * the host's Guardian execution reviews (`mintContext.liveTests`), so a review can confirm from
    * host facts that a suite passed on the source it judges. Each read checks whether every

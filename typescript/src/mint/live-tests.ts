@@ -745,6 +745,36 @@ export const caseStatus = (
   return record.verdict;
 };
 
+/**
+ * The cases in `file` a failure is pending on, for a host's reserved batch
+ * (`LiveTestHost.reservedCaseTimeoutMs`): each case whose input, expectation and next page are a
+ * failing result's of this version, its own latest or a retired one, as `excusedBy` matches a
+ * retired failure, and that has not passed since on `sourceDigest`, the version's current source.
+ * A case with such a failure on `sourceDigest` itself is left out until the source changes: a pass
+ * on the source it failed on is flaky, and excuses nothing.
+ */
+export const pendingFailureCases = (
+  file: LiveTestCasesFile,
+  records: ReadonlyMap<string, LiveTestRecord>,
+  replaced: readonly LiveTestRecord[],
+  sourceDigest: string,
+): readonly string[] => {
+  const failing = [...records.values(), ...replaced].filter((record) => record.verdict === "fail");
+  const failedHere = new Set(
+    failing.filter((record) => record.sourceDigest === sourceDigest).map((record) => record.caseDigest),
+  );
+  const failed = new Set(
+    failing.map((record) => record.caseDigest).filter((digest) => !failedHere.has(digest)),
+  );
+  return file.cases
+    .filter(
+      (testCase) =>
+        failed.has(caseDigest(testCase)) &&
+        caseStatus(testCase, records.get(testCase.id), sourceDigest) !== "pass",
+    )
+    .map((testCase) => testCase.id);
+};
+
 /** One case as the agent and the publication review read it. */
 export const caseView = (
   testCase: LiveTestCase,

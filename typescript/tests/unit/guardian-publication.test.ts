@@ -26,6 +26,8 @@ import {
   type Reviewer,
 } from "../../src/guardian/review.js";
 import {
+  publicationFindingCategories,
+  publicationReasons,
   unfixableFindingCategories,
   unfixablePublicationReasons,
 } from "../../src/guardian/review-contracts.js";
@@ -956,9 +958,21 @@ describe("the publication policy", () => {
   // a live step nor the publication review asks a tool to require an exact match.
   it("gives the execution and publication reviews the same fuzzy proper-noun rule", () => {
     const rule =
-      "A tool matches the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name. Never ask a tool to require an exact match. When more than one option matches equally, a read takes the first in the site's order and returns the one it used, and a write lists them for the caller instead of picking one.";
+      "A tool matches the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name. Never ask a tool to require an exact match. When more than one option matches a caller's value equally, the tool either takes the first in the site's order and returns the one it used, as the site labels it, or lists them for the caller to choose one, in a question or a refusal whose options each select exactly one of them. Which of the two is the tool's own choice, never a finding or a reason to deny. A tool that takes the first and does not return the one it used is a schema_mismatch finding with reason source_correction.";
     expect(guardianPublicationPolicy.split(rule)).toHaveLength(2);
     expect(guardianExecutionPolicy(nativeExecutionEnvironment)).toContain(`\n${rule}\n`);
+  });
+
+  // Of several equal matches, taking the first or letting the caller choose is the tool's own
+  // choice. Only taking the first without returning the match it used is a finding, and one the
+  // publication review can return.
+  it("finds a tool that takes the first of equal matches without returning it, never the choice", () => {
+    const choice = "Which of the two is the tool's own choice, never a finding or a reason to deny.";
+    const missing =
+      "A tool that takes the first and does not return the one it used is a schema_mismatch finding with reason source_correction.";
+    expect(guardianPublicationPolicy.split(`${choice} ${missing}`)).toHaveLength(2);
+    expect(publicationFindingCategories).toContain("schema_mismatch");
+    expect(publicationReasons).toContain("source_correction");
   });
 
   // A repair is judged on what it changed: an unchanged line is denied only when a failing run or

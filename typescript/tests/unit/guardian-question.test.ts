@@ -501,6 +501,63 @@ it("reviews every string the caller will see, screened, but no host-held login d
   expect(sent).not.toMatch(/PRIVATE_/u);
 });
 
+// The review saw a multiple choice without its selection bounds, so it kept rewording the
+// workspace guide's capability question, which allows zero picks through `minSelections` 0, and
+// asked for the field the question already had.
+it("gives the question review a multiple choice's selection bounds", async () => {
+  const request: Pick<InputRequest, "notice" | "questions"> = {
+    questions: [
+      {
+        id: "extras",
+        type: "multi_choice",
+        prompt: "Which optional features should the tool support, if any?",
+        options: [
+          { id: "sort", label: "Sort order" },
+          { id: "price", label: "Price range" },
+          { id: "brand", label: "Brand" },
+        ],
+        minSelections: 0,
+        maxSelections: 3,
+      },
+      {
+        id: "plan",
+        type: "choice",
+        prompt: "Which plan?",
+        options: [
+          { id: "team", label: "Team" },
+          { id: "business", label: "Business" },
+        ],
+      },
+    ],
+  };
+  const candidate = await Effect.runPromise(
+    questionForReview(request, { credentialsAvailable: false }, (text) => Effect.succeed(text)),
+  );
+  expect(candidate.questions[0]).toMatchObject({ minSelections: 0, maxSelections: 3 });
+  // A single choice has no bounds to show.
+  expect(candidate.questions[1]).not.toHaveProperty("minSelections");
+  expect(candidate.questions[1]).not.toHaveProperty("maxSelections");
+  const requests = scripted([[message({ outcome: "allow_business", rationale: "Allowed." })]]);
+  await Effect.runPromise(
+    makeGuardian(makeOpenAIReviewer("{{ tenant_policy_config }}", false, native)).reviewQuestion(
+      pending,
+      candidate,
+      unreadable,
+    ),
+  );
+  const input = JSON.parse(userText(requests[0])) as {
+    question_review: { request: { questions: readonly Record<string, unknown>[] } };
+  };
+  expect(input.question_review.request.questions[0]).toMatchObject({
+    type: "multi_choice",
+    minSelections: 0,
+    maxSelections: 3,
+  });
+  expect(reviewPolicyOf(requests[0])).toContain(
+    "a multiple choice's minSelections and maxSelections, the fewest and most options the user may pick",
+  );
+});
+
 // Later reviews hear each plain answer with its question, as the minter does, and
 // never a protected one, which only the broker or the credential store holds.
 it("gives a review every plain answer, screened and masked, and no secret or login", async () => {

@@ -124,8 +124,11 @@ first:
   your live test cases and gives the review that record (`publication/tests.json`): each case's
   purpose, input, expectation and result on the source you publish, and what you listed under
   `notTested` with why. Guardian judges the tool's claims no passing case tests, and failing and
-  stale cases, and checks every `notTested` reason against the captures and the request. A
-  signed-in read reports its example and its signed-in cases, and gets the same host record of the
+  stale cases, and checks every `notTested` reason against the captures and the request. When a
+  claimed part of the output only appears for some inputs and no case you can run shows it,
+  prefer listing it in `notTested` with the reason and leaving it out of the description. Prefer
+  that over asking the owner for evidence they may not have. A signed-in read reports its example
+  and its signed-in cases, and gets the same host record of the
   cases it ran signed in; the review judges a failing case but never a gap. A write reports its
   one run, the act session, and lists what that run did not exercise as untested without testing
   it; the review judges that run alone.
@@ -146,9 +149,9 @@ first:
   - A write's `<input>_note` reporting a value the site rewrote as it was typed, on leaving the
     field, or through its one suggestion is not unapplied input; the tool read the site's version
     back and returns it.
-  - a free-text place, name or venue that matches several of the site's options equally takes
-    the first in the site's order on a read and returns the one it used, and lists them for the
-    caller instead of picking one on a write (core skill, the input schema);
+  - a free-text place, name or venue that matches several of the site's options equally either
+    takes the first in the site's order and returns the one it used, as the site labels it, or
+    lists them for the caller to choose one, as the tool decides (core skill, the input schema);
   - a check that refuses a past date compares with today in the site's time zone, or the
     place's, not with today in UTC (caller-input skill) ("Past date in UTC");
   - in a read signed out, each declared input is used, or changed from its default, by a passing

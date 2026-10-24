@@ -534,7 +534,10 @@ const pickerPageCode = String.raw`(element, args) => {
  * "Loading" or "Searching" row), no request the picker's actions started is in flight, and they
  * have held still for `settleMs`; with no reaction at all, the field is typed again key by key
  * (a popup's search box first gets its Search button, or Enter when it is in no form).
- * A list for a stale query that lacks the value is typed once more. A list that renders or loads
+ * A list for a stale query that lacks the value is typed once more. A list that ends empty, or
+ * with no row `option` keeps, as on a page still starting up that dropped the typing, is typed
+ * once more key by key, once a call, after the page's own requests go quiet (2 s at most), when
+ * more than a third of the budget is left; never with `create` or `type`. A list that renders or loads
  * as it scrolls is read to its end before matching, so a tie further down is never missed; one too
  * long for two thirds of the budget is narrowed with its search box, or fails as `options_loading`.
  * Requests count only when the action caused them: a repeat of an earlier identical request, such
@@ -567,9 +570,11 @@ const pickerPageCode = String.raw`(element, args) => {
  * `{ picked: false, reason, wanted, available, matches }`, where `reason` is `option_missing`,
  * `option_ambiguous` (`matches` lists the options that tie) or `option_disabled`, and
  * `available` every enabled option it listed. Decode with `PickOutcome` and throw
- * `pickRefusal(outcome, field)` (`InvalidInput` with `field` and `available`), or, on a write, ask
- * the caller to choose among `matches`. On a read, pass `tie: "first"`, so the picker takes the
- * first of the tied options in the site's order and returns the one it used. Success is
+ * `pickRefusal(outcome, field)` (`InvalidInput` with `field` and `available`, which for options
+ * that tie is `matches`), or ask the caller to choose among `matches`. In a tool that takes the
+ * first of options that tie instead (each tool decides), pass `tie: "first"`, so the picker takes
+ * the first of them in the site's order and returns the one it used, which the tool returns in
+ * its output. Success is
  * `{ picked: true, kind, label, value, rank, refills }`, plus `tied`, the options that tied, when
  * `tie: "first"` took one.
  * Everything else throws an Error named `PickerFailure` whose message is a fixed reason, never a
@@ -593,6 +598,7 @@ const pickerLimits = Object.freeze(${JSON.stringify({
   action: timeoutDefaults.action,
   settle: timeoutDefaults.settle,
   inflight: timeoutDefaults.answer,
+  quiet: 2_000,
 })});
 // A Playwright action that ran out of the call's budget fails as the fixed reason "timeout".
 const pickerTimedOut = (error, s) =>
@@ -634,9 +640,14 @@ const pickerNetwork = (page, causedMs, siteDomain) => {
     }
   };
   const byRequest = new Map();
+  const own = (request) => ["xhr", "fetch", "document"].includes(request.resourceType()) && firstParty(request.url());
+  const keyOf = (request) => request.method() + " " + request.url() + " " + String(request.postData() ?? "").slice(0, 2048);
+  // When a request of the page's own, polls aside, last started or ended, counting the end of one
+  // that started before this listener, which entries never hold.
+  let lastSeen = 0;
   const onRequest = (request) => {
-    if (!["xhr", "fetch", "document"].includes(request.resourceType()) || !firstParty(request.url())) return;
-    const key = request.method() + " " + request.url() + " " + String(request.postData() ?? "").slice(0, 2048);
+    if (!own(request)) return;
+    const key = keyOf(request);
     const at = Date.now();
     const ours = marks.some((mark) => at >= mark && at <= mark + causedMs);
     const times = ours ? (starts.get(key) ?? []) : [...(starts.get(key) ?? []), at].slice(-4);
@@ -648,11 +659,13 @@ const pickerNetwork = (page, causedMs, siteDomain) => {
     const entry = { at, endAt: null, key, type: request.resourceType() };
     entries.push(entry);
     byRequest.set(request, entry);
+    if (!polls.has(key)) lastSeen = at;
   };
   const onDone = (request) => {
     const entry = byRequest.get(request);
     if (entry) entry.endAt = Date.now();
     byRequest.delete(request);
+    if (entry ? !polls.has(entry.key) : own(request) && !polls.has(keyOf(request))) lastSeen = Date.now();
   };
   page.on("request", onRequest);
   page.on("requestfinished", onDone);
@@ -665,6 +678,15 @@ const pickerNetwork = (page, causedMs, siteDomain) => {
     pending,
     // When the action's last caused request started or ended, or 0.
     lastAt: (since) => Math.max(0, ...caused(since).map((entry) => entry.endAt ?? entry.at)),
+    // Whether the page's own requests, whatever started them, polls aside, went quiet for quietMs
+    // since a time: none seen starting still in flight (for less than the inflight budget), and
+    // none seen starting or ending in that time. A request in flight before this listener shows
+    // only by its end, so the quiet counts from that time, never from before.
+    quiet: (since, quietMs) => {
+      const now = Date.now();
+      if (now - Math.max(since, lastSeen) < quietMs) return false;
+      return !entries.some((entry) => !polls.has(entry.key) && entry.endAt === null && now - entry.at < pickerLimits.inflight);
+    },
     stop: () => {
       page.off("request", onRequest);
       page.off("requestfinished", onDone);
@@ -928,24 +950,42 @@ const pickerType = async (s, field, query, step, scan) => {
   await field.fill("", s.act());
   return field.pressSequentially(query, { ...s.act(), delay: 10 });
 };
+// Waits, up to maxMs, for the page's own requests to go quiet for settleMs from now (see quiet).
+const pickerPageQuiet = async (s, maxMs) => {
+  const since = Date.now();
+  const until = Math.min(s.until, since + maxMs);
+  while (Date.now() < until && !s.net.quiet(since, s.settleMs)) await pickerSleep(40);
+};
 // Types each query in turn into the field and reads what the list answers. A field that shows
 // no reaction is typed the next way; a list that reacted but lacks the value may hold the answer
-// to an older query that landed last, so the value is typed once more.
+// to an older query that landed last, so the value is typed once more. A list left empty, or with
+// no row the author's option selector keeps, after the last query may come from a page still
+// starting up, which dropped the typing: once a call, with more than a third of its time left,
+// the field is typed once more key by key once the page's own requests go quiet (up to the quiet
+// limit), never with the Enter or Search button of step 1. Never for a free-entry field or the
+// author's own typing. Typing again that fails, such as out of time, refuses as the empty list did.
 const pickerQuery = async (s, field, wanted, seenAvailable = []) => {
   const queries = s.options.query ? [String(s.options.query)] : wanted;
   let lastFound = null;
   const available = [...seenAvailable];
-  for (const query of queries) {
+  for (const [index, query] of queries.entries()) {
     let retyped = false;
+    let again = false;
     for (let step = 0; step < 3; step++) {
-      const snapshot = await pickerEval(s, "snapshot", { near: s.kind === "dropdown" });
-      const before = snapshot.signature;
-      const since = pickerMark(s);
-      await pickerType(s, field, query, step, snapshot);
-      const { scan, reacted } = await pickerSettle(s, since, before, query);
-      const found = await pickerCollect(s, scan, wanted);
+      let scan, reacted, found;
+      try {
+        const snapshot = await pickerEval(s, "snapshot", { near: s.kind === "dropdown" });
+        const before = snapshot.signature;
+        const since = pickerMark(s);
+        await pickerType(s, field, query, step, snapshot);
+        ({ scan, reacted } = await pickerSettle(s, since, before, query));
+        found = await pickerCollect(s, scan, wanted);
+        if (!found.complete) throw pickerLoadingFailure(s, found.scan, s.markedAt, undefined, found.list.length);
+      } catch (error) {
+        if (again) break;
+        throw error;
+      }
       lastFound = found;
-      if (!found.complete) throw pickerLoadingFailure(s, found.scan, s.markedAt, undefined, found.list.length);
       if (found.ranking.status !== "missing") return { found, field };
       available.push(...pickerAvailable(found.list));
       // A tag input that may create values and shows nothing for the text is a free-entry field.
@@ -954,6 +994,16 @@ const pickerQuery = async (s, field, wanted, seenAvailable = []) => {
       if (!retyped && scan.options.length > 0 && !s.options.type) {
         retyped = true;
         step = -1;
+        continue;
+      }
+      const empty = scan.options.length === 0 && found.list.length === 0;
+      const spare = s.left() - (s.until - s.started) / 3;
+      if (!retyped && empty && !s.options.type && !s.options.create && index === queries.length - 1 && !s.typedAgain && spare > 0) {
+        retyped = true;
+        again = true;
+        s.typedAgain = true;
+        await pickerPageQuiet(s, Math.min(pickerLimits.quiet, spare));
+        step = 1;
         continue;
       }
       break;

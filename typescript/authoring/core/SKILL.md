@@ -206,10 +206,10 @@ exception: it is optional unless the task can't run without it (below).
   `InvalidInput` with `field` and `available`, the entries the site showed, except on a write
   whose site offered exactly one suggestion for a free-text value the caller typed, never a
   picker that selects a record: take it as the writes skill says for a value the site
-  rewrites. With one, use it. With several, a read takes the first in the site's own order and
-  returns the one it used, as the site labels it. A write asks the caller which one with a
-  declared choice question whose options are those matches as the site labels them
-  (.agents/caller-input/SKILL.md).
+  rewrites. With one, use it. With several, decide per tool: take the first in the site's own
+  order and return the one it used, as the site labels it, or list those matches as the site
+  labels them for the caller to choose one, each selecting exactly one, with a declared choice
+  question (.agents/caller-input/SKILL.md) or `pickRefusal`, which lists them as `available`.
 - Match the caller's proper nouns, such as places, venues and company names, with a fuzzy
   match that accepts the usual forms of the same name, such as a name with or without its
   accents (Abaca for Abacá), a city alone or with its state and country, or a company with
@@ -219,8 +219,9 @@ exception: it is optional unless the task can't run without it (below).
   with a word added or dropped. Prefer it for confirming the pick, so the read-back agrees with
   the choice, but not for choosing from a list, where a short label can match a longer name it
   isn't, such as UK for Ukraine.
-  When more than one option matches equally, a read takes the first in the site's order and
-  returns the one it used, and a write lists them for the caller instead of picking one.
+  When more than one option matches equally, decide per tool: take the first in the site's
+  order and return the one it used, as the site labels it, or list them for the caller to
+  choose one, each selecting exactly one.
 - On a write, every choice the session met is an input, costly choices included, and any
   other option, such as a seat, is an optional input, as the writes skill says ("Compose and
   publish").

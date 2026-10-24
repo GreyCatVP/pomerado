@@ -217,7 +217,7 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   ["core", "- The code works for every value the schema accepts."],
   [
     "core",
-    "- Match the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name, such as a name with or without its accents (Abaca for Abacá), a city alone or with its state and country, or a company with or without Ltd. or Inc. Never require an exact match. `sameText` from `pomerado/runtime` matches a name that differs only in case, accents, spacing, apostrophes, periods, commas or hyphens, or in a word the site writes short, such as St-Jean for Saint-Jean, but not one with a word added or dropped. Prefer it for confirming the pick, so the read-back agrees with the choice, but not for choosing from a list, where a short label can match a longer name it isn't, such as UK for Ukraine. When more than one option matches equally, a read takes the first in the site's order and returns the one it used, and a write lists them for the caller instead of picking one.",
+    "- Match the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name, such as a name with or without its accents (Abaca for Abacá), a city alone or with its state and country, or a company with or without Ltd. or Inc. Never require an exact match. `sameText` from `pomerado/runtime` matches a name that differs only in case, accents, spacing, apostrophes, periods, commas or hyphens, or in a word the site writes short, such as St-Jean for Saint-Jean, but not one with a word added or dropped. Prefer it for confirming the pick, so the read-back agrees with the choice, but not for choosing from a list, where a short label can match a longer name it isn't, such as UK for Ukraine. When more than one option matches equally, decide per tool: take the first in the site's order and return the one it used, as the site labels it, or list them for the caller to choose one, each selecting exactly one.",
   ],
   ["core", "Take the site origin from the context's `siteOrigin`."],
   ["core", "The tools and the files you may edit are in `AGENTS.md`."],
@@ -320,6 +320,14 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
     "Without a no-results answer, move on: it needs no `notTested` entry and no question;",
   ],
   ["publication", "and untested (such as a later page or another layout, live)."],
+  // A part of the output that only some inputs show, such as a date a record has only in one
+  // state, may have no case that shows it, and the owner may have no input that does either. A
+  // build that asked the owner for one and got none ended with no tool, so the publication skill
+  // prefers listing that part as not tested and leaving it out of the description.
+  [
+    "publication",
+    "When a claimed part of the output only appears for some inputs and no case you can run shows it, prefer listing it in `notTested` with the reason and leaving it out of the description. Prefer that over asking the owner for evidence they may not have.",
+  ],
   [
     "publication",
     "| `reason` | `input_feedback_unresolved` | The feedback rounds are spent | End the attempt; do not execute again |",
@@ -1222,16 +1230,16 @@ it("renders the pinned standalone authoring", async () => {
       .filter(([path]) => path !== "reference/publication-review.md")
       .map(([path, text]) => [sha256(text), `workspace/${path}`]),
   ]).toStrictEqual([
-    ["88e9ccde6a40b8f8a6379c7538e4b0b93d4b5b3aaf3a48b0b7c660342d214891", "core"],
+    ["238364be514356ff971c334be435977a857e9591faea97b0857e69f4baba2e56", "core"],
     ["a896a59d7b924a2940a90437b8d4488cd515c4f4afc70da9fe14953b1583dd93", "search"],
     ["c159f24ef544d14892cb66027ff52ebaed2a08f1345a6e46c5b5466e515d15f1", "auth"],
     ["ea6e7780a9a9028d806436de84488f20687fd292bb0d39ea01652b521c705772", "testing"],
     ["3cc71d02f70447f1de02e062695095682a0cabab4ed668abe1309d017bc0cf83", "pagination"],
-    ["a34d8f0e21e946e62f88819faf422eabcc7a6f75e766d0186ce5f19f367ac055", "forms"],
-    ["11efdc07ee3753ee140610c140a1daeb903ce69a63d7ad82c96bbde52367f771", "writes"],
+    ["07ec54a59f1e20d467d8cad7c06064cabfa15f6c6e063c907a6e73a0de4fcb96", "forms"],
+    ["7308f56f0ac66a427deac277366104e8e6e023aa83debdbd616d22b11ea3f95f", "writes"],
     ["01eb1c98d8945987929ca3d8c68d4d848e64415d2042fc844166a490ca9457cb", "cart"],
-    ["5a641c24c1fa61aad32872fcd49ee8bd9e5a529f28361f75d5ba326be01076aa", "caller-input"],
-    ["6a6c8e632adfa6d7a95640498fc006fe904b5b569010c836c21b37f38fbf290a", "publication"],
+    ["582b80d4f682d4c6af6d101515a3a12febb016e2e4c5d7f0fbf3f51b3aab4dbd", "caller-input"],
+    ["c6bcadcf0be7d9dc94fe00a7bf884efb261b0d8e5748340639e90615207f4656", "publication"],
     ["e80841525cfc668f952e39b896056afc66283feb2564dbcb910ea7db38c72122", "workspace/AGENTS.md"],
     ["9501ae9c273d5d4db8976a544879f7aee44212c8a616b00e74263dcd3c593035", "workspace/README.md"],
   ]);
