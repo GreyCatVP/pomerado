@@ -4,7 +4,7 @@ import type { SessionLoss } from "./authentication.js";
 import { ChallengeFailure } from "./challenge.js";
 import { CommitAlreadySent, WriteConfirmationRefused } from "./errors.js";
 import type { Dispatch } from "./errors.js";
-import type { BrowserActionTimeout } from "./browser-action-timeout.js";
+import { BrowserActionTimeout } from "./browser-action-timeout.js";
 import { DialogFailure } from "./dialogs.js";
 import { ScriptInputFailure } from "./script-input.js";
 
@@ -260,6 +260,7 @@ const passThrough = (error: unknown): error is ScriptFailure =>
   error instanceof InputRejected ||
   error instanceof InputUnapplied ||
   error instanceof CredentialsRejected ||
+  error instanceof BrowserActionTimeout ||
   error instanceof ChallengeFailure ||
   error instanceof DialogFailure ||
   error instanceof ScriptInputFailure ||
