@@ -283,7 +283,15 @@ export const makeLocalSessionSignIn = (options: {
     };
     return options.browser
       .confirm(here, sign.recipe.steps, sign.recipe.steps)
-      .pipe(Effect.map((check) => sessionOnPage(check, sign.recipe)));
+      .pipe(
+        Effect.map((check) =>
+          sessionOnPage(check, {
+            ...sign.recipe,
+            siteOrigin: options.siteOrigin,
+            workspaceOrigin: options.workspace?.origin,
+          }),
+        ),
+      );
   });
   /**
    * Whether the site is still signed in on a page that reads signed out without the marker: the
