@@ -194,6 +194,7 @@ const admitsRefused = (branch: unknown): boolean => {
   if (!isJsonRecord(branch)) return branch !== false;
   const type = branch["type"];
   if (typeof type === "string" && type !== "object") return false;
+  if (Array.isArray(type) && !type.includes("object")) return false;
   const properties = branch["properties"];
   const status = isJsonRecord(properties) ? properties["status"] : undefined;
   if (status === undefined)

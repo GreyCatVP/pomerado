@@ -582,6 +582,12 @@ describe("a refusal a write declares in its output", () => {
         ],
       },
     },
+    {
+      case: "another branch whose type includes object",
+      schema: {
+        anyOf: [{ type: ["object", "null"] }, schemaOf(overLimit)],
+      },
+    },
     { case: "a reference that does not resolve", schema: { $ref: "#/$defs/Missing" } },
     { case: "no schema", schema: undefined },
   ])("declares none with $case", ({ schema }) => {
@@ -631,6 +637,11 @@ describe("a refusal a write declares in its output", () => {
     {
       case: "another branch whose status pattern cannot match refused",
       schema: schemaOf(Schema.Union(rated(patterned(/^(?!refused$).+$/)), notEligible)),
+      reasons: ["not_eligible"],
+    },
+    {
+      case: "another branch whose type lists primitive types",
+      schema: { anyOf: [{ type: ["string", "null"] }, schemaOf(notEligible)] },
       reasons: ["not_eligible"],
     },
     {
@@ -701,6 +712,16 @@ describe("a refusal a write declares in its output", () => {
       case: "a refusal beside a status pattern that cannot match refused",
       schema: schemaOf(Schema.Union(rated(patterned(/^(?!refused$).+$/)), notEligible)),
       unreadable: false,
+    },
+    {
+      case: "a refusal beside a branch whose type lists primitive types",
+      schema: { anyOf: [{ type: ["string", "null"] }, schemaOf(notEligible)] },
+      unreadable: false,
+    },
+    {
+      case: "a refusal beside a branch whose type includes object",
+      schema: { anyOf: [{ type: ["object", "null"] }, schemaOf(notEligible)] },
+      unreadable: true,
     },
     // A schema that never lists a refused status means no refusal, whatever else it admits.
     { case: "no refused status", schema: schemaOf(rated(Schema.String)), unreadable: false },
