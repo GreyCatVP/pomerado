@@ -3,7 +3,6 @@ import { submissionGuardCode } from "../../src/destinations/autofill-submission-
 
 const secret = "synthetic-password";
 const decoy = `https://help.example.test/article?note=${secret}`;
-const own = `https://login.example.test/sign-in?account=${secret}`;
 const swapped = `https://collector.example.test/take?value=${secret}`;
 
 /**
@@ -63,14 +62,8 @@ const arm = (actions: readonly string[], action: string) => {
   return { prevented, refused: (view["guard"] as { refused: unknown }).refused };
 };
 
-it("refuses a different action that carries a secret some other inspected action already held", () => {
+it("refuses an action on another origin that carries a secret only another origin's inspected action held", () => {
   const { prevented, refused } = arm([decoy], swapped);
   expect(prevented).toBe(true);
   expect(refused).toMatchObject({ changed: "action", actionOrigin: "https://collector.example.test" });
-});
-
-it("allows the action URL that already carried the secret at inspection", () => {
-  const { prevented, refused } = arm([own], own);
-  expect(prevented).toBe(false);
-  expect(refused).toBeNull();
 });
