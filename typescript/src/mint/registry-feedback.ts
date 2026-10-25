@@ -87,11 +87,16 @@ const feedback: Readonly<
 
 /**
  * What the minter is told when a host refuses a publication that changes inputs the published
- * tool already declares (`input_contract_changed`), beside `brokenInputs`. Running the example
- * again is part of the fix: the edited code needs its own execution.
+ * tool already declares (`input_contract_changed`), beside `brokenInputs`. A read runs its example
+ * again, since the edited code needs its own execution; a write publishes its session's execution
+ * again and never runs the write again.
  */
-export const inputContractChangedInstruction =
-  "This publication changes inputs the published tool already declares, and a requested change may only add new optional inputs. brokenInputs names each one and how it changed. Restore each named input as the published tool declares it, keep every new input optional, run the example again with the edited code, and call finish_build with that execution.";
+export const inputContractChangedInstruction = (write: boolean) =>
+  `Not published and not reviewed: this publication would refuse values that inputs the published tool already declares accept today, so calls that work now would stop working. brokenInputs names each one and how it changed. A requested change may add optional inputs, widen what an input accepts or add a default, and may narrow an input only to a limit the site itself states, such as its own maxlength or allowed range; it never removes an input or makes one required. Restore each named input so it accepts at least what the published tool's does, up to such a limit, keep every new input optional, ${
+    write
+      ? "and call finish_build again with the same executionId; never run the write again for this."
+      : "run the example again with the edited code, and call finish_build with that execution."
+  }`;
 
 /**
  * A refusal with no named check is treated as one the minter cannot fix. `problem` is the

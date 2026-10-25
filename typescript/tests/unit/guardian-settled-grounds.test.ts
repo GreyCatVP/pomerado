@@ -2,7 +2,8 @@
 // stands, so a read example the host lets run again is refused for lacking retry permission,
 // and a read-only look-up of a confirmed write's own result is refused as a repeat of that write;
 // the host's pushback lets a second write or an unrelated read through; and a refusal that
-// keeps resting on a settled fact ends the build as a policy block.
+// keeps resting on a settled fact ends the build as a policy block. An act step whose own authority
+// grants the write is refused for lacking write authority, as an earlier read-only step lacked it.
 import { OpenAIProvider, setDefaultModelProvider, Usage } from "@openai/agents";
 import type { ModelRequest, ModelResponse } from "@openai/agents";
 import { Effect } from "effect";
@@ -88,6 +89,38 @@ const afterConfirmedWrite: PendingExecution = {
       },
     ],
   },
+};
+
+/**
+ * A write build's act step, whose own allowed effects grant the write, as Guardian reviews it in
+ * the same conversation right after a read-only explore step.
+ */
+const actWithAuthority: PendingExecution = {
+  invocationId: "grounds_job",
+  attemptId: "grounds_attempt",
+  entrypoint: "operation/step.mjs",
+  screenedIntent: "Send the synthetic quote form once with the caller's values",
+  screenedInput: '{"email":"quote@example.test"}',
+  screenedObservations: "Synthetic fixture",
+  accountScope: "account_grounds",
+  allowedOrigins: ["https://quotes.example.test"],
+  allowedEffects: ["Send the quote form once with the caller's values"],
+  writeAuthority: true,
+  mintContext: { ...context, currentExecution: { purpose: "act", target: "liveBrowser" } },
+};
+
+/** A read-only explore step of the same build, with no write authority. */
+const exploreWithoutAuthority: PendingExecution = {
+  invocationId: "grounds_job",
+  attemptId: "grounds_attempt",
+  entrypoint: "operation/step.mjs",
+  screenedIntent: "Send the synthetic quote form once with the caller's values",
+  screenedInput: '{"email":"quote@example.test"}',
+  screenedObservations: "Synthetic fixture",
+  accountScope: "account_grounds",
+  allowedOrigins: ["https://quotes.example.test"],
+  allowedEffects: ["Read the quote form's pages; no writes"],
+  mintContext: { ...context, currentExecution: { purpose: "explore", target: "liveBrowser" } },
 };
 
 const reader = makeSourceInspector(
@@ -338,4 +371,66 @@ it("sends back an escalation on a settled ground too", async () => {
     action: "read",
   });
   expect(requests).toHaveLength(2);
+});
+
+it("allows an act step whose own authority grants the write, once told a missing-write-authority refusal is settled", async () => {
+  const requests = scripted([
+    decision({
+      outcome: "deny",
+      rationale: "The allowed effects prohibit all writes, so sending the form is out of authority.",
+      action: "write",
+      refusal: "final",
+      refusalGround: "write_authority",
+    }),
+    decision({ outcome: "allow", rationale: "Sends the quote form once.", action: "write" }),
+  ]);
+  const reviewed = await Effect.runPromise(guardian().review(actWithAuthority, reader));
+  expect(reviewed.decision).toEqual({
+    outcome: "allow",
+    rationale: "Sends the quote form once.",
+    action: "write",
+  });
+  expect(requests).toHaveLength(2);
+});
+
+it("keeps a missing-write-authority refusal correctable, never final, on a step with write authority", async () => {
+  const refusal = decision({
+    outcome: "deny",
+    rationale: "The allowed effects prohibit all writes, so sending the form is out of authority.",
+    action: "write",
+    refusal: "final",
+    refusalGround: "write_authority",
+  });
+  const requests = scripted([refusal, refusal]);
+  const reviewed = await Effect.runPromise(guardian().review(actWithAuthority, reader));
+  expect(reviewed.decision).toEqual({
+    outcome: "deny",
+    rationale: "The allowed effects prohibit all writes, so sending the form is out of authority.",
+    action: "write",
+    refusal: "correctable",
+  });
+  expect(requests).toHaveLength(2);
+});
+
+it("keeps a missing-write-authority refusal final on a step without write authority", async () => {
+  const requests = scripted([
+    decision({
+      outcome: "deny",
+      rationale: "This explore sends the quote form, and the step may only read.",
+      action: "write",
+      refusal: "final",
+      refusalGround: "write_authority",
+    }),
+  ]);
+  for (const step of [exploreWithoutAuthority, { ...exploreWithoutAuthority, writeAuthority: false }]) {
+    requests.length = 0;
+    const reviewed = await Effect.runPromise(guardian().review(step, reader));
+    expect(reviewed.decision).toEqual({
+      outcome: "deny",
+      rationale: "This explore sends the quote form, and the step may only read.",
+      action: "write",
+      refusal: "final",
+    });
+    expect(requests).toHaveLength(1);
+  }
 });

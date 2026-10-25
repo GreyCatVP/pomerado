@@ -7,7 +7,12 @@ import {
   makeRunDialogDecider,
   watchingUnanswered,
 } from "../../src/inputs/dialog.js";
-import { expectedConfirmDigest, type ObservedConfirm } from "../../src/browser/dialogs/expected.js";
+import {
+  expectedConfirmDigest,
+  recordConfirmSteps,
+  type ObservedConfirm,
+} from "../../src/browser/dialogs/expected.js";
+import type { ExpectedConfirm } from "../../src/browser/dialogs/contracts.js";
 import { noIncidents, type DialogIncident } from "../../src/runtime/incidents.js";
 import { OwnerCancelled } from "../../src/inputs/terminal.js";
 import { InputRequestFailure, type InputRequest } from "../../src/runtime/input-request.js";
@@ -243,6 +248,57 @@ it("keeps the confirms the owner accepts while building, as the page showed them
     keepingAcceptedConfirms(makeDialogDecider(dismissing.ask, String), none)(report("confirm")),
   );
   expect(none).toEqual([]);
+});
+
+it("accepts a build's confirm that named its record when a run names another", async () => {
+  const submit = (name: string) => ({
+    ...report("confirm", `Finalize ${name}?`),
+    step: "submit-document",
+    url: "https://records.example/orders",
+  });
+  // While building, the owner accepts the confirm for the record the step's input names.
+  const accepted: ObservedConfirm[] = [];
+  const building = keepingAcceptedConfirms(
+    makeDialogDecider(answering("accept").ask, String),
+    accepted,
+    { document: "Spring Order 1001" },
+  );
+  await Effect.runPromise(building(submit("Spring Order 1001")));
+  const session = { acceptedConfirms: [] as ExpectedConfirm[], confirmSteps: new Set<string>() };
+  recordConfirmSteps(session, accepted);
+  const run = (input: unknown) => {
+    const caller = confirming(false);
+    const decide = makeRunDialogDecider({
+      ask: caller.ask,
+      project: String,
+      readOnly: false,
+      expectedConfirms: session.acceptedConfirms,
+      input,
+      incidents: noIncidents,
+    });
+    return { decide, asked: caller.asked };
+  };
+  // A run for another record gets the same confirm naming its own record: accepted, not asked.
+  const other = run({ document: "Summer Order 2002" });
+  expect(await Effect.runPromise(other.decide(submit("Summer Order 2002")))).toEqual({
+    choice: "accept",
+  });
+  expect(other.asked).toEqual([]);
+  // A confirm naming a record the run was not asked about, or with other wording, still asks.
+  const elsewhere = run({ document: "Summer Order 2002" });
+  expect(await Effect.runPromise(elsewhere.decide(submit("Winter Order 3003")))).toEqual({
+    choice: "dismiss",
+  });
+  const cancel = run({ document: "Summer Order 2002" });
+  expect(
+    await Effect.runPromise(
+      cancel.decide({
+        ...submit("Summer Order 2002"),
+        message: "Void Summer Order 2002?",
+      }),
+    ),
+  ).toEqual({ choice: "dismiss" });
+  expect([...elsewhere.asked, ...cancel.asked]).toHaveLength(2);
 });
 
 // A run's report needs to know a pop-up's question went unanswered; a cancel is the owner's choice.

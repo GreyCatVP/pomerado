@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Effect, Schema } from "effect";
-import { fillAutofillStep } from "../destinations/autofill-fill.js";
+import { fillAutofillStep, resubmitAutofillStep } from "../destinations/autofill-fill.js";
 import { autofillMarkerVisible } from "../destinations/autofill-marker.js";
 import {
   checkAutofillSignedIn,
@@ -12,11 +12,7 @@ import {
 } from "../destinations/autofill-step.js";
 import { rememberTyping } from "../destinations/autofill-typed-page.js";
 import type { CredentialKeyboard } from "../destinations/credential-keyboard.js";
-import type {
-  SignInBrowser,
-  SignInLogin,
-  SignInRequest,
-} from "../destinations/sign-in-recipe.js";
+import type { SignInBrowser, SignInLogin } from "../destinations/sign-in-recipe.js";
 import { MintFailure } from "../mint/contracts.js";
 import type { CredentialRejectedField, WebsiteCredentials } from "../runtime/authentication.js";
 import { credentialMessage, credentialPrompt } from "../runtime/credential-prompts.js";
@@ -114,35 +110,27 @@ await primary.goto("about:blank", { timeout: 10_000 });`,
 
 /**
  * The local host's sign-in browser on the session's page, for a build's recorder and a run's
- * replay: core's inspection, fill and signed-in check, with the page's requests from the
- * executor, the entry page's load and the recorded rejection markers. Once the host typed into
- * the page, each later screen is judged as typed into (`rememberTyping`); `typing` carries that
- * across every build and run on the same browser. `trusted` adds the origins the caller trusted for
- * sign-in during a build to `authenticationOrigins`, read at each call, so one counts from the
- * next call on.
+ * replay: core's inspection, fill and signed-in check, the entry page's load and the recorded
+ * rejection markers. Once the host typed into the page, each later screen is judged as typed into
+ * (`rememberTyping`); `typing` carries that across every build and run on the same browser.
  */
 export const makeSignInBrowser = (options: {
   readonly page: AutofillPage;
   readonly keyboard: CredentialKeyboard;
   readonly siteOrigin: string;
   readonly authenticationOrigins: readonly string[];
-  readonly trusted?: () => readonly string[];
-  readonly onRequest: (listener: (request: SignInRequest) => void) => () => void;
   readonly typing: SessionTyping;
 }): SignInBrowser<never> &
   Pick<SignInReplayBrowser<Error>, "open" | "markerVisible" | "clearSiteData"> => {
   const { page, siteOrigin, typing } = options;
-  const signInOrigins = () =>
-    options.trusted === undefined
-      ? options.authenticationOrigins
-      : [...new Set([...options.authenticationOrigins, ...options.trusted()])];
+  const { authenticationOrigins } = options;
   const calls = rememberTyping({
     inspect: (request) =>
       inspectAutofillStep({
         ...request,
         page,
         siteOrigin,
-        authenticationOrigins: signInOrigins(),
+        authenticationOrigins,
       }),
     fill: (input: {
       readonly step: AutofillStep;
@@ -162,6 +150,8 @@ export const makeSignInBrowser = (options: {
   return {
     inspect: calls.inspect,
     fill: calls.fill,
+    // It types nothing, so the session's record of typing stays as it is.
+    resubmit: (input) => resubmitAutofillStep({ ...input, page }),
     // The account page opens on `openOrigin`, the login's workspace, only when it is an exact
     // origin on the site's registrable domain.
     confirm: (indicator, screens, challengeScreens, openOrigin) => {
@@ -173,15 +163,12 @@ export const makeSignInBrowser = (options: {
         indicator,
         page,
         siteOrigin: opens,
-        authenticationOrigins: signInOrigins(),
+        authenticationOrigins,
         screens,
         challengeScreens,
       });
     },
-    onRequest: options.onRequest,
-    get authenticationOrigins() {
-      return signInOrigins();
-    },
+    authenticationOrigins,
     open: (url) => openAutofillLogin({ page, url }),
     clearSiteData: () => clearSiteData(page, siteOrigin),
     markerVisible: (selector, screenPage, popup) =>
@@ -191,7 +178,7 @@ export const makeSignInBrowser = (options: {
         popup,
         page,
         siteOrigin,
-        authenticationOrigins: signInOrigins(),
+        authenticationOrigins,
       }),
   };
 };

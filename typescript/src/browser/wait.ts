@@ -1,4 +1,5 @@
 import { timeoutDefaults } from "../runtime/deadline.js";
+import { outcomeKindsCode, readyWaitCode } from "./action-waits.js";
 
 /**
  * What one outcome's locator matched at the last look: all its matches and the visible ones, and
@@ -29,13 +30,26 @@ export interface WaitProgress {
 
 /** One entry of `waitReport()`: a wait this call ran and how it ended, in words and numbers. */
 export interface WaitRecord {
-  readonly wait: "waitForOutcome" | "waitForRows" | "waitForValues" | "waitForChange";
+  readonly wait: "waitForOutcome" | "waitForRows" | "waitForValues" | "waitForChange" | "waitForReady";
   readonly outcome?: string;
   readonly reason?: string;
   readonly elapsedMs: number;
   readonly looks: number;
   readonly progress: string;
   readonly summary: string;
+}
+
+/**
+ * `confirmCommit`'s answer (`confirmCommitCode`): whether the write's final commit went through
+ * (`done`), did not (`not_done`) or can't be told from the response and the page (`unclear`); its
+ * status in the core notation, `queued` with the site's own word in `status_label` when the site
+ * took the work to finish later; and a sentence saying what decided it.
+ */
+export interface CommitConfirmation {
+  readonly state: "done" | "not_done" | "unclear";
+  readonly status: "completed" | "queued" | "failed" | "unconfirmed";
+  readonly status_label?: string;
+  readonly reason: string;
 }
 
 /**
@@ -47,7 +61,9 @@ export interface WaitRecord {
  *   region, an indeterminate progress bar, or a skeleton, shimmer, spinner or loader class (never
  *   on a form control) counts while it shows until it has held for `noProgressMs`. Determinate
  *   bars (ratings, steps, meters) never count, and signs showing before the action in the same
- *   number, or class hints already there at the first look, are the page's own decoration.
+ *   number, or class hints already there at the first look, are the page's own decoration. One
+ *   page call counts them at each look; a sign element in content the browser skips rendering
+ *   does not show, and a look whose count runs out of time takes the class hints as unchanged.
  *   `waitForRows` also counts a sign beside its rows (in their container or the element around
  *   it, never inside a row, and only when it is visible): one there before the action, in the
  *   same number, is the page's own; any other counts while it shows, until it and the rows have
@@ -78,6 +94,16 @@ const waitRecords = [];
 // Every wait this call ran, oldest first, each with a sentence saying how it ended.
 const waitReport = () => waitRecords.map((record) => ({ ...record }));
 const waitSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A promise, or fallback once ms have passed without it settling; its timer never outlives it.
+const waitBounded = (promise, ms, fallback = undefined) => {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), Math.max(0, ms));
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
 const waitSeconds = (ms) => (Math.max(0, ms) / 1000).toFixed(1) + " s";
 const waitContextLost = (error) =>
   /Execution context was destroyed|Frame was detached/.test(String(error?.message));
@@ -87,6 +113,59 @@ const waitContextLost = (error) =>
 const waitLoadingSigns = '[aria-busy="true"], [role="progressbar"]:not([aria-valuenow], [aria-valuetext])';
 const waitLoadingClasses =
   ':is([class*="skeleton" i], [class*="shimmer" i], [class*="spinner" i], [class*="loader" i]):not(input, select, textarea, button, option, [role="progressbar"])';
+// How long one look's sign count may run in the page, which runs one call at a time, before it
+// leaves the class hints uncounted.
+const waitClassesBudgetMs = 250;
+// Runs in the page, as page.evaluate(spec) or region.evaluateAll(elements, spec): how many generic
+// loading signs and class hints show in the document or the region's elements, through open
+// shadow roots, in one call, since a locator's count can cost a protocol call for each element it
+// matches. A sign shows as a visible locator match does: rendered, not hidden by visibility, with
+// a box, or for display: contents, a child element or text that shows. An element in content the
+// browser skips rendering (content-visibility) does not show, and its box is never read: reading
+// it would lay that content out, one element at a time. A display: contents sign is judged by its
+// children even there, its text by a range's box, as the visible check judges it. A closed shadow
+// root is out of page code's reach, so a sign inside one, which a Patchright locator could count,
+// is not counted. Class hints left uncounted after the budget are null.
+const waitSignsInPage = (first, second) => {
+  const [roots, spec] = second === undefined ? [[document], first] : [first, second];
+  const started = performance.now();
+  const scopes = new Set(roots);
+  for (const scope of scopes) {
+    if (scope.shadowRoot) scopes.add(scope.shadowRoot);
+    for (const node of scope.querySelectorAll("*")) if (node.shadowRoot) scopes.add(node.shadowRoot);
+  }
+  const boxed = (box) => box.width > 0 && box.height > 0;
+  const textShows = (text) => {
+    const range = text.ownerDocument.createRange();
+    range.selectNode(text);
+    return boxed(range.getBoundingClientRect());
+  };
+  const shows = (element) => {
+    const rendered = typeof element.checkVisibility !== "function" ||
+      element.checkVisibility({ visibilityProperty: true, contentVisibilityAuto: true });
+    // Without a box: display: contents shows when a child element or text does; hidden or skipped
+    // content does not.
+    if (!rendered)
+      return !element.checkVisibility() && getComputedStyle(element).display === "contents" &&
+        [...element.childNodes].some((child) =>
+          child.nodeType === Node.ELEMENT_NODE ? shows(child) : child.nodeType === Node.TEXT_NODE && textShows(child));
+    return boxed(element.getBoundingClientRect());
+  };
+  const count = (selector, budgetMs) => {
+    const seen = new Set();
+    let shown = 0;
+    for (const scope of scopes)
+      for (const element of scope.querySelectorAll(selector)) {
+        if (seen.has(element)) continue;
+        seen.add(element);
+        if (shows(element)) shown += 1;
+        if (performance.now() - started > budgetMs) return null;
+      }
+    return shown;
+  };
+  return { signs: count(spec.signs, Infinity), classes: count(spec.classes, spec.budgetMs) };
+};
+const waitSignsSpec = { signs: waitLoadingSigns, classes: waitLoadingClasses, budgetMs: waitClassesBudgetMs };
 // A request the wait's action started, while it ran or in the second after, is the answer on its
 // way: it counts as progress and keeps the page busy until it ends, up to
 // lateFillCap. Any other request counts as progress for up to 10 s, and keeps the page busy for up
@@ -184,20 +263,11 @@ const waitProgress = (options = {}) => {
   // more than before, until its count has held for the no-progress window. A sign that stays is
   // part of the page. (waitForRows also judges the signs beside its rows: see listSigns.)
   const generic = {
-    signs: { selector: waitLoadingSigns, holdMs: noProgressMs, before: undefined, count: 0, changedAt: started, shows: false },
-    classes: {
-      selector: waitLoadingClasses,
-      holdMs: noProgressMs,
-      before: undefined,
-      count: 0,
-      changedAt: started,
-      shows: false,
-      firstLook: true,
-    },
+    signs: { holdMs: noProgressMs, before: undefined, count: 0, changedAt: started, shows: false },
+    classes: { holdMs: noProgressMs, before: undefined, count: 0, changedAt: started, shows: false, firstLook: true },
   };
   let loadingShows = false;
   let region = { count: 0, targets: 0 };
-  const scope = options.region ?? page;
   // One look at the page's signs. The baseline look, taken before the action, notes them without
   // counting anything as progress.
   // Quiet time runs to the latest look that could see progress: the first look after the start
@@ -224,9 +294,17 @@ const waitProgress = (options = {}) => {
     try {
       loadingShows = options.loading !== undefined && (await options.loading.filter({ visible: true }).count()) > 0;
       if (loadingShows) note("loading sign");
-      // A generic sign counts when it comes or goes, and while it is new: see generic above.
-      for (const sign of Object.values(generic)) {
-        const count = await scope.locator(sign.selector).filter({ visible: true }).count();
+      // A generic sign counts when it comes or goes, and while it is new: see generic above. Both
+      // kinds are counted in one page call; class hints left uncounted are no news at this look.
+      const counted = await (options.region === undefined
+        ? page.evaluate(waitSignsInPage, waitSignsSpec)
+        : options.region.evaluateAll(waitSignsInPage, waitSignsSpec));
+      for (const [name, sign] of Object.entries(generic)) {
+        // A count left undone is no news: the last count stands, so a sign showing keeps its
+        // hold, and a baseline or first look notes nothing.
+        const fresh = counted[name];
+        if (fresh === null && (baseline || (sign.firstLook && sign.before === undefined))) continue;
+        const count = fresh ?? sign.count;
         if (baseline || (sign.firstLook && sign.before === undefined)) {
           sign.before = count;
           sign.changedAt = now;
@@ -319,16 +397,21 @@ const waitProgress = (options = {}) => {
           "; last progress at " + waitSeconds(lastProgress - started);
       return seen + (ignoredRepeats > 0 ? "; ignored " + ignoredRepeats + " repeating requests" : "");
     },
-    stop: async () => {
+    stop: async (inPage = true) => {
       page.off("request", onRequest);
       page.off("requestfinished", onDone);
       page.off("requestfailed", onDone);
-      await options.region
-        ?.evaluateAll((elements, key) => {
-          globalThis[Symbol.for(key)]?.observer?.disconnect();
-          delete globalThis[Symbol.for(key)];
-        }, key)
-        .catch(() => undefined);
+      if (inPage && options.region !== undefined) {
+        const cleanup = options.region
+          .evaluateAll((elements, key) => {
+            globalThis[Symbol.for(key)]?.observer?.disconnect();
+            delete globalThis[Symbol.for(key)];
+          }, key)
+          .catch(() => undefined);
+        let timer;
+        await Promise.race([cleanup, new Promise((resolve) => { timer = setTimeout(resolve, 250); })]);
+        clearTimeout(timer);
+      }
     },
   };
 };
@@ -345,8 +428,17 @@ const waitRecord = (record) => {
 const outcomeCode = String.raw`
 const outcomeWaitSeen = (observations) =>
   Object.entries(observations)
-    .map(([name, { count, visible, changed }]) =>
-      name + " " + visible + " visible of " + count + (changed === 0 && visible > 0 ? ", unchanged" : ""))
+    .map(([name, observation]) => {
+      const { kind, count, visible, changed, matched, invalid, seen } = observation;
+      if (kind === undefined || kind === "gone")
+        return name + (kind === "gone" ? " (gone) " : " ") + visible + " visible of " + count +
+          (changed === 0 && visible > 0 ? ", unchanged" : "");
+      if (kind === "invalid") return name + " " + invalid + " invalid fields";
+      if (kind === "url") return name + (matched ? " URL matched" : " URL not matched");
+      if (kind === "check") return name + (matched ? " check true" : " check not true");
+      if (kind === "announced") return name + (matched ? " announced" : " no matching announcement of " + seen + " seen");
+      return name + (matched ? " " + kind + " matched" : " no matching " + kind + " of " + seen + " seen");
+    })
     .join(", ");
 const outcomeWaitFailure = (reason, message, observations, extra) =>
   Object.assign(new Error(reason + message), {
@@ -369,22 +461,38 @@ const outcomeWaitChanged = (locator, key) =>
   }, key);
 // Reads the outcomes highest priority last, so a look that sees one also sees a higher one drawn
 // in the same render. The observations keep the listed order.
-const outcomeWaitObserve = async (outcomes, key) => {
+const outcomeWaitObserve = async (outcomes, key, state, events) => {
+  const candidates = Array.isArray(outcomes) ? outcomes
+    : Object.entries(outcomes).map(([name, locator]) => ({ name, kind: "locator", locator }));
   const observations = {};
-  for (const [name, locator] of Object.entries(outcomes).reverse()) {
-    const count = await locator.count();
-    const visible = count === 0 ? 0 : await locator.filter({ visible: true }).count();
-    observations[name] = key === undefined ? { count, visible }
-      : { count, visible, changed: visible === 0 ? 0 : await outcomeWaitChanged(locator, key) };
-  }
-  return Object.fromEntries(Object.keys(outcomes).map((name) => [name, observations[name]]));
+  for (const candidate of [...candidates].reverse())
+    observations[candidate.name] = await outcomeWaitRead(candidate, state, key, events);
+  return Object.fromEntries(candidates.map(({ name }) => [name, observations[name]]));
 };
-const waitForOutcome = async (outcomes, options = {}) => {
-  const names = Object.keys(outcomes);
+// How long a look the page holds up may still finish once a response or popup outcome arrived, and
+// once the deadline passed.
+const outcomeWaitGraceMs = 1000;
+const outcomeWaitLateMs = 500;
+const waitForOutcomeResult = async (outcomes, options = {}) => {
+  const names = Object.keys(outcomes ?? {});
   if (names.length === 0) throw new TypeError("waitForOutcome needs at least one outcome");
+  const candidates = names.map((name) => outcomeWaitCandidate(name, outcomes[name]));
   const timeout = options.timeout ?? waitLimits.answerCap;
   const noProgressMs = options.noProgressMs ?? waitLimits.answer;
   const progress = waitProgress({ ...options, noProgressMs });
+  const events = outcomeWaitEvents(candidates);
+  const state = {
+    goneSeen: new Set(),
+    goneSince: new Map(),
+    invalidFields: new Map(),
+    invalidBefore: new Map(),
+    checked: new Map(),
+    announcedText: new Map(),
+    announceKey: candidates.some((candidate) => candidate.kind === "announced")
+      ? "pomerado.outcomeAnnounce." + Date.now() + "." + Math.random() : undefined,
+    urlBefore: undefined,
+    actedAt: -Infinity,
+  };
   let looks = 0;
   const finish = (fields, summary) =>
     waitRecord({
@@ -397,24 +505,84 @@ const waitForOutcome = async (outcomes, options = {}) => {
     });
   let begun = Date.now();
   let key;
+  // How long the cleanup may take: 250 ms, and nothing past the wait's hard stop.
+  let cleanupMs = () => 250;
   try {
     if (options.action !== undefined) {
       key = "pomerado.outcomeWait." + Date.now() + "." + Math.random();
-      for (const locator of Object.values(outcomes)) await outcomeWaitNote(locator, key);
+      for (const candidate of candidates) {
+        if (candidate.kind === "locator") await outcomeWaitNote(candidate.locator, key);
+        if (candidate.kind === "gone" && (await candidate.locator.filter({ visible: true }).count()) > 0)
+          state.goneSeen.add(candidate.name);
+        if (candidate.kind === "invalid")
+          state.invalidBefore.set(candidate.name, outcomeWaitInvalidKey(await candidate.locator.evaluateAll(outcomeWaitInvalidInPage)));
+      }
+      state.urlBefore = page.url();
+      if (state.announceKey !== undefined) await page.evaluate(outcomeWaitAnnounceInPage, { key: state.announceKey, seed: false });
       await progress.baseline();
-      await options.action();
+      state.actedAt = Date.now();
+      // A click whose handler opens a native dialog does not return until the dialog is handled,
+      // and the wait's dialog listener keeps Playwright from dismissing it: with a dialog outcome,
+      // the wait goes on once the action returns or a dialog opens.
+      if (candidates.some((candidate) => candidate.kind === "dialog")) {
+        const acting = Promise.resolve().then(() => options.action());
+        acting.catch(() => undefined);
+        const first = await Promise.race([acting.then(() => "acted"), events.dialogSignal.then(() => "dialog")]);
+        if (first === "acted") await acting;
+      } else await options.action();
     }
     progress.begin();
     begun = Date.now();
-    const until = begun + timeout;
+    // deadline, a Date.now() time such as the call's own, bounds the wait wherever the action left it.
+    const until = Math.min(begun + timeout, options.deadline ?? Infinity);
+    // Past the deadline, every page call shares outcomeWaitLateMs of grace and then ends: the wait
+    // never outlasts hardStop, however long the page holds it.
+    const hardStop = until + outcomeWaitLateMs;
+    const beforeStop = () => Math.max(0, hardStop - Date.now());
+    cleanupMs = () => Math.min(250, beforeStop());
     const unchangedMs = options.unchangedMs ?? waitLimits.unchanged;
     const unchangedFrom = begun + unchangedMs;
     // A page or frame the action is replacing can drop a look midway; the next look sees the new one.
+    // The page cannot always be read: a native dialog stops its scripts, and while a navigation
+    // is pending Playwright cannot evaluate in it. A look the page holds up ends at the deadline
+    // (with outcomeWaitLateMs of grace, so a look begun just before it finishes), at once for a dialog,
+    // and outcomeWaitGraceMs after a response or popup outcome arrived, which then decides on the
+    // outcomes the page announced as events.
+    const unblocked = (reading) => {
+      reading.catch(() => undefined);
+      const bounded = waitBounded(reading, beforeStop());
+      if (!candidates.some((candidate) => ["response", "dialog", "popup"].includes(candidate.kind))) return bounded;
+      return Promise.race([
+        bounded,
+        events.dialogSignal.then(() => undefined),
+        events.hitSignal.then(() => waitBounded(reading, Math.min(outcomeWaitGraceMs, beforeStop()))),
+      ]);
+    };
     const look = () =>
-      outcomeWaitObserve(outcomes, key).catch((error) => {
+      unblocked(outcomeWaitObserve(candidates, key, state, events).catch((error) => {
         if (waitContextLost(error)) return undefined;
         throw error;
-      });
+      }));
+    const result = (candidate, observations, evidence) => {
+      const handles = events.hit(candidate.name)?.handles ?? {};
+      const answer = {
+        outcome: candidate.name,
+        kind: candidate.kind,
+        afterMs: Date.now() - begun,
+        looks,
+        evidence,
+        observations,
+      };
+      for (const [name, value] of Object.entries(handles)) outcomeWaitHidden(answer, name, value);
+      // A dialog that opened while the wait listened stays open whichever outcome won.
+      if (answer.dialog === undefined) outcomeWaitHidden(answer, "dialog", events.dialog());
+      finish(
+        { outcome: candidate.name },
+        '"' + candidate.name + '"' + (candidate.kind === "locator" ? "" : " (" + candidate.kind + ")") + " showed after " +
+          answer.afterMs + " ms (" + looks + (looks === 1 ? " look)" : " looks)"),
+      );
+      return answer;
+    };
     // The first look that shows an outcome decides: no second look confirms it. An answer from
     // before the action is kept out of that look by the stale rule below, not by a second look.
     let last;
@@ -425,6 +593,7 @@ const waitForOutcome = async (outcomes, options = {}) => {
       // that look's matches, even when it ends while the look runs.
       const inflightAtStart = progress.causedInflight();
       const observations = await look();
+      events.rethrow();
       looks += 1;
       last = observations ?? last;
       // A match from before the action stays stale while a request the action started is in flight,
@@ -434,35 +603,55 @@ const waitForOutcome = async (outcomes, options = {}) => {
       const now = Date.now();
       const stale = now < unchangedFrom ||
         (now < until - unchangedMs && (inflightAtStart || progress.causedInflight()));
-      const shown = names.find(
-        (name) => observations?.[name].visible > 0 && !(stale && observations[name].changed === 0),
-      );
+      // With the page unreadable, only the outcomes the page announced as events decide, in the
+      // listed order.
+      const blocked = events.dialogOpen() || (observations === undefined && events.anyHit());
+      const shown = candidates.find((candidate) =>
+        blocked ? ["response", "dialog", "popup"].includes(candidate.kind) && events.hit(candidate.name) !== undefined
+          : outcomeWaitShows(candidate, observations?.[candidate.name], state, stale, now));
       if (shown !== undefined) {
-        if (observations[shown].count > 1) {
+        const observation = observations?.[shown.name];
+        if (shown.kind === "locator" && observation.count > 1) {
           const failure = outcomeWaitFailure("outcome_ambiguous", ": " + outcomeWaitSeen(observations), observations, {
-            outcome: shown,
+            outcome: shown.name,
           });
-          finish({ reason: "outcome_ambiguous", outcome: shown }, failure.message);
+          finish({ reason: "outcome_ambiguous", outcome: shown.name }, failure.message);
           throw failure;
         }
-        finish(
-          { outcome: shown },
-          '"' + shown + '" showed after ' + (Date.now() - begun) + " ms (" + looks + (looks === 1 ? " look)" : " looks)"),
+        const evidence = await waitBounded(
+          outcomeWaitEvidence(shown, observation, state, events, now),
+          Math.max(250, until - Date.now()),
+          {},
         );
-        return shown;
+        return result(shown, observations ?? last ?? {}, evidence);
+      }
+      if (events.unnamedDialog() !== undefined) {
+        const opened = events.unnamedDialog();
+        const failure = outcomeWaitFailure(
+          "outcome_unknown",
+          " after " + (now - begun) + " ms: a native " + opened.type() + " dialog opened that no outcome names",
+          last ?? {},
+          {},
+        );
+        outcomeWaitHidden(failure, "dialog", opened);
+        finish({ reason: "outcome_unknown" }, failure.message);
+        throw failure;
       }
       // Only a look that decides nothing samples the page's progress: the decision never uses it.
       const current = JSON.stringify(observations ?? null);
-      await progress.sample(
+      await unblocked(progress.sample(
         observations === undefined ? ["page replaced"]
           : signature !== undefined && current !== signature ? ["outcome matches changing"] : [],
-      );
+      ));
+      // An outcome the page announced as an event during the sample decides at the next look.
+      if (events.dialogOpen() || events.anyHit()) continue;
       signature = current;
       if (now >= until) {
-        const seen = last ?? (await look().catch(() => undefined)) ?? {};
+        const seen = last ?? (beforeStop() > 0 ? await look().catch(() => undefined) : undefined) ?? {};
         const failure = outcomeWaitFailure(
           "outcome_timeout",
-          " after " + Math.round(timeout) + " ms: " + outcomeWaitSeen(seen) + "; " + progress.describe(),
+          " after " + Math.round(Math.max(0, until - begun)) + " ms: " +
+            (Object.keys(seen).length === 0 ? "the page could not be read" : outcomeWaitSeen(seen)) + "; " + progress.describe(),
           seen,
           { progress: progress.diagnostics() },
         );
@@ -472,7 +661,7 @@ const waitForOutcome = async (outcomes, options = {}) => {
       // Nothing shows, not even an answer from before the action, and the page went quiet.
       // A quiet page fails only when the next look agrees, since the page may have answered
       // between this look's outcomes and its progress sample.
-      const anyShown = names.some((name) => observations?.[name].visible > 0);
+      const anyShown = candidates.some((candidate) => outcomeWaitShowsAny(candidate, observations?.[candidate.name]));
       const quiet = !anyShown && progress.quietMs() >= noProgressMs;
       if (quiet && !quietBefore) quietBefore = true;
       else if (quiet) {
@@ -489,16 +678,28 @@ const waitForOutcome = async (outcomes, options = {}) => {
       } else quietBefore = false;
       await waitSleep(100);
     }
+  } catch (error) {
+    // A dialog that opened while the wait listened stays open: the failure carries it too.
+    if (error !== null && typeof error === "object" && error.dialog === undefined) outcomeWaitHidden(error, "dialog", events.dialog());
+    throw error;
   } finally {
-    if (key !== undefined)
-      await page
-        .evaluate((key) => {
-          delete globalThis[Symbol.for(key)];
-        }, key)
-        .catch(() => undefined);
-    await progress.stop();
+    events.stop();
+    // With a native dialog open the page cannot run the cleanup; what it leaves is inert.
+    const inPage = !events.dialogOpen();
+    // A page held up by a pending navigation gets a moment; what it keeps is inert.
+    for (const each of [key, state.announceKey])
+      if (each !== undefined && inPage)
+        await waitBounded(
+          page.evaluate((key) => {
+            globalThis[Symbol.for(key)]?.observer?.disconnect?.();
+            delete globalThis[Symbol.for(key)];
+          }, each),
+          cleanupMs(),
+        ).catch(() => undefined);
+    await progress.stop(inPage && cleanupMs() > 0);
   }
 };
+const waitForOutcome = async (outcomes, options = {}) => (await waitForOutcomeResult(outcomes, options)).outcome;
 `;
 
 /**
@@ -880,8 +1081,9 @@ const waitForChange = async (fields, options = {}) => {
 
 /**
  * Page code for a Kernel call body, where `page` is in scope: paste it once at the top of the code
- * string, then wait with your verified Playwright locators. It declares four waits that share one
- * set of limits (`waitLimits`, from `timeoutDefaults`) and one progress budget, and `waitReport()`.
+ * string, then wait with your verified Playwright locators. It declares the waits below, which share
+ * one set of limits (`waitLimits`, from `timeoutDefaults`) and one progress budget, and
+ * `waitReport()`.
  *
  * Every wait returns as soon as its condition holds: a ready page costs `waitForOutcome` one look,
  * and the value waits two looks `settle` (0.5 s) apart. While it waits it watches the page's
@@ -914,7 +1116,8 @@ const waitForChange = async (fields, options = {}) => {
  * action started is still in flight, or was as the look began. Such a request holds it back for
  * at most `lateFillCap` (15 s), and never past `timeout` less `unchangedMs`, so the match still
  * counts before the timeout.
- * `timeout`, `noProgressMs` and `unchangedMs` start once the action returns. Its
+ * `timeout`, `noProgressMs` and `unchangedMs` start once the action returns; `deadline`, a
+ * `Date.now()` time such as the call's own, ends the wait by then however long the action took. Its
  * `OutcomeWaitFailure` has `observations` (`OutcomeObservation` by key) and one of these reasons:
  *
  * - `outcome_ambiguous`, when the winning outcome's locator matches more than one element; its
@@ -922,6 +1125,42 @@ const waitForChange = async (fields, options = {}) => {
  * - `outcome_unknown`, when no outcome shows and the page made no progress for `noProgressMs`: a
  *   challenge, the site's error or a layout the code does not handle, never slowness.
  * - `outcome_timeout`, when the page was still progressing at `timeout`.
+ *
+ * An outcome may also be an object naming one declared kind, raced beside the locators in the same
+ * listed order, so a site that answers in a way the code did not expect still ends the wait:
+ *
+ * - `{ gone: locator, stableMs? }`: the element, visible before the action (or at a look), has
+ *   had no visible match for `stableMs` (default 300), such as a form or a modal closing. A form
+ *   redrawn in place within that time is not gone.
+ * - `{ invalid: locator }`: a control inside it is marked invalid (`aria-invalid="true"`, the
+ *   `is-invalid` class, or the browser's own check after a submit). Fields flagged before the
+ *   action, and unchanged, follow the same `unchangedMs` rule as a locator.
+ * - `{ url }`: the page's URL matches a string (the whole URL, its path, or path and query), a
+ *   RegExp or a function of the `URL`. After an `action` it counts only once the page navigated,
+ *   by a document load or a route change, so an edit page whose URL already matched waits.
+ * - `{ response }`: a response arrived, from before the action, that a function of the Playwright
+ *   `Response` accepts, or that matches `{ method, url, status, navigation }` (`status` a number,
+ *   `[low, high]` or a function). It races the page's answers, so a request the site batches,
+ *   caches or renames never hangs the wait: name one only for a write's commit request.
+ * - `{ dialog: true | type | [types] }`: a native dialog opened, even one the action's own click
+ *   raised. Page scripts stop while it is open, so it decides at once, and a dialog of a type no
+ *   outcome names fails as `outcome_unknown`. The wait never accepts or dismisses it: a dialog
+ *   that opened while it listened is on the result's or failure's `dialog`, whichever won. An
+ *   action still waiting to click when a dialog opens clicks once the dialog is handled, so
+ *   handle it before ending the call.
+ * - `{ popup: true | (page) => boolean }`: the page opened a new tab or window.
+ * - `{ announced: string | RegExp }`: a live region (`aria-live`, or the role `alert`, `status`,
+ *   `log` or `alertdialog`) announced matching text after the action, as a screen reader hears
+ *   it. A toast that comes and goes between two looks still counts.
+ * - `{ check: async () => value }`: a condition of your own, true once it returns a truthy value.
+ *   It has no stale rule: one already true before the action wins at the first look.
+ *
+ * `waitForOutcomeResult(outcomes, options?)` is the same wait returning `OutcomeResult`: the
+ * winning `outcome` and its `kind`, `afterMs`, `looks`, the `observations`, and `evidence` of what
+ * showed it (a locator's visible text, the invalid fields' labels and messages, the URL reached,
+ * the response's method, URL and status, the dialog's type and message). The winning Playwright
+ * `response`, `dialog` or popup `page` is on the result too, kept off its JSON. Every listener
+ * the losing outcomes used is removed before it returns or throws.
  *
  * `waitForRows(rows, fields, { count, key, ...options })` waits until the first `count` identified
  * rows have every field filled and read the same on two looks `stableMs` apart (default `settle`,
@@ -946,6 +1185,27 @@ const waitForChange = async (fields, options = {}) => {
  * they were before `action` ran) and hold, or once they stayed the same for `unchangedMs` with no
  * progress sign showing, so a loading sign or request the choice started must first go.
  *
+ * `waitForReady(control, { overlays, expand, dismiss, pending, until, editable, stableMs,
+ * dismissLimit, watch, deadline, ...options })` waits before an action until the control's one visible
+ * match is attached, visible, enabled (and not read-only when `editable`), not busy (no
+ * `aria-busy` around it, no spinner inside it), in the same place on two looks, and what a click
+ * at its centre would hit is the control itself, not an overlay. It also waits while an `overlays`
+ * locator shows, while `pending` (a function run in the page, such as
+ * `() => window.jQuery?.active ?? 0`) returns a truthy count, and until `until()` is true. Once
+ * anything held it back, ready must hold for `stableMs` (default `settle`), so a spinner that
+ * flickers off between two requests does not count as gone. `expand` names the toggle of the
+ * control's section: it clicks it once while the control is hidden and the toggle says the
+ * section is collapsed (`aria-expanded` false, or the summary of a closed `details`), so it never
+ * closes an open one. `dismiss`
+ * names the close or skip controls of panels that open on their own, such as a tour, a what's-new
+ * dialog or a cookie banner: it clicks one that shows, up to `dismissLimit` (5) times, and once
+ * ready keeps a Playwright locator handler on each, so one that opens later is closed before the
+ * next action, until `result.release()` or `dismissLimit` uses (`watch: false` skips it). It
+ * returns `ReadyResult`, and fails as a `ReadyWaitFailure` with `blockers` and a message naming
+ * what held it back last: `not_ready` once nothing progressed for `noProgressMs`, `ready_timeout`
+ * at `timeout` (default `answerCap`), `ready_ambiguous` when more than one visible element
+ * matches.
+ *
  * A value is still loading, never absent, while it is empty, reads as a loading word or only dots,
  * matches the field's `placeholder` pattern, or sits in an `aria-busy`, skeleton or shimmer
  * element. An `optional` field may be absent and is then `null`; a needed one may not. A value
@@ -953,7 +1213,7 @@ const waitForChange = async (fields, options = {}) => {
  * `change_unknown` when waitForChange's fields are missing; `values_timeout` at the cap. Each is a
  * `ValueWaitFailure`.
  */
-export const waitCode = `${progressCode}${outcomeCode}${valueCode}`;
+export const waitCode = `${progressCode}${outcomeKindsCode}${outcomeCode}${valueCode}${readyWaitCode}`;
 
 /**
  * `waitForOutcome` alone, for code written against the first release of it: it declares only the
@@ -963,7 +1223,299 @@ export const waitCode = `${progressCode}${outcomeCode}${valueCode}`;
  */
 export const outcomeOnlyWaitCode = `
 const { outcomeWaitFailure, outcomeWaitNote, outcomeWaitChanged, outcomeWaitObserve, waitForOutcome } = (() => {
-${progressCode}${outcomeCode}
+${progressCode}${outcomeKindsCode}${outcomeCode}
 return { outcomeWaitFailure, outcomeWaitNote, outcomeWaitChanged, outcomeWaitObserve, waitForOutcome };
+})();
+`;
+
+/**
+ * `confirmCommit(outcome, page)`, pasted after `waitCode` in a write's commit call, just before the
+ * click's wait. It declares that one name, its helpers inside, so code that pastes `waitCode`
+ * beside a `confirmCommit` of its own still parses. It uses `page`, and `waitCode`'s `waitLimits`,
+ * `waitBounded`, `waitSleep`, `outcomeWaitClean` and `outcomeWaitInvalidInPage`. Pasting it notes
+ * the page's address, how many messages show each text, and its flagged fields as they stand.
+ * After, as many messages with a text as showed it then are stale, whatever element or page shows
+ * them, so a page that draws its messages again, or a redirect to a page with the same banner,
+ * adds no error, while one more message with an old text is new.
+ *
+ * It judges the commit from the `{ response }` answer of the click's `waitForOutcomeResult` and
+ * the page, and returns `CommitConfirmation`, plain data a call can return. It never marks a write
+ * done or not done without proof: whatever the response and the page leave open is `unclear`.
+ *
+ * - A response that is not 2xx or 3xx is `not_done`; a 201 with a Location is `done` at once. A 3xx
+ *   whose Location is the page that posted (same path), or whose query names an error or failure,
+ *   is `unclear` unless the page shows an error.
+ * - A 2xx body that reads as JSON is `not_done` for a success field (`success`, `succeeded`,
+ *   `isSuccess`, any case) that is false, `"false"`, 0 or `"no"` or holds an error word, `ok:
+ *   false`, an error field holding an error (not empty, and not a word for none such as "No
+ *   error"), a status of 400 or more, or an error word in a status or message. An error field is
+ *   any named for errors up to two levels down, and `error`, `errors` or `userErrors` up to four;
+ *   true counts only under `error`, `errors` or `hasError(s)`, and a setting such as
+ *   `notifyOnError` is never one. It is `unclear` for a success field holding anything but true,
+ *   `"true"`, 1, `"yes"`, `"ok"` or `"success"`, or a status or message that refuses a value
+ *   ("required", "unable", "could not") or says declined, rejected or denied, words a write may
+ *   itself have meant. A string holding JSON, as in `{ d: "..." }`, is read too. A body that is
+ *   neither JSON nor HTML, or can't be read within 1 s, is `unclear`; a 3xx's or an empty one is no
+ *   body.
+ * - The page then gets the settle window (`settle`, 0.5 s). A field newly marked invalid, or a
+ *   message whose text is new with words of an error or a refusal, is `not_done`, whatever the
+ *   body's message said. A message is an alert, an assertive live region or anything styled as an
+ *   error, with letters, outside links, buttons and labels, and not one only a screen reader hears.
+ *   A new message styled as an error with no such words, one that mixes them with a success, one
+ *   that says declined, rejected or denied, an alert that says neither error nor success, or a
+ *   field still marked invalid as before, is `unclear`.
+ * - Otherwise the commit is `done`: `queued` for a 202, or a body whose status says queued, pending
+ *   or processing, with that word as `status_label`, else `completed`. An outcome with no response
+ *   is `not_done` when the page shows a new error, else `unclear`. A native dialog that opened
+ *   during the wait and says the write failed is `not_done`; while one stays open the page can't
+ *   be read, which is `unclear`.
+ *
+ * It never clicks, and it reads the body for at most 1 s and the page for at most about 2 s.
+ */
+export const confirmCommitCode = String.raw`
+const confirmCommit = await (async () => {
+  // Words that say a write failed; "no errors" says none. Words that refuse a value prove nothing
+  // on their own, nor do words a write may itself have meant, as declining or rejecting something.
+  const errorWords = /\b(?:errors?|fail(?:s|ed|ure)?|invalid|forbidden|unauthori[sz]ed)\b/i;
+  const noErrors = /\b(?:no|without|zero|0)\s+errors?\b/i;
+  const refusalWords = /\b(?:required|must|cannot|can't|could not|couldn't|unable|not valid|please (?:enter|select|choose|provide|fill|complete|correct|try again))\b/i;
+  const openWords = /\b(?:declined|rejected|denied)\b/i;
+  const successWords = /\b(?:success(?:ful|fully)?|saved|created|updated|submitted|completed|confirmed|thank you)\b/i;
+  const queuedWords = /\b(?:queued|enqueued|pending|processing|in progress)\b/i;
+  const words = (value) => String(value).replace(/[_-]+/g, " ");
+  const saysError = (value) => typeof value === "string" && errorWords.test(words(value)) && !noErrors.test(words(value));
+  const saysRefusal = (value) => typeof value === "string" && refusalWords.test(words(value));
+  const clip = (value) => outcomeWaitClean(typeof value === "string" ? value : JSON.stringify(value), 160);
+  const list = (texts) => texts.slice(0, 3).map((text) => '"' + clip(text) + '"').join(", ");
+  // A success field's value: true, false, or anything else, which leaves it unclear.
+  const truth = (value) => {
+    const text = typeof value === "string" ? value.trim().toLowerCase() : value;
+    if (text === true || text === 1 || ["true", "1", "yes", "ok", "success"].includes(text)) return true;
+    if (text === false || text === 0 || ["false", "0", "no"].includes(text) || saysError(value)) return false;
+    return undefined;
+  };
+  // Whether an error field holds an error: not empty, zero, false or a word for none, at any depth.
+  const filled = (value, depth = 0) => {
+    if (value === null || value === undefined || value === false || value === 0) return false;
+    if (typeof value === "string")
+      return !/^\s*(?:0+|none|null|false|ok|success|n\/a|no errors?(?: found)?)?\s*\.?\s*$/i.test(value);
+    if (typeof value !== "object" || depth > 3) return true;
+    return (Array.isArray(value) ? value : Object.values(value)).some((each) => filled(each, depth + 1));
+  };
+  // Whether a field is an error field: up to two levels down, any named for errors, as in
+  // { data: { save: { errors } } }; deeper, only error, errors and userErrors. A setting for what
+  // to do on an error, such as notifyOnError, never is.
+  const errorField = (name, depth) =>
+    !/onerrors?$/.test(name) &&
+    (depth <= 2 ? /errors?$|^error(?:message|msg|text|code)s?$/.test(name) : ["error", "errors", "usererrors"].includes(name));
+  // Whether an error field holds an error; true does only under error, errors or hasError(s).
+  const holdsError = (name, field) =>
+    field === true ? ["error", "errors", "haserror", "haserrors"].includes(name) : filled(field);
+  // What a JSON body says: the first sign the write failed, the first that leaves it unclear, and
+  // the site's word for queued work. Error fields count up to four levels down (see errorField),
+  // as in { data: { records: { save: { userErrors } } } }; success and ok fields up to two;
+  // status and message words up to one. A string that holds JSON, as some frameworks wrap a body
+  // in { d: "..." }, is read as one more level. It looks at 2,000 values at most.
+  const judgeBody = (body) => {
+    const found = {};
+    let budget = 2000;
+    const visit = (value, depth) => {
+      if (depth > 4 || value === null || typeof value !== "object" || (budget -= 1) < 0) return;
+      if (Array.isArray(value)) {
+        for (const each of value.slice(0, 50)) visit(each, depth + 1);
+        return;
+      }
+      for (const [key, field] of Object.entries(value)) {
+        const name = key.toLowerCase().replace(/[_-]/g, "");
+        const said = key + " is " + clip(field);
+        if (depth <= 2 && /^(?:is)?succe(?:ss|ssful|eded)$/.test(name)) {
+          const holds = truth(field);
+          if (holds === false) found.failed ??= said;
+          else if (holds === undefined) found.unclear ??= said + ", not true";
+        } else if (depth <= 2 && name === "ok" && field === false) found.failed ??= said;
+        else if (errorField(name, depth)) {
+          if (holdsError(name, field)) found.failed ??= said;
+        } else if (depth <= 1 && (name === "status" || name === "statuscode") && typeof field === "number" && field >= 400)
+          found.failed ??= said;
+        else if (depth <= 1 && /^(?:status|state|result|outcome|message|msg|statusmessage|detail)$/.test(name) && typeof field === "string") {
+          if (saysError(field)) found.failed ??= said;
+          else if (saysRefusal(field) || openWords.test(field)) found.unclear ??= said;
+          else if ((name === "status" || name === "state") && queuedWords.test(words(field)))
+            found.queued ??= outcomeWaitClean(field, 100);
+        }
+        if (typeof field === "string" && depth <= 1 && /^\s*[[{]/.test(field)) {
+          try {
+            visit(JSON.parse(field), depth + 1);
+          } catch {}
+        } else visit(field, depth + 1);
+      }
+    };
+    visit(body, 0);
+    return found;
+  };
+  // The body: JSON, HTML, none (empty, or a redirect's, which can't be read), or unclear when it
+  // is something else or can't be read within 1 s.
+  const readBody = async (response, status) => {
+    const text = await waitBounded(Promise.resolve().then(() => response.text()).catch(() => null), 1000);
+    if (text === undefined) return { unclear: "its body could not be read within 1 s" };
+    if (text === null) return status >= 300 ? {} : { unclear: "its body could not be read" };
+    if (text.trim() === "") return {};
+    try {
+      return { json: JSON.parse(text) };
+    } catch {}
+    const type = String(response.headers()["content-type"] ?? "").toLowerCase();
+    if (type.includes("html") || /^\s*(?:<!doctype html|<html[\s>])/i.test(text)) return { html: true };
+    return { unclear: "its body is neither JSON nor HTML" + (type === "" ? "" : " (" + clip(type) + ")") };
+  };
+  // Elements that may hold the site's message: alerts, assertive live regions, and anything styled
+  // as an error.
+  const messages =
+    '[role="alert"], [role="alertdialog"], [aria-live="assertive"], [class*="error" i], [class*="danger" i], [class*="invalid" i]';
+  // Runs in the page: each visible message with letters, outside links, buttons and labels and
+  // wider than a pixel, its text (500 characters at most), what its styling says (its own or up
+  // to two elements around it), and whether it is an alert.
+  const messagesInPage = (elements) => {
+    const shows = (element) =>
+      typeof element.checkVisibility === "function"
+        ? element.checkVisibility({ visibilityProperty: true, opacityProperty: true })
+        : element.getClientRects().length > 0;
+    const styling = (element) => {
+      const parts = [];
+      for (let node = element, depth = 0; node instanceof Element && depth < 3; node = node.parentElement, depth += 1)
+        for (const name of ["class", "data-type", "data-status", "data-variant", "data-severity"]) parts.push(node.getAttribute(name) ?? "");
+      return parts.join(" ");
+    };
+    return elements.flatMap((element) => {
+      if (element.closest('a, button, label, summary, input, select, textarea, option, [role="button"], [role="link"]') || !shows(element))
+        return [];
+      const box = element.getBoundingClientRect();
+      if (box.width <= 1 || box.height <= 1) return [];
+      const text = String(element.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+      if (!/\p{L}/u.test(text)) return [];
+      const style = styling(element);
+      return [{
+        text,
+        errorStyle: /error|danger|invalid|fail/i.test(style),
+        successStyle: /success/i.test(style),
+        alert: element.matches('[role="alert"], [role="alertdialog"], [aria-live="assertive"]'),
+      }];
+    });
+  };
+  const fieldKey = (field) => field.field + "\u0000" + field.message;
+  const fieldText = (field) => field.field + (field.message === "" ? " is marked invalid" : ": " + field.message);
+  // Notes the page as it stands now, before the click: its address, how many messages show each
+  // text, and its flagged fields. After, as many messages with a text as showed it then are stale,
+  // whatever element or page shows them, as a page that draws its messages again or a redirect to
+  // a page with the same banner; one more with that text is new.
+  const read = (promise) => waitBounded(promise.catch(() => undefined), 1000);
+  const postedFrom = page.url();
+  const shownBefore = await read(page.locator(messages).evaluateAll(messagesInPage));
+  const staleCounts = new Map();
+  for (const message of shownBefore ?? []) {
+    const text = message.text.toLowerCase();
+    staleCounts.set(text, (staleCounts.get(text) ?? 0) + 1);
+  }
+  const flaggedBefore = await read(page.locator("body").evaluateAll(outcomeWaitInvalidInPage));
+  const staleFields = new Set((flaggedBefore ?? []).map(fieldKey));
+  // One look at the page: the new errors it shows, and what it shows that leaves the write open.
+  const look = async (page) => {
+    const fields = await page.locator("body").evaluateAll(outcomeWaitInvalidInPage);
+    const shown = await page.locator(messages).evaluateAll(messagesInPage);
+    const errors = fields.filter((field) => !staleFields.has(fieldKey(field))).map(fieldText);
+    const open = fields.filter((field) => staleFields.has(fieldKey(field))).map((field) => fieldText(field) + ", as before the click");
+    const counted = new Map();
+    for (const message of shown) {
+      const text = message.text.toLowerCase();
+      counted.set(text, (counted.get(text) ?? 0) + 1);
+      if (counted.get(text) <= (staleCounts.get(text) ?? 0)) continue;
+      const refuses = saysError(message.text) || saysRefusal(message.text);
+      const succeeds = message.successStyle || successWords.test(message.text);
+      if (refuses && !succeeds) errors.push(message.text);
+      else if (refuses) open.push(message.text + " (a success beside a refusal)");
+      else if (openWords.test(message.text)) open.push(message.text);
+      else if (message.errorStyle && !message.successStyle) open.push(message.text + " (styled as an error, with no words of one)");
+      else if (message.alert && !succeeds) open.push(message.text + " (an alert that says neither error nor success)");
+    }
+    return { errors: [...new Set(errors)], open: [...new Set(open)] };
+  };
+  // Looks for the settle window, so an error the page draws just after the response counts, and
+  // returns at the first look that shows one. Undefined when no look could read the page.
+  const watch = async (page) => {
+    const begun = Date.now();
+    const capMs = 2000;
+    let seen;
+    while (true) {
+      const each = await waitBounded(look(page).catch(() => undefined), Math.max(0, begun + capMs - Date.now()));
+      if (each !== undefined) {
+        seen = each;
+        if (each.errors.length > 0) return each;
+      }
+      const elapsed = Date.now() - begun;
+      if ((seen !== undefined && elapsed >= waitLimits.settle) || elapsed >= capMs) return seen;
+      await waitSleep(100);
+    }
+  };
+  // A redirect gives no body, so one back to the page that posted, or to an address whose query
+  // names an error or failure, may carry a refusal the page check can't see: why, or undefined.
+  const redirectedBack = (response) => {
+    const location = String(response.headers()["location"] ?? "").trim();
+    if (location === "") return undefined;
+    try {
+      const to = new URL(location, response.url());
+      const from = new URL(postedFrom);
+      let query = to.search + to.hash;
+      try {
+        query = decodeURIComponent(query);
+      } catch {}
+      if (/error|fail/i.test(query)) return "it redirected to " + clip(location) + ", whose query names an error";
+      if (to.origin === from.origin && to.pathname === from.pathname)
+        return "it redirected back to the page that posted, " + clip(to.pathname);
+    } catch {}
+    return undefined;
+  };
+  return async (outcome, page) => {
+    const done = (reason, queued, label) => ({
+      state: "done",
+      status: queued ? "queued" : "completed",
+      ...(label === undefined ? {} : { status_label: label }),
+      reason,
+    });
+    const notDone = (reason) => ({ state: "not_done", status: "failed", reason });
+    const unclear = (reason) => ({ state: "unclear", status: "unconfirmed", reason });
+    // A native dialog that opened during the wait and says the write failed is the page's answer.
+    // While one stays open the page can't be read, and the look below finds it unclear.
+    const dialog = outcome?.dialog;
+    if (dialog !== undefined && dialog !== null && saysError(dialog.message()))
+      return notDone("a native " + dialog.type() + ' dialog said "' + clip(dialog.message()) + '"');
+    const response = outcome?.response;
+    if (response === undefined || response === null) {
+      const seen = await watch(page);
+      const answered = outcome?.outcome === undefined ? "" : '; "' + outcome.outcome + '" answered the wait';
+      if (seen !== undefined && seen.errors.length > 0)
+        return notDone("no commit response" + answered + "; the page shows " + list(seen.errors));
+      return unclear("no commit response to confirm" + answered);
+    }
+    const status = response.status();
+    const where = response.request().method() + " " + new URL(response.url()).pathname + " answered " + status;
+    if (status < 200 || status >= 400) return notDone(where);
+    const location = String(response.headers()["location"] ?? "").trim();
+    if (status === 201 && location !== "") return done(where + " with Location " + clip(location), false);
+    const body = await readBody(response, status);
+    const found = body.json === undefined ? {} : judgeBody(body.json);
+    if (found.failed !== undefined) return notDone(where + "; its body's " + found.failed);
+    const seen = await watch(page);
+    if (seen !== undefined && seen.errors.length > 0) return notDone(where + "; the page shows " + list(seen.errors));
+    const back = status >= 300 ? redirectedBack(response) : undefined;
+    if (back !== undefined) return unclear(where + "; " + back);
+    if (body.unclear !== undefined) return unclear(where + "; " + body.unclear);
+    if (found.unclear !== undefined) return unclear(where + "; its body's " + found.unclear);
+    if (seen === undefined) return unclear(where + "; the page could not be read after it");
+    if (seen.open.length > 0) return unclear(where + "; the page shows " + list(seen.open));
+    return done(
+      where + (body.json === undefined ? "" : "; its body shows no error") + "; the page shows no error",
+      status === 202 || found.queued !== undefined,
+      found.queued,
+    );
+  };
 })();
 `;

@@ -11,16 +11,12 @@ script from a reset start by running its example until it works (re-running a re
 example is normal); resolve its missing choices with reads when possible. A write build
 does the caller's requested task once, live (in as many write steps as it takes), then
 composes its script from what happened (the `writes` skill). A read tests what its example
-did not exercise with a few combined live cases (the `testing` skill): a read signed out runs a
-handful, and a signed-in read one combined case that sets the optional inputs its example left
-unset, two distinct inputs at most. A write proves its tool with its act session; it never reads
+did not exercise with a few combined live cases (the `testing` skill). A write proves its tool
+with its act session; it never reads
 the `testing` skill or designs further tests<!-- pomerado:section core.write-http-check -->.
 That forbids running the write again or testing it live, not writing checks: a write's script
 checks its own result, and its read-back and comparison are checked offline over what the session
-read (the `writes` skill). The scope follows what the tool is now, not what the build started as: a read that becomes a
-write, in a new build or a repair, keeps to the one run from then on, a read that signs in keeps
-to the signed-in bound from then on, and a repair that rebuilds a signed-in tool or a write as a
-read signed out tests it as one. Credentials and
+read (the `writes` skill). The scope follows what the tool is now, as the `testing` skill says. Credentials and
 sign-in codes
 belong to the host; never request a password, cookie or TOTP seed in model-visible text.
 
@@ -84,9 +80,16 @@ answers `{ success, result, error, stderr }`. Throw
   error or validation message, a pick-one list, or the element the next step uses. Prefer it over
   `waitForURL` or `waitForLoadState`: a dialog keeps the URL, and a page that changes route without
   loading a document passes `waitForLoadState` at once. Opening a record by its identifier or URL
-  can also answer with a removed or not-found page: name it, and throw `InvalidInput` with the
-  page's own words and `field`, never a readiness timeout. The waits paragraph below shows how to
-  paste `waitCode` and call it. Prefer no fixed pauses unless necessary.
+  can also answer with a removed or not-found page, or an exact lookup of its key with an empty
+  result: name it, and throw `InvalidInput` with `field` and what the page shows, before any
+  commit mark, never a readiness timeout; below says when it starts "Caller input error:". The waits paragraph below shows how to
+  paste `waitCode` and call it.
+- For a search step, wait for either the site's results or its own no-match state, and return the
+  site's no-match answer with its message rather than waiting on results that may never appear.
+  Prefer refusing a typed value on that no-match state, quoting it, over an empty suggestion list
+  read before the site answered, which is still loading. Prefer refusing a requested date only on
+  what the site's own calendar shows for that day once its month has loaded, such as a greyed-out,
+  disabled or missing day, quoting it, over a calendar read before it filled.
 - Wait for a change (`waitForChange`, or a settle of your own) only after a step that changed the
   page or should have, such as a click, fill or navigation that loads new results. Skip it when no
   step changed the page since the last wait, such as after closing a panel without picking
@@ -96,8 +99,9 @@ answers `{ success, result, error, stderr }`. Throw
 - `waitForOutcome` already waited for its answer, so prefer no extra wait for that same answer after it.
 - Check the null case if possible. Make sure the tool handles a lookup or filter that matches
   nothing.
-- Start a response wait in the same call as the click that causes it, with
-  `Promise.all([page.waitForResponse(...), button.click()])`. Listeners do not outlive a call.
+- Start a response wait in the same call as the click that causes it: name the response as a
+  `{ response }` answer of `waitForOutcomeResult`, beside the page's other answers, with the click
+  as its `action`. Listeners do not outlive a call.
 - Do site HTTP inside the page with `page.evaluate(() => fetch(...))`. Never use
   `page.request` or a Node-side fetch<!-- pomerado:section core.execute-calls:start
 .
@@ -112,15 +116,8 @@ pomerado:section core.execute-calls:end -->
 - Never repeat a call that may have run.
 - When the site itself refuses a caller's value, such as a past date, an unknown airport code
   or a party size over its limit, throw `new errors.InvalidInput(message, { field })` saying why,
-  with `field` the input's name. When the
-  refusal is obvious, start the message with "Caller input error:" so the caller gets it at
-  once. It is obvious when the input alone breaks a rule of the task, checked before any site
-  action, such as a departure date before today in its airport's time zone, a return before
-  its departure or a count below one. It is also obvious when the page itself refuses the value in
-  its own words, which the message quotes. Never use that start when the tool's own read found
-  nothing, such as an empty suggestion list, a slider or list that hadn't loaded, or a day a
-  write finds disabled without the page saying why; a read returns such a day unavailable, as "Configure,
-  then read" says. When the value is not among choices the page lists, throw
+  with `field` the input's name, starting the message "Caller input error:" only when the
+  refusal is obvious (caller-input skill). When the value is not among choices the page lists, throw
   `new errors.InvalidInput(message, { field, available })` instead, as "Configure, then read"
   below says. Add `kind`, the reason as a stable lowercase token such as `out_of_stock`, when
   a caller needs to tell refusals apart (caller-input skill). `errors` exists only in the
@@ -133,34 +130,15 @@ pomerado:section core.execute-calls:end -->
   shows it with the caller's own input, and the run ends with those choices. A write that throws it before entering a commit mark reports that it changed nothing. A page,
   control or response that changed is still `OperationFailure`.
 - Check every rule the input alone breaks before any site action, such as a check-out on or
-  before its check-in, a count below one or a past date, and throw `InvalidInput` at once,
-  starting "Caller input error:" and naming the field and the rule. A date is past when it is
-  before today in the site's time zone. UTC's date can be a day ahead or behind. A site with
-  places in several time zones uses the place's zone, such as a restaurant's or a departure
-  airport's, when the tool knows it before any site action. When it doesn't know the zone,
-  refuse only a date that is past in every time zone, such as one before yesterday in UTC. Hold
+  before its check-in, a count below one or a past date, and throw `InvalidInput` at once. Hold
   in the input schema every rule it can express. The caller-input skill, "Validate it, and
-  fail with the right error", lists the rules and when to throw each error.
+  fail with the right error", lists the rules, the time zone that makes a date past, and when
+  to throw each error.
 - When the page does not apply a valid value the caller supplied, such as a filter, sort or
-  date it ignored, reset or replaced with its own (on a write, a location or store too), after
-  the tool's bounded retries, throw
-  `new errors.InputNotApplied(message, { field, requested, applied, step, siteMessage })`:
-  `field` the input's name, `requested` the caller's value, `applied` the value the page kept
-  as read back (left out when it shows none), `step` the tool's step that failed, such as
-  `set_location` or `apply_sort`, and `siteMessage` the page's own error when it showed one.
-  The run then fails and returns nothing computed without the caller's value. Never report the
-  value as not applied in the output instead, such as a `sort_applied: false` flag or a
-  "lookup-only" description, and never let an answer to a question make a filter, sort, date or
-  other value that narrows the results optional or lookup-only. An input that tailors the
-  answer, such as a location or store, is an exception: when the site still won't apply it, a
-  read returns the site's own answer labeled with the value it applied, and it may have a
-  limited use, such as lookup only, when the caller chose that use in answer to your design
-  question (the input schema, "Inputs that tailor the answer", below). On a
-  write, check it before the first commit step: a write that may already have changed the site
-  still ends as a possible change, never retried. A value the site does not offer, such as a
-  store missing from its picker, is the caller's to fix: throw `InvalidInput` with `field` and
-  `available`. `errors.LocationNotApplied` is an older name for the same error; write
-  `InputNotApplied`.
+  date it ignored, reset or replaced with its own, after the tool's bounded retries, throw
+  `new errors.InputNotApplied(message, { field, requested, applied, step, siteMessage })`,
+  never a flag in the output; the caller-input skill says what each field holds and lists the
+  exceptions, such as an input that tailors the answer (the input schema, below).
 - After a write, call `verified()` with no argument just before returning, once a call has
   read the result back, either the site's confirmation for this submission or the saved state.
   Return the confirmation number or record in the output. Without it the write stays a
@@ -172,8 +150,7 @@ request and the flow, never from one caller's account or example.
 
 A value the request's text supplies, such as a code, a quantity or a choice, is the build's to
 use even when the caller's structured input is empty: pass the request's values as
-`exampleInput` where the host takes one (a read's example, or each write act step that needs
-it), never as a build-time question. Decide from the request and the site which inputs are
+`exampleInput`, as `AGENTS.md` says (`execute`), never as a build-time question. Decide from the request and the site which inputs are
 required. An optional input plus a declared question the tool asks before any effect is only for
 a value the request genuinely leaves open; never make a required field optional with nothing
 that asks. A choice the request or the owner's answer settled as how the tool behaves, such as
@@ -182,12 +159,8 @@ input or a question at run time. When a caller could reasonably want another val
 with `defaultedInput(schema, answeredValue)` from the runtime, an optional input whose published
 schema shows that default and whose run gets it when the caller leaves it out, and say in its
 description that it defaults to what the owner chose; keep it fixed with no input only where
-varying it would be unsafe or meaningless. A choice that changes what the caller buys or pays,
-or whether the action can be cancelled or refunded, such as a paid add-on, a rate, fare or plan
-tier, a refundable option, shipping speed, how much of a balance to pay, the payment method or
-the delivery address, never takes one owner's answer as its default: it stays a required input
-or a declared question, and only declining it, turning it off or the option that adds no cost
-and keeps the action cancellable may be its optional input's default. A write asks
+varying it would be unsafe or meaningless. A costly choice never takes one owner's answer as
+its default (writes skill, "Compose and publish"). A write asks
 its questions before its first save wherever the page lets it, so an unanswered question never
 leaves a partial save on the site (caller-input skill). An input that tailors the answer on a read is the
 exception: it is optional unless the task can't run without it (below).
@@ -222,36 +195,40 @@ exception: it is optional unless the task can't run without it (below).
   from the one you saw.
 - Inputs are values a caller knows, such as codes, names, dates and counts, never a
   suggestion's full display text or an internal id the caller cannot know (an id the site
-  shows on its own pages, such as a product number, is not internal). A closed list
-  of options stays an enum of the site's options, as above. When the options come from a
+  shows on its own pages, such as a product number, is not internal). Prefer a unique input,
+  such as an ID: a tool that acts on one record takes the ID the site's other tools use for it,
+  and finds the record another way, such as by name, only when the caller gives none. A closed
+  list of options stays an enum of the site's options, as above. When the options come from a
   query, as in a search box, autocomplete, typeahead or searchable combobox, look the value
-  up the way a person would. Type the caller's value into the site's own search and read
-  every suggestion or result it shows. Prefer matching names loosely, ignoring case,
-  accents, spacing, punctuation, apostrophe style and a location the site adds to the
-  name, such as a
-  neighborhood or an airport code in brackets, over waiting for an element named exactly as
-  the caller typed it. A whole-name or code match outranks a partial one, so an airport code
-  picks that airport, not its city. Then count the matches at the best rank. With none,
-  throw `InvalidInput` at once, saying the site has no match, with `field` and `available`,
-  the closest entries it showed. With one, use it. With several, ask the caller which one with
-  a declared choice question whose options are those matches as the site labels them
-  (.agents/caller-input/SKILL.md).
+  up the way a person would, with `pickValue` from `pickerCode` (forms skill). It types the
+  caller's value into the site's own search, reads every suggestion, matches names loosely
+  (case, accents, spacing, punctuation, and whole words, so a name with a neighborhood or an
+  airport code in brackets still matches) with a whole-name or code match outranking a partial
+  one, and counts the matches at the best rank. A read of a category or term passes `stem: true`
+  so a caller's word also matches an option word it begins or that begins it, such as Dentist and
+  Dentistry, and returns the option it used (forms skill). With none, throw its `pickRefusal`, an
+  `InvalidInput` with `field` and `available`, the entries the site showed, except on a write
+  whose site offered exactly one suggestion for a free-text value the caller typed, never a
+  picker that selects a record: take it as the writes skill says for a value the site
+  rewrites. With one, use it. With several, decide per tool: take the first in the site's own
+  order and return the one it used, as the site labels it, or list those matches as the site
+  labels them for the caller to choose one, each selecting exactly one, with a declared choice
+  question (.agents/caller-input/SKILL.md) or `pickRefusal`, which lists them as `available`.
 - Match the caller's proper nouns, such as places, venues and company names, with a fuzzy
   match that accepts the usual forms of the same name, such as a name with or without its
   accents (Abaca for Abacá), a city alone or with its state and country, or a company with
-  or without Ltd. or Inc. Never require an exact match.
-  When more than one option matches, list them for the caller instead of picking one.
-- On a write, every choice the session met is an input: each option on the path,
-  add-ons and pre-selected defaults included, except one the request or an answer settled,
-  which is the tool's default (above). A costly choice, one that changes what the caller
-  buys or pays or whether the action can be cancelled or refunded (a paid add-on or
-  pre-selected paid option, a rate, fare or plan tier, a refundable or non-refundable option,
-  shipping speed, a saved payment or the delivery address), is never left to the page's
-  default: make it a required input or ask about it (`AGENTS.md`, "Try hard, then ask"), and
-  an optional input for it may default only to declining it, turning it off or the option
-  that adds no cost. Any other option is an optional input (a seat), required only when the
-  site requires a choice and nothing settled it; an unset optional input keeps the page's
-  default.
+  or without Ltd. or Inc. Never require an exact match. `sameText` from `pomerado/runtime`
+  matches a name that differs only in case, accents, spacing, apostrophes, periods, commas or
+  hyphens, or in a word the site writes short, such as St-Jean for Saint-Jean, but not one
+  with a word added or dropped. Prefer it for confirming the pick, so the read-back agrees with
+  the choice, but not for choosing from a list, where a short label can match a longer name it
+  isn't, such as UK for Ukraine.
+  When more than one option matches equally, decide per tool: take the first in the site's
+  order and return the one it used, as the site labels it, or list them for the caller to
+  choose one, each selecting exactly one.
+- On a write, every choice the session met is an input, costly choices included, and any
+  other option, such as a seat, is an optional input, as the writes skill says ("Compose and
+  publish").
 - Never make an account-specific value (a passenger, loyalty number, saved card or
   address, account or member ID) an enum member, example or default in a public
   schema. Take it as a free-form input when the caller can name it, such as a loyalty
@@ -263,31 +240,17 @@ exception: it is optional unless the task can't run without it (below).
   required fields, array lengths, numeric bounds or future values: derive those from
   the request and reviewed evidence.
 - Never hard-code a value the caller could vary: it comes from the input, never a literal
-  in source, a schema default or the definition. A good tool exposes the options its
-  purpose calls for, not only the ones the request names: record every control the flow
-  offers that narrows, orders or configures what the tool returns as an optional input wired
-  to its control, such as cabin class (economy or first) on a flight search, even when the
-  request never mentions it, except a choice that was declined (below). Open collapsed
-  groups, drawers and "more" links before you decide what the page offers: a collapsed group
-  is not an absent one. Leave out controls
-  unrelated to the purpose, such as a language switch or a newsletter opt-in on a search.
-  Record such a field as an optional input whether or not you ask about it, since callers of
-  the tool can set it. Ask about one only as `AGENTS.md` ("Try hard, then ask") allows; left
-  unset, it keeps the page's default.
-- Turn safety defaults off. A preselected option whose only effect is to share the caller's
-  data with another company, such as a partner comparison that opens the search on another
-  site, to opt into tracking beyond what the site needs, or to sign the caller up for marketing
-  email, is never an input and never a question. The tool turns it off on every run before the
-  submit it affects, and reads back that it is off. When the site won't submit with it off,
-  leave it on and say so in the description. Name the ones the tool turns off in the
-  description in general words, such as "turns off partner comparisons". A repair keeps each
-  one the registered source turns off.
-- Find these boxes where you fill the form, unlabeled ones included. List every checkbox,
-  switch and toggle in and near the form by role and by `input[type=checkbox]`, never only by
-  label, with its checked state, its nearest text, its group's heading and the alt text or
-  title of any logo beside it. A preselected box whose group names another company or shows its
-  logo is a partner box. After a probe's first submit, check whether a new tab opened or the
-  page left the site. If one did, a box you missed sent it there.
+  in source, a schema default or the definition. Record every control the flow offers that
+  narrows, orders or configures what the tool returns as an optional input wired to its
+  control, even when the request never mentions it, except a choice that was declined
+  (below). Open collapsed groups, drawers and "more" links before you decide what the page
+  offers: a collapsed group is not an absent one. Leave out controls unrelated to the purpose,
+  such as a language switch or a newsletter opt-in on a search. The search skill's "Find the
+  filters" says how a search records them.
+- Declare input fields in the order a person fills in the site's form: what or where first,
+  then when (a start date before an end date), then who and how many, then optional
+  refinements, with sorting and paging (`limit`, `cursor`) last.
+- Turn safety defaults off. They are never an input or a question ("Safety defaults", below).
 - Inputs that tailor the answer. Many sites tailor what they show to facts about the visitor,
   not just what they searched for: where they are (ZIP, address, store, delivery or pickup),
   what they have (a vehicle, a device), or who they are (a membership or rate type, an insurance
@@ -299,7 +262,10 @@ exception: it is optional unless the task can't run without it (below).
     description that the site picks it, which can differ from run to run.
   - When the caller gives one, honor it. Try each way the site offers, preferring one that needs
     nothing more from the caller, then read the applied value back from the page and return it
-    as `applied_<input>`, such as `applied_store`, `applied_zip` or `applied_vehicle`.
+    as `applied_<input>`, such as `applied_store`, `applied_zip` or `applied_vehicle`. For a
+    location, those ways are the store picker, the ZIP or postal-code box, the delivery or pickup
+    choice and the manual entry beside "use current location". Decline the browser's location
+    permission when the site asks; declining often reveals a manual ZIP field.
   - When the site needs more detail to apply it, such as a street address instead of a ZIP or a
     vehicle's trim, add that detail as its own optional input. Its description says what it is
     for and that it is sent to the site. Submit only what the caller gave; never invent or reuse
@@ -314,7 +280,8 @@ exception: it is optional unless the task can't run without it (below).
     output field, `<input>_note`, such as `zip_note`, set only on this fallback, which also says
     why when the applied value is null. Never present it as the answer for the caller's value. A location the site says it
     does not serve is such a case: return the site's own answer with its message. A write throws
-    `InputNotApplied` (above) before its first commit step instead.
+    `InputNotApplied` (above) before its first commit step instead; for a location the site
+    says it does not serve, it prefers the writes skill's refusal quoting the site.
   - Inputs that narrow the results (filters, sort, dates) stay strict: a value the page ignores
     throws `InputNotApplied` (above).
   - Give a tailoring input a limited use, such as a postal code used only to look up nearby
@@ -345,17 +312,7 @@ exception: it is optional unless the task can't run without it (below).
   location, no store, skip a filter, don't sign in), is not part of the tool for any caller:
   never offer it as an input, never set it in the example or a test, and never put it in
   `exampleInput`. Note it in coverage. That covers a step the tool then never takes. A costly
-  choice a write still meets on its path, one that changes what the caller buys or pays or
-  whether the action can be cancelled or refunded (a paid add-on, a rate, fare or plan tier, a
-  refundable option, shipping speed, the payment method or the address), is never settled this
-  way: it stays an input or a run-time question (writes skill), whose default may only decline it.
-- When the caller input is empty (`{}`), write the tool's input from the request and the
-  owner's answers, with dates normalized (10/4 is the next October 4, as `2026-10-04`), and
-  pass it as `exampleInput`: on a read's example, or on each write act step that needs it. The
-  first act step that passes it fixes it, and later steps repeat it unchanged or omit it. Make
-  each of its keys a schema input, required where the request needs it; publication returns a
-  key the schema lacks as an `example_input` input feedback. An optional input plus a declared
-  question is only for a value the request leaves open.
+  choice a write still meets on its path is never settled this way (writes skill).
 - Callers and Guardian see the JSON Schema form, so write every constraint in one it
   shows: a `Schema.filter` shows nothing, its description included, so use
   `Schema.NonEmptyTrimmedString`, `pattern`, `minLength`, `Int`, `between` or `Literal`. Type
@@ -529,11 +486,14 @@ inputs. Scope the row locator to the main list, and leave out related, recommend
 viewed and "others also" sections; with `include: ["related"]` return them in their own `related`
 list of the same row shape, never mixed into the results and never counted toward a limit. A
 sponsored or promoted row inside the main list stays where it is, marked as such, unless the list
-already holds the same item (pagination skill); a promoted carousel is not part of the main list.
+already holds the same item (pagination skill); a promoted carousel, or any carousel or banner
+with its own heading or scroller, is not part of the main list, even when its items are marked
+sponsored. Return each item once.
 A card that
 stands for a group, such as one product in several flavours or sizes, a hotel with several room
 types or a building with several units for rent, is one result marked as a group (for example
-`kind: "group"`), with the options or count the card shows, never presented as one of its members.
+`kind: "group"`), with the options or count the card shows and a note that its link opens one
+member, never presented as one of its members.
 
 Then, for every field:
 - Prefer parsing what the page shows into typed fields over returning a result row, card or
@@ -570,14 +530,17 @@ that depends on them:
    selectable, exactly as shown. Leave disabled, sold-out and other unselectable options out of
    `available`, and say in the message that they were left out. Never pick a near match, the
    page's default or the first option; the same proper noun in another usual form is not a near
-   match (input schema above). A broader choice that covers the value, such as "Show all", is
-   allowed on a search (search skill).
+   match (input schema above). A write follows the site's preselected substitute instead when
+   the caller's own task asks for whatever the site ends up with (writes skill). A broader
+   choice that covers the value, such as "Show all", is allowed on a search (search skill).
    - An option the page lists but greys out, disables or marks unavailable, such as a booked
      date, a sold-out size or a full time slot: a read returns it as data, the requested value
      with `available: false`, the page's own reason when it shows one, and the alternatives the
      page offers beside it, such as the in-stock sizes, the open times or the valid stays, and
      the run succeeds. A write throws `InvalidInput` with `field` and `available`, the
-     selectable options. Neither picks another value for the caller.
+     selectable options. Neither picks another value for the caller; a write follows the site's
+     preselected substitute only when the caller's own task asks for whatever the site ends up
+     with (writes skill).
    - For an input whose options depend on another, such as a check-out after a check-in or a
      time after a date, apply the input it depends on first and read `available` from that
      state, then drop the options the input alone rules out. Never list options read before
@@ -592,18 +555,18 @@ that depends on them:
    wait for the values that depend on it with `waitForChange`, passing that step as `action`:
    changed, or confirmed unchanged once the page's loading sign came and went; a value read
    before the page updates belongs to the previous choice. A choice already in the requested
-   state needs no step and no wait. Compare text read back with the caller's value normalized,
-   or for a proper noun with
-   the option it matched: ignore case, accents, repeated whitespace and punctuation such as
-   curly quotes, periods and hyphens, never exact case-sensitive equality, since a page may
-   echo a query or name in
-   its own case. When the page kept another value after the tool's bounded retries, throw
-   `InputNotApplied` (above); never read on with the page's value. A number snapped to the
-   nearest step inside the caller's bound and returned as applied, a filter group the page
-   disables reported as not offered, and a broader choice that covers the value (search skill)
-   are not unapplied inputs. An input that tailors the answer and that the site still won't
-   apply returns the site's own answer labeled with the applied value instead (the input
-   schema, "Inputs that tailor the answer").
+   state needs no step and no wait. Compare text read back with `sameText(shown, wanted)` from
+   `pomerado/runtime`, `wanted` being the option the tool picked from the site's list when it
+   picked one, the site's version of a value a write typed and the site rewrote (writes skill),
+   and the caller's value otherwise. It ignores case, accents, spacing, apostrophes, periods,
+   commas and hyphens between letters, reads a space, hyphen, slash or parentheses between
+   digits as one separator while the groups still count, so 29 59 matches 29-59 but never 2959
+   or 2 959, and accepts a word the page shortened, such as St for Saint. Prefer it over
+   exact equality, since a page may echo a query or name in its own case or short form, and
+   prefer comparing numbers, dates and amounts as values. When the page kept another value
+   after the tool's bounded retries, throw
+   `InputNotApplied` (above); never read on with the page's value, except in the cases the
+   caller-input skill lists as not unapplied, such as a number snapped as in step 2.
 4. Read. Only then read the values the choices affect. Return the applied choices beside
    them. Return a group's offered options as a list when the page shows them without extra
    clicks, as a record page shows its variants, or when the caller asks (search skill).
@@ -634,12 +597,10 @@ it. This value does not authorize other destinations or credential submission.
 For a tool whose sign-in moves each account to its own workspace host, `siteOrigin` is that
 account's workspace origin at run time, so a URL built from it, or from `siteDomain` for a
 fixed API host, reaches the right workspace, and one built from `page.url()` or a literal does not.
-The context's `siteDomain` is the site's registrable domain, which the host computed with
-the public suffix list: a page is on the site when it is `https:` and its hostname is
-`siteDomain` or ends with `"." + siteDomain`, and only `siteOrigin` itself is the site when
-`siteDomain` is undefined. Write it into the code as you do `siteOrigin`, and never derive it
-from the hostname: its last labels can be a public suffix (`co.uk`) or another tenant's
-(`github.io`). `references/native-page.ts` shows the check. Use `page.evaluate`,
+The context's `siteDomain` is the site's registrable domain: check that a page is on the site
+with it as `AGENTS.md` shows ("Check the page is on the site before exploring it"), writing it
+into the code as you do `siteOrigin`, never derived from the hostname.
+`references/native-page.ts` shows the check. Use `page.evaluate`,
 `locator.evaluate` or `locator.evaluateAll` when code needs browser globals such as
 `document`.
 Read each output value from the element or structured-data entry that holds the whole value,
@@ -655,7 +616,8 @@ call: `readRows` and `waitForRows` read every returned row at once. A list of te
 page, such as bullets, highlights or option names, can hold blank entries the site renders
 invisibly: trim each entry and drop the empty ones, so one blank entry does not fail the result.
 A single text field that can be blank on some records is nullable, and its description says when
-(a needed value also takes a field that says why, as "Never loosen a value" says). Never select
+(a needed value also takes a field that says why, as "Never loosen a value" says). Return a value
+the site shows blank as null, never a question to the owner. Never select
 by a generated CSS class, a hashed or build-numbered name such as `.e-1a2b3c` or `.css-1x2y3z`:
 it changes on the site's next deploy.
 Never read it from a broad container, whole-page text, tag-stripped HTML, a regex over page-wide
@@ -698,11 +660,11 @@ or choosing a fallback. Use `locator.waitFor` for one expected state, `waitForOu
 (below) when the page can answer more than one way, `waitForRows`, `waitForValues` or
 `waitForChange` (below) for the values you return, or, only where none fits, a bounded loop of
 your own that reads every condition in one `evaluate` per pass;
-`count()` and `isVisible()` only observe the current instant. A ready page should
-pass immediately; do not add a fixed sleep. Share one bounded navigation deadline across navigation
-and first-page readiness, as in `references/navigation.ts`. Readiness polling
-only observes: do not repeat `goto`, reload, login, submission or another action
-inside it. Preserve site/path and account guards while waiting.
+`count()` and `isVisible()` only observe the current instant. Share one bounded navigation
+deadline across navigation
+and first-page readiness, as in `references/navigation.ts`. Readiness polling and every re-check
+below only observe: do not repeat `goto`, reload, login, submission, the action that caused the
+change or another action inside them. Preserve site/path and account guards while waiting.
 Wait for the values you will return, not for their containers or the rest of the page. A record
 is ready when each value you return is filled in and reads the same on two looks
 (`waitForValues`): two consecutive identical reads, the first included. Call it after a step
@@ -714,11 +676,18 @@ page size. A slot that is present but empty, a skeleton, `aria-busy` or reading 
 still loading, never absent; a slot with no identifier is not a result. A value still loading
 when the page stops progressing fails the run, optional or not: null is only for a field this
 record's markup lacks altogether, as the build saw on records without it, never for a slow one.
-Never wait for rows you won't return, for the whole list to stop changing, or for the page's
-`load` event. Read image links from attributes (`src`, `srcset`) without scrolling. A page with
+When a list row shows the site's own plain "unavailable" state for a value, such as a price,
+prefer treating that row as settled in the readiness wait and returning that state in an output
+that can carry it, over waiting for a value the site will not show.
+Use observed conditions: never add a fixed sleep, since a ready page passes immediately, and
+never wait for rows you won't return, for the whole list to stop changing, for whole-page
+network idle or for the page's `load` event. Read image links from attributes (`src`, `srcset`) without scrolling. A page with
 an outcome is ready only when it shows that outcome: results, or the site's own empty message.
 Before acting on a control, wait until loading overlays covering it are gone and its section is
-expanded. A panel or dialog you opened does not go away by waiting: close it with its own
+expanded. `waitForReady(control, { overlays, expand, dismiss })` waits for all of it: the control
+enabled, uncovered and still, the overlays you name gone, the section toggle you name opened once,
+and the close controls you name for a tour, a what's-new dialog or a banner that opens on its own
+clicked, now or before a later action. A panel or dialog you opened does not go away by waiting: close it with its own
 control or Escape and check it closed. A click Playwright keeps reporting as intercepted by the
 same element is a page state, not slowness. After an action that navigates or re-renders, wait
 for the committed state
@@ -732,26 +701,37 @@ before extraction. If any changed, read again within the deadline.
 Build any check that values stopped changing from stable keys, such as record IDs, names and
 prices, never from text that changes on its own, such as a countdown, a timer, a rotating badge
 or a live viewer count.
-These re-checks only observe: never repeat the click, submission or navigation that caused the
-change.
 After an action that can navigate, prefer waiting with `waitForOutcome` for a control only the destination page has, beside every other answer the action can give, over waiting for the destination URL alone, then extract. Keep the action,
 readiness wait and extraction in the same Kernel execute call when possible. If a read
 reports “Execution context was destroyed,” the action may already have succeeded.
 Reacquire page/frame locators, wait for readiness and retry only the read within the
 original deadline. Never repeat the click or submission as part of that recovery.
-Use observed conditions, without fixed sleeps, whole-page network-idle waits or the `load` event.
+Race every answer a step can give with `waitForOutcome` rather than waiting for one request you
+saw, which the site may batch, cache or rename; name a write's commit request as a `{ response }`
+answer beside them (writes skill).
 For an unknown destination, inspect after the document transition; do not invent a
 selector or repeat the action in a follow-up read.
 Import `waitCode` from the runtime (`outcomeWaitCode` declares `waitForOutcome` alone, for code
 written before; paste one, never both), paste it once at the top of the call's code, and wait with `waitForOutcome({ refused, failed, unavailable, empty,
 results }, { action, loading, region })`, one scoped locator per answer, each an element only
-that answer has, such as a results list that holds a
-row. The first listed wins when several show, so list a refusal, error or greyed-out choice
+that answer has and the step can cause, such as a results list that holds a
+row. Prefer closing a banner, tour or dialog that opens on its own with `waitForReady`'s
+`dismiss` over naming it as an answer, since `dismiss` also closes one that opens later, before
+the next action. The first listed wins when several show, so list a refusal, error or greyed-out choice
 first, then the empty state, then results. Pass the step itself as `action`, such as
 `() => apply.click()`: the wait runs it once, and an answer the page already showed before it counts
 only after staying unchanged for `unchangedMs`, 2 s by default, so a list the step has not yet
 re-rendered is not read while a step that leaves the same answer still resolves; a new or
-changed element counts at once. `waitForOutcome` returns the name of the answer that showed.
+changed element counts at once. Without an `action`, an answer already on the page wins on the
+first look, so prefer passing the step whenever the wait follows one, typing included.
+`waitForOutcome` returns the name of the answer that showed.
+An answer may also be `{ invalid: form }` (a field the site marked invalid), `{ gone: locator }`
+(a form or dialog that closed), `{ url }` (a navigation or route change), `{ response }`,
+`{ dialog }` (a native dialog, left open as `result.dialog`: keep it on `globalThis.dialog` and
+return its type and message for `decideDialog`, as `references/native-dialog.ts` does), `{ popup }`, `{ announced: text }` (a toast or
+alert a live region announced, even one gone before a look) or `{ check: fn }`.
+`waitForOutcomeResult` returns the winner with its `evidence`, such as the invalid fields' labels
+and messages, the toast's text or the `response`.
 Prefer branching on that name over waiting again for the same answers or rechecking them with
 `isVisible`. Pass the site's own loading sign as `loading`, the part of the
 page the answer appears in as `region`, and the context's `siteDomain`, so the sign counts for as
@@ -764,8 +744,7 @@ no-progress window. A request already in flight when a wait starts is not seen: 
 loading its list, name its loading sign as `loading`. Read results;
 return an empty list for a listing's empty state;
 throw `InvalidInput` with `field` and the site's own words for a refusal; handle a greyed-out
-choice the input asked for as "Configure, then read" says, unavailable data on a read and `InvalidInput`
-with `available` on a write; ask the caller about a pick-one list
+choice the input asked for as "Configure, then read" says; ask the caller about a pick-one list
 (.agents/caller-input/SKILL.md). It throws an
 `Error` named `OutcomeWaitFailure` whose message says what each outcome matched, which progress
 signs it saw and when progress stopped: `outcome_ambiguous` when the winning locator matches more
@@ -793,33 +772,28 @@ every visible match as a list. After a search or a filter, use `waitForChange` o
 return, such as `{ ids: { locator: rowIds, all: true } }`, with the site's own loading sign as
 `loading` when it has one.
 After a step that reloads the page, such as choosing a city, prefer typing into the search box
-again when its suggestions don't appear.
+again when its suggestions still don't appear after the wait that passed the typing as `action`.
 Typing or choosing can reload part of the page once per key or choice, such as suggestions or a
 dependent list. The answers can land out of order, and the page may replace the element it
 updates. Prefer waiting until every answer has landed, then look that element up again rather
 than reading a node or handle found earlier, and check it shows the answer to the whole value.
-When it doesn't, prefer entering the value once more over waiting longer.
+When it doesn't, prefer entering the value once more over waiting longer, after the wait that
+passed the typing as `action` has ended, since typing again while the site is still answering
+can cancel that answer.
 <!-- pomerado:section core.site-origin -->After a probe reveals a challenge, inspect the retained Page in follow-up probes
 and wait for the intended page/control within the existing deadline and job budget;
 do not click the challenge, reload, or navigate to another route merely because
 the earlier probe timed out. A new probe execution does not require new navigation.
 A live example, a live read `test`, and a write session's first `act` step are
-different: the host resets
-the browser to the site origin before it runs, closing other tabs, and keeps the
-browser's cookies and site storage. So the source must set every value its input controls,
-such as a location, store, filter or search, itself, and never rely on what the site
-remembers from exploration; a live test case that runs cold, on a new browser with an empty
-profile, is the proof. A published run can start on such a browser too, so the source also sets
-up its own start state from a cold page, such as a guest session, a chosen location or a consent
-banner, never relying on cookies or state only the build's browser holds. A sign-in that started and was never verified is the exception: that
+different: they start from a reset page, as `AGENTS.md` says ("Reads, writes and examples"),
+so the source sets every value its input controls and its own start state itself. A sign-in that started and was never verified is the exception: that
 reset clears cookies and site storage. When the page is signed out after that reset, or after a
 full page load your source asks about with `ensureSignedIn`, the host signs in again by itself;
 do not call `authenticate` for it. When the host cannot keep the site signed in, the step fails with
 `session_not_kept`: report that cause instead of signing in again. That source must perform
 the flow from its input,
 never rely on a page an exploration left open. So a read iterates from a reset start,
-and re-running its example or live test is normal. A live test stays read-only. A write
-session's later `act` steps continue on the page the previous step left.
+and re-running its example or live test is normal.
 If the deadline expires, report the named readiness failure and use current
 screened evidence to distinguish a remaining challenge, loading and changed
 layout.<!-- pomerado:section core.challenge-reference --> Do not invent a CAPTCHA bypass or replace the target with an arbitrary
@@ -830,10 +804,8 @@ heading are the page you meant: a wrong or error page needs the site's own route
 page, never a new selector. Otherwise repair that wait and keep the checks that already
 passed. A `DeadlineExceeded` phase of `execution` is the shared operation deadline. Before increasing a timeout, make one bounded observation of the candidate
 target count or state; increase it only when evidence shows that the correct unique
-target is slow. Do not catch-and-repeat timed-out work. A click or navigation that
-timed out is an uncertain transition: it may already have taken effect. Inspect the
-retained page in the next probe and do not repeat the action until you know where
-the page landed.
+target is slow. Do not catch-and-repeat timed-out work: a timed-out click or navigation is
+an uncertain transition (`AGENTS.md`).
 
 Never call `.first()` (or `.nth(0)`) on a broad text or regex match, whether to
 click it or to wait for readiness: collapsed menus often hold an earlier hidden
@@ -889,8 +861,7 @@ Never recreate a write or login to recover an observation. See
 
 The tools and the files you may edit are in `AGENTS.md`. The host binds the caller's actual input/account; no tool
 argument selects another account or private reference. A live test's `testInput`, on a
-read only, is an input you choose, with values the site shows and never a private identifier
-(.agents/testing/SKILL.md). Every new command/probe/execution gets Guardian review<!-- pomerado:section core.tools-and-files -->.
+read only, is an input you choose as .agents/testing/SKILL.md says. Every new command/probe/execution gets Guardian review<!-- pomerado:section core.tools-and-files -->.
 Nested Playwright actions do not each trigger review. A probe operation still receives the host-bound business
 input. Its declared schema must accept that input even when the bounded observation
 does not use every field; do not replace it with an empty or probe-only schema.
@@ -929,6 +900,36 @@ Loading is not proof of a new version. An identity mismatch blocks every candida
 See the compiling `references/variants.ts` example.
 
 <!-- pomerado:section core.layout-captures -->
+
+## Cookie banners
+
+Whenever a cookie or tracking consent banner shows, dismiss it before you do anything else on the
+page: in an `explore`, in each sign-in step as its `dismiss` (the auth skill), and in the tool's
+own code, which dismisses it on every run where it shows. Use the banner's own control, in this
+order: its close or dismiss control, then one that rejects or declines what is not essential, then
+accept, only when that is the only way out. Never click anything else in the banner, such as its
+settings or partner lists. A request that says otherwise about cookies wins. This is only for a
+banner about cookies or tracking, never a marketing prompt or terms the site asks you to accept.
+
+## Safety defaults
+
+Turn safety defaults off, on every tool, a read or a write. A preselected option whose only effect is to
+share the caller's data with another company, such as a partner comparison that opens the search
+on another site, to opt into tracking beyond what the site needs, or to sign the caller up for
+marketing email, is never an input and never a question. The tool turns it off on every run
+before the submit it affects, and reads back that it is off. When the site won't submit with it
+off, leave it on and say so in the description. Name the ones the tool turns off in the
+description in general words, such as "turns off partner comparisons". A repair keeps each one
+the registered source turns off. Never turn one on yourself, in a form or a request body. For a
+consent flag the site sets for the user in a request body, send the value read at run time or
+leave the field out.
+
+Find these boxes where you fill the form, unlabeled ones included. List every checkbox, switch
+and toggle in and near the form by role and by `input[type=checkbox]`, never only by label, with
+its checked state, its nearest text, its group's heading and the alt text or title of any logo
+beside it. A preselected box whose group names another company or shows its logo is a partner
+box. After a probe's first submit, check whether a new tab opened or the page left the site. If
+one did, a box you missed sent it there.
 
 ## Authenticated operations
 
@@ -978,9 +979,8 @@ element learns nothing a count would not. Return `waitReport()` from a probe tha
 
 Supported login challenges during `authenticate` belong to the host's sign-in
 (autofill or an explicit direct HTTP step) and its protected input requests. Generated `operation.run` and `explore` code
-never request or enter a sign-in code, or sign in themselves: an SMS, email or authenticator code
-that is part of signing in is a `code` field of the `authenticate` step (auth skill), never asked
-separately. A code the site sends later, to confirm a protected action after sign-in, is different:
+never request or enter a sign-in code, or sign in themselves: a code that is part of signing in
+belongs to the `authenticate` step (auth skill). A code the site sends later, to confirm a protected action after sign-in, is different:
 declare it as a `secret` question and ask it with `ask`, as the caller-input skill's
 `caller-code.ts` shows. A missing ordinary page
 control alone does not establish a human-verification challenge. Observe the

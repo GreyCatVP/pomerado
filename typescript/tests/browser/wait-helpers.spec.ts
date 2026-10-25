@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "playwright";
+import { chromium as patchright } from "patchright";
 import { Either, Schema } from "effect";
 import { outcomeWaitCode } from "../../src/browser/outcome-wait.js";
 import { waitCode } from "../../src/browser/wait.js";
@@ -829,3 +830,122 @@ for (const sign of ["sentinel", "wrapper"])
     // The sign was there before the click, so it is the page's own: no hold.
     expect(result.ms).toBeLessThan(3000);
   });
+
+// A long results page: `cards` cards whose image wrapper's class names a loader, as many sites mark
+// an image still loading, after a Search button. A click runs `onSearch`, then shows the rooms after
+// `answerMs`. `skipped` puts each card in content the browser skips rendering while off screen.
+const hintedCards = (cards: number, { onSearch = "", answerMs = 300, skipped = false } = {}) => `
+  <button type="button" id="search">Search</button><section id="answer"></section>
+  <main>${`<div class="card"${skipped ? ' style="content-visibility: auto; contain-intrinsic-size: auto 40px"' : ""}><div class="card-image-loader" style="height: 4px"></div><span>Room</span></div>`.repeat(cards)}</main>
+  <script>
+    document.querySelector("#search").onclick = () => {
+      ${onSearch}
+      setTimeout(() => { document.querySelector("#answer").innerHTML = ${JSON.stringify(rooms)}; }, ${answerMs});
+    };
+  </script>`;
+
+// One wait for the rooms after a click on Search. Its locators are plain CSS, which cost little on
+// a long page, so the time it takes is the wait's own.
+const searchWait = async (page: Page, noProgressMs: number): Promise<OutcomeAnswer> => {
+  const answer = await call(
+    page,
+    `const started = Date.now();
+    try {
+      const shown = await waitForOutcome({ results: page.locator("#answer ul") }, {
+        noProgressMs: ${noProgressMs}, timeout: 8000, action: () => page.locator("#search").click(),
+      });
+      return { shown, ms: Date.now() - started, report: waitReport() };
+    } catch (error) {
+      return { reason: error.reason, message: error.message, ms: Date.now() - started };
+    }`,
+  );
+  if (answer.error !== undefined) throw new Error(answer.error);
+  return answer.result as OutcomeAnswer;
+};
+
+/** Runs `use` on a page of a Patchright browser, whose locators evaluate in its isolated world. */
+const onPatchright = async (use: (page: Page) => Promise<void>) => {
+  const browser = await patchright.launch({ headless: true });
+  try {
+    // Patchright's page has Playwright's API, declared by its own copy of Playwright's types.
+    await use((await browser.newPage()) as unknown as Page);
+  } finally {
+    await browser.close();
+  }
+};
+
+// A Patchright locator's count costs time for each element it matches: counting every element whose
+// class names a loader took seconds a look here, before the action and at each look after it.
+test("on Patchright, a page full of elements whose classes name a loader costs each look one page call", async () => {
+  await onPatchright(async (page) => {
+    await page.setContent(hintedCards(400));
+    const answer = await searchWait(page, 3000);
+    expect(answer.shown).toBe("results");
+    expect(answer.ms).toBeLessThan(3000);
+  });
+});
+
+// Among hundreds of decorations from before the action, a skeleton that comes with it is still the
+// page loading: it holds the wait past the no-progress window, and without it the wait ends sooner.
+test("on Patchright, a skeleton that comes with the action holds the wait beside hundreds of decorations", async () => {
+  await onPatchright(async (page) => {
+    const skeleton = `document.querySelector("#answer").innerHTML = '<div class="results-skeleton" style="height: 40px"></div>';`;
+    await page.setContent(hintedCards(400, { onSearch: skeleton, answerMs: 1300 }));
+    const held = await searchWait(page, 800);
+    expect(held, JSON.stringify(held)).toMatchObject({ shown: "results" });
+    expect(held.report?.[0]?.summary).toMatch(/progress seen: loading sign /u);
+    await page.setContent(hintedCards(400, { answerMs: 1300 }));
+    expect((await searchWait(page, 800)).reason).toBe("outcome_unknown");
+  });
+});
+
+// The look's one page call counts what a visible locator match counts: rendered, not hidden, with a
+// box, or with display: contents a child element or text that shows, through open shadow roots. A
+// sign in content the browser skips rendering does not show, and its box is never read: reading it
+// would lay that content out, one element at a time, which took seconds with thousands of them.
+test("a look counts the generic signs as visible matches, never in content the browser skips rendering", async ({
+  page,
+}) => {
+  await page.setContent(`
+    <div class="spinner" style="height: 10px"></div>
+    <div class="results-skeleton" style="height: 10px; visibility: hidden"></div>
+    <div class="loader" style="display: none"></div>
+    <div class="loader-row" style="display: contents"><span style="display: inline-block; width: 10px; height: 10px"></span></div>
+    <div class="loading-spinner" style="display: contents">Loading</div>
+    <div class="spinner" style="height: 0"></div>
+    <x-card></x-card>
+    <div aria-busy="true" style="height: 10px"></div>
+    <div style="content-visibility: auto; contain-intrinsic-size: auto 40px; margin-top: 4000px">
+      <div class="loader" style="height: 10px"></div><div aria-busy="true" style="height: 10px"></div>
+    </div>
+    <script>
+      customElements.define("x-card", class extends HTMLElement {
+        connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = '<div class="shimmer" style="height: 10px"></div>'; }
+      });
+    </script>`);
+  expect(await call(page, `return await page.evaluate(waitSignsInPage, waitSignsSpec);`)).toEqual({
+    result: { signs: 1, classes: 4 },
+  });
+  // Within a region, only what its elements hold, their own shadow roots included.
+  expect(await call(page, `return await page.locator("x-card").evaluateAll(waitSignsInPage, waitSignsSpec);`)).toEqual({
+    result: { signs: 0, classes: 1 },
+  });
+});
+
+// A page whose loaders each take 8 ms to measure: counting all 400 would hold every look for over
+// three seconds, and the page runs one call at a time. A look stops counting class hints after its
+// budget and takes them as unchanged, so the wait still answers at its own pace.
+test("a look that runs out of time counting class hints takes them as unchanged", async ({ page }) => {
+  const slowBoxes = `<script>
+    const box = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      if (String(this.className).includes("loader")) for (const until = performance.now() + 8; performance.now() < until;);
+      return box.call(this);
+    };
+  </script>`;
+  await page.setContent(slowBoxes + hintedCards(400));
+  const answer = await searchWait(page, 3000);
+  expect(answer.shown).toBe("results");
+  expect(answer.ms).toBeLessThan(3000);
+  expect(answer.report?.[0]?.summary).not.toMatch(/loading sign/u);
+});

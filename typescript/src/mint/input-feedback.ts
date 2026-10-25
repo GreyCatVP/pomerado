@@ -13,6 +13,11 @@ export interface MintReviewFeedback {
   readonly rationale: string;
   /** An execution review's label of what the step does on the website; see `GuardianAction`. */
   readonly action?: GuardianAction;
+  /**
+   * An allow's note for the agent, such as a doubt about which page value the request asks for.
+   * It never blocks the step; publication review judges the output.
+   */
+  readonly advice?: string;
 }
 
 /** A build the registry published: its reference and the publication diagnostics it left. */

@@ -78,15 +78,21 @@ export const makeDialogDecider =
 
 /**
  * A build's decider that also keeps, in `accepted`, each confirm the owner accepted that a run
- * could expect, so an act step's accepted confirms can be published with the tool.
+ * could expect, so an act step's accepted confirms can be published with the tool. `input` is the
+ * input the step ran with, whose values a confirm's message may name.
  */
 export const keepingAcceptedConfirms =
-  (decide: DialogDecider, accepted: ObservedConfirm[]): DialogDecider =>
+  (decide: DialogDecider, accepted: ObservedConfirm[], input?: unknown): DialogDecider =>
   (report) =>
     decide(report).pipe(
       Effect.tap((decision) =>
         Effect.sync(() =>
-          keepAcceptedConfirm(accepted, { event: eventOf(report), facts: factsOf(report), decision }),
+          keepAcceptedConfirm(accepted, {
+            event: eventOf(report),
+            facts: factsOf(report),
+            decision,
+            input,
+          }),
         ),
       ),
     );
@@ -112,7 +118,9 @@ export const watchingUnanswered = (ask: InputAsker) => {
 
 /**
  * A run's native dialogs. A write's confirm that its build accepted, with the same message on the
- * same page origin at the same step, is accepted without asking, once per record. Any other
+ * same page origin at the same step, is accepted without asking, once per record. A message that
+ * named a value of the build's input, or the page's record identifier, matches with the run's
+ * `input` values, or the run's page, in their place. Any other
  * confirm in a write's run asks the caller one yes or no question (`askDialogCaller`), showing
  * the message as `project` leaves it. Every other dialog, a read run's confirms included, gets the
  * safe default without a question. A confirm whose question's window ends unanswered is
@@ -125,6 +133,8 @@ export const makeRunDialogDecider = (input: {
   /** A read tool accepts nothing from the record. */
   readonly readOnly: boolean;
   readonly expectedConfirms?: readonly ExpectedConfirm[] | undefined;
+  /** The run's input. */
+  readonly input?: unknown;
   readonly incidents: IncidentStore;
 }): DialogDecider => {
   // The owner's cancel is a choice to stop, never a question left unanswered.
@@ -141,6 +151,7 @@ export const makeRunDialogDecider = (input: {
   const decide = makeRunDialogDecision({
     readOnly: input.readOnly,
     expectedConfirms: input.expectedConfirms,
+    input: input.input,
     askCaller: (report: Parameters<DialogDecider>[0] & { readonly candidateActionId: string }) =>
       askDialogCaller(ask, { type: report.type, message: input.project(report.message) }).pipe(
         Effect.catchIf(

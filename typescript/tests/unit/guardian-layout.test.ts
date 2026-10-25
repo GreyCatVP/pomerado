@@ -24,6 +24,7 @@ import type {
 import { makeSourceInspector } from "../../src/guardian/source.js";
 import type { ModelObserverFactory } from "../../src/models/model-observer.js";
 import type { ModelDiagnosticTiming } from "../../src/models/model-diagnostic-timing.js";
+import { conversationOf, instructionsOf } from "../support/guardian-requests.js";
 
 afterEach(() => setDefaultModelProvider(new OpenAIProvider()));
 
@@ -129,7 +130,7 @@ const prefixHash = (request: ModelRequest) =>
   createHash("sha256")
     .update(
       JSON.stringify({
-        instructions: request.systemInstructions,
+        instructions: instructionsOf(request),
         tools: request.tools,
         outputType: request.outputType,
         modelSettings: request.modelSettings,
@@ -265,7 +266,7 @@ it("keeps instructions, tools and output format identical across all six review 
   });
 });
 
-it("sends a build's request once, in the instructions every review of the build shares", async () => {
+it("sends a build's request once, after the instructions every build shares", async () => {
   const build = async (screenedIntent: string) => {
     const requests = scripted([
       [allow],
@@ -320,24 +321,28 @@ it("sends a build's request once, in the instructions every review of the build 
   const first = await build(tables);
   const second = await build(hours);
 
-  // Every review of the build, a compaction included, sends the request in the same
-  // instructions, so the provider keeps them in the cached prefix.
+  // Every review of the build, a compaction included, starts with the same two developer
+  // messages: the instructions every build shares, then the build's own with its request. The
+  // provider keeps both in the cached prefix, and a compaction leaves them in place.
   expect(first).toHaveLength(5);
   expect(new Set(first.map(prefixHash)).size).toBe(1);
-  const instructions = first[0]?.systemInstructions ?? "";
-  expect(instructions).toContain(JSON.stringify(tables));
+  const leading = (request: ModelRequest | undefined) =>
+    (Array.isArray(request?.input) ? request.input : []).slice(0, 2);
+  for (const request of first) expect(leading(request)).toEqual(leading(first[0]));
+  expect(conversationOf(first[3])[0]).toMatchObject({ type: "compaction" });
+  const [shared, own] = leading(first[0]);
+  expect(JSON.stringify(own)).toContain(
+    JSON.stringify(`trusted_request: ${JSON.stringify({ intent: tables })}`).slice(1, -1),
+  );
   // No review message repeats it, so the conversation carries it once.
-  for (const request of first) expect(JSON.stringify(request.input)).not.toContain("tell callers");
-  // Another build's request changes only its own text, after the shared policy, so the policy
-  // stays one cached prefix across builds.
-  const other = second[0]?.systemInstructions ?? "";
-  expect(other).not.toContain("tell callers");
-  expect(instructions.slice(0, instructions.indexOf(JSON.stringify(tables)))).toBe(
-    other.slice(0, other.indexOf(JSON.stringify(hours))),
-  );
-  expect(instructions.replace(JSON.stringify(tables), "")).toBe(
-    other.replace(JSON.stringify(hours), ""),
-  );
+  for (const request of first)
+    expect(JSON.stringify(conversationOf(request))).not.toContain("tell callers");
+  // Another build sends the shared instructions byte for byte, so every build reads them from
+  // the cache, and only its own message differs.
+  const [otherShared, otherOwn] = leading(second[0]);
+  expect(JSON.stringify(otherShared)).toBe(JSON.stringify(shared));
+  expect(JSON.stringify(shared)).not.toContain("tell callers");
+  expect(JSON.stringify(otherOwn)).not.toContain("tell callers");
 });
 
 it("refuses an outcome the review kind may not return", async () => {
@@ -922,7 +927,7 @@ it.each([false, true])(
     // in the private review leaves only its final output after the compacted context.
     const sent = JSON.stringify(requests[1]?.input);
     expect(sent).toContain("synthetic-private-rationale-marker");
-    if (compacted) expect(requests[1]?.input[0]).toMatchObject({ type: "compaction" });
+    if (compacted) expect(conversationOf(requests[1])[0]).toMatchObject({ type: "compaction" });
     else {
       expect(sent).toContain("synthetic-private-evidence-marker");
       expect(requests[1]?.input.slice(0, requests[0]?.input.length)).toEqual(requests[0]?.input);

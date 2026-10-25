@@ -495,7 +495,6 @@ export const makeRunSignIn = (
     keyboard: browser.keyboard,
     siteOrigin,
     authenticationOrigins,
-    onRequest: browser.onRequest,
     typing: session.signInTyping,
   });
   const login = { login: localSignInLogin({ ask: asks.ask, register: secrets.register, siteOrigin }) };

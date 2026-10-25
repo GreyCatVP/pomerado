@@ -21,13 +21,148 @@ const normalizedMessage = (message: string) =>
   message.normalize("NFC").replace(/\s+/gu, " ").trim();
 
 /**
- * A confirm popup as the host saw it: its normalized message, page origin and generated step.
- * Host-only and never stored; a revision keeps only its digest.
+ * A run's value, or the page's record identifier, that a confirm's message names. The digest
+ * keeps where it came from, never the value: `input/<JSON pointer>` for a value of the run's
+ * input, `page/path/<index>` or `page/query/<name>` for a part of the page's URL.
+ */
+type Slot = readonly [source: string, value: string];
+
+/**
+ * A confirm's message with each value it names replaced by the sorted sources that hold it,
+ * page text between. Host-only: the digest of it is what a revision keeps.
+ */
+export type ConfirmTemplate = readonly (string | readonly string[])[];
+
+/** A record identifier holds a digit, such as an order number or a generated name. */
+const identifierPattern = /\p{N}/u;
+/** A query value such as "50.00" or "1,200" is an amount the site set, not a record. */
+const amountPattern = /^[\p{N}\s]*[.,][\p{N}.,\s]*$/u;
+
+/**
+ * The shortest value that becomes a slot: two characters when it holds a digit, such as "12",
+ * three otherwise. A shorter value stays page text, so "1", "a" or a code such as "OR" never
+ * turns a word or number the site wrote into a placeholder.
+ */
+const slotValueMinimum = (value: string) => (identifierPattern.test(value) ? 2 : 3);
+/** A value shorter than this matches only in its own letter case, so "Can" never matches "can". */
+const foldedValueMinimum = 4;
+/** How many values of a run's input a confirm's template reads, in order. */
+const inputSlotLimit = 256;
+const inputDepthLimit = 16;
+
+const pointerToken = (key: string) => key.replaceAll("~", "~0").replaceAll("/", "~1");
+
+/** The run's string and number values, each named by its JSON pointer. */
+const inputSlots = (input: unknown): Slot[] => {
+  const slots: Slot[] = [];
+  const visit = (value: unknown, pointer: string, depth: number) => {
+    if (slots.length >= inputSlotLimit) return;
+    if (typeof value === "string") slots.push([`input${pointer}`, value]);
+    else if (typeof value === "number" && Number.isFinite(value))
+      slots.push([`input${pointer}`, String(value)]);
+    else if (depth < inputDepthLimit && Array.isArray(value))
+      value.forEach((item, index) => visit(item, `${pointer}/${index}`, depth + 1));
+    else if (depth < inputDepthLimit && typeof value === "object" && value !== null)
+      for (const [key, item] of Object.entries(value))
+        visit(item, `${pointer}/${pointerToken(key)}`, depth + 1);
+  };
+  visit(input, "", 0);
+  return slots;
+};
+
+const decoded = (part: string) => {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
+};
+
+/** The page URL's path segments and query values that look like the record it shows. */
+const pageSlots = (url: URL): Slot[] => {
+  const slots: Slot[] = [];
+  url.pathname.split("/").forEach((segment, index) => {
+    const value = decoded(segment);
+    if (identifierPattern.test(value)) slots.push([`page/path/${index}`, value]);
+  });
+  const named = new Set<string>();
+  for (const [name, value] of url.searchParams) {
+    if (named.has(name)) continue;
+    named.add(name);
+    if (identifierPattern.test(value) && !amountPattern.test(value))
+      slots.push([`page/query/${encodeURIComponent(name)}`, value]);
+  }
+  return slots;
+};
+
+const wordCharacter = /[\p{L}\p{M}\p{N}_]/u;
+const escapedPattern = (value: string) => value.replace(/[\\^$.*+?()[\]{}|/]/gu, "\\$&");
+/** A value matches only as a whole token: never inside a longer word or number. */
+const tokenPattern = (value: string, folded: boolean) => {
+  const characters = [...value];
+  return (
+    `${wordCharacter.test(characters.at(0) ?? "") ? "(?<![\\p{L}\\p{M}\\p{N}_])" : ""}` +
+    (folded ? `(?i:${escapedPattern(value)})` : escapedPattern(value)) +
+    `${wordCharacter.test(characters.at(-1) ?? "") ? "(?![\\p{L}\\p{M}\\p{N}_])" : ""}`
+  );
+};
+
+/**
+ * The message with each whole-token occurrence of a slot's value replaced by the sources that
+ * hold it, longest value first, or undefined when it names none. Values are normalized as the
+ * message is, and one of four or more characters matches in any letter case.
+ */
+const confirmTemplate = (message: string, slots: readonly Slot[]): ConfirmTemplate | undefined => {
+  const groups = new Map<
+    string,
+    { readonly value: string; readonly folded: boolean; readonly sources: Set<string> }
+  >();
+  for (const [source, raw] of slots) {
+    // Whitespace collapses, but never a value far longer than any message to a short one.
+    if (raw.length > messageLimit * 4) continue;
+    const value = normalizedMessage(raw);
+    if (value.length < slotValueMinimum(value) || value.length > message.length) continue;
+    const folded = value.length >= foldedValueMinimum;
+    const key = folded ? `folded:${value.toLowerCase()}` : `exact:${value}`;
+    const group = groups.get(key) ?? { value, folded, sources: new Set<string>() };
+    group.sources.add(source);
+    groups.set(key, group);
+  }
+  const ordered = [...groups.entries()]
+    .sort(([left, a], [right, b]) => b.value.length - a.value.length || (left < right ? -1 : 1))
+    .map(([, group]) => ({
+      value: group.value,
+      folded: group.folded,
+      sources: [...group.sources].sort(),
+    }));
+  if (ordered.length === 0) return undefined;
+  const pattern = new RegExp(
+    ordered.map(({ value, folded }) => `(${tokenPattern(value, folded)})`).join("|"),
+    "gu",
+  );
+  const template: (string | readonly string[])[] = [];
+  let end = 0;
+  for (const match of message.matchAll(pattern)) {
+    const slot = ordered[match.slice(1).findIndex((group) => group !== undefined)];
+    if (slot === undefined) continue;
+    template.push(message.slice(end, match.index), slot.sources);
+    end = match.index + match[0].length;
+  }
+  if (template.length === 0) return undefined;
+  template.push(message.slice(end));
+  return template;
+};
+
+/**
+ * A confirm popup as the host saw it: its normalized message, page origin and generated step,
+ * and, when the message names a value of the run's input or the page's record identifier, its
+ * `template`. Host-only and never stored; a revision keeps only its digest.
  */
 export interface ObservedConfirm {
   readonly message: string;
   readonly origin: string;
   readonly step: string;
+  readonly template?: ConfirmTemplate;
 }
 
 /**
@@ -42,11 +177,14 @@ export interface DialogEvent {
 /**
  * The popup a confirm is, or undefined when it cannot be expected: not a confirm, raised outside
  * a generated action (so no step is known), on a page that is not https, or with a message empty
- * or too long to keep. Such a popup is never expected, so a run always asks about it.
+ * or too long to keep. Such a popup is never expected, so a run always asks about it. `input` is
+ * the input the execution that raised it ran with: a message that names one of its values, or an
+ * identifier in the page's URL, gets a `template`, so a run about another record can match it.
  */
 export const observedConfirmOf = (
   event: DialogEvent,
   facts: DialogFacts,
+  input?: unknown,
 ): ObservedConfirm | undefined => {
   const step = event.candidateActionId;
   if (event.type !== "confirm" || step === null || !stepPattern.test(step)) return undefined;
@@ -54,37 +192,61 @@ export const observedConfirmOf = (
   if (url?.protocol !== "https:") return undefined;
   const message = normalizedMessage(facts.message);
   if (message.length === 0 || message.length > messageLimit) return undefined;
-  return { message, origin: url.origin, step };
+  const template = confirmTemplate(message, [...inputSlots(input), ...pageSlots(url)]);
+  return {
+    message,
+    origin: url.origin,
+    step,
+    ...(template === undefined ? {} : { template }),
+  };
 };
 
+const digestOf = (tuple: readonly unknown[]) =>
+  createHash("sha256").update(JSON.stringify(tuple)).digest("hex");
+
 /**
- * The record a revision keeps of an accepted popup: a SHA-256 digest of its normalized message,
- * page origin and step, so the shared revision holds no page text. Matching is exact, so a digest
- * matches exactly the popups the full record would.
+ * The record a revision keeps of an accepted popup: a SHA-256 digest, so the shared revision
+ * holds no page text. A popup that names no value keeps the digest of its normalized message,
+ * page origin and step. One whose message names a value of its execution's input or the page's
+ * record identifier keeps the digest of its template instead, each value replaced by where it
+ * came from, so a run matches it only when the same wording names that run's own values from
+ * the same places. Matching is exact otherwise.
  */
 export const expectedConfirmDigest = (popup: ObservedConfirm): ExpectedConfirm => ({
-  digest: createHash("sha256")
-    .update(
-      JSON.stringify(["pomerado.expected_confirm.v1", popup.message, popup.origin, popup.step]),
-    )
-    .digest("hex"),
+  digest:
+    popup.template === undefined
+      ? digestOf(["pomerado.expected_confirm.v1", popup.message, popup.origin, popup.step])
+      : digestOf(["pomerado.expected_confirm.v2", popup.template, popup.origin, popup.step]),
 });
 
 /**
- * One browser's pool of expected confirms. Each record the mint kept accepts one matching popup
- * (the same message, page origin and step), so a popup the mint saw once is accepted once.
+ * The digests a run's popup matches: its template's, when it has one, then its exact message's,
+ * which a record of a popup that named no value, or one published before templates, holds.
  */
-export const makeExpectedConfirms = (records: readonly ExpectedConfirm[]) => {
+const candidateDigests = (popup: ObservedConfirm) => {
+  const { template, ...exact } = popup;
+  const digests = [expectedConfirmDigest(exact).digest];
+  return template === undefined ? digests : [expectedConfirmDigest(popup).digest, ...digests];
+};
+
+/**
+ * One browser's pool of expected confirms. Each record the mint kept accepts one matching popup
+ * (the same message, page origin and step, with the run's own `input` values in place of the
+ * build's), so a popup the mint saw once is accepted once.
+ */
+export const makeExpectedConfirms = (records: readonly ExpectedConfirm[], input?: unknown) => {
   const remaining = records.map((record) => record.digest);
   return {
     take: (event: DialogEvent, facts: DialogFacts) => {
-      const observed = observedConfirmOf(event, facts);
+      const observed = observedConfirmOf(event, facts, input);
       if (observed === undefined) return undefined;
-      const { digest } = expectedConfirmDigest(observed);
-      const index = remaining.indexOf(digest);
-      if (index < 0) return undefined;
-      remaining.splice(index, 1);
-      return { digest };
+      for (const digest of candidateDigests(observed)) {
+        const index = remaining.indexOf(digest);
+        if (index < 0) continue;
+        remaining.splice(index, 1);
+        return { digest };
+      }
+      return undefined;
     },
   };
 };
@@ -92,7 +254,8 @@ export const makeExpectedConfirms = (records: readonly ExpectedConfirm[]) => {
 /**
  * Keeps a confirm popup the current live execution accepted, host-only, in `live`. A write
  * example's become digests in its revision's expected confirms, which its runs accept without
- * asking. It never throws, so it never changes a dialog's resolution.
+ * asking. `input` is the input the execution ran with, so a confirm that names one of its values
+ * is kept as a template. It never throws, so it never changes a dialog's resolution.
  */
 export const keepAcceptedConfirm = (
   live: ObservedConfirm[],
@@ -100,10 +263,11 @@ export const keepAcceptedConfirm = (
     readonly event: DialogEvent;
     readonly facts: DialogFacts;
     readonly decision: DialogChoice;
+    readonly input?: unknown;
   },
 ) => {
   if (resolution.decision.choice !== "accept" || live.length >= expectedConfirmLimit) return;
-  const confirm = observedConfirmOf(resolution.event, resolution.facts);
+  const confirm = observedConfirmOf(resolution.event, resolution.facts, resolution.input);
   if (confirm !== undefined) live.push(confirm);
 };
 
@@ -185,37 +349,52 @@ const defaultChoice = (type: DialogType): DialogChoice =>
 
 /**
  * A published run's native dialogs. A write tool's `confirm` that its mint accepted (the same
- * message, page origin and step, `expectedConfirms`) is accepted and recorded. Any other write
+ * message, page origin and step, `expectedConfirms`, with the run's own `input` values in place
+ * of the build's) is accepted and recorded. Any other write
  * `confirm` goes to the caller, when live input is configured: confirming belongs to the action
  * the caller asked for. A tool published before the mint kept that record has none, so its
  * confirms keep asking. Every other dialog is decided at once by the safe default and recorded,
  * so a page alert never becomes a long caller decision, unless the host asks the caller about
  * every dialog the record does not settle (`askEveryDialog`).
+ *
+ * A host may judge a write `confirm` that matched no record before the caller is asked
+ * (`judgeConfirm`), such as one whose wording first appears in this run. It gets the popup as
+ * observed, its `template` naming where each of this run's values came from, and answers
+ * `accept`, which accepts and records it, or `ask`. A judgment that fails or dies counts as
+ * `ask`. A popup that cannot be expected, because no step is known or its page is not https, is
+ * never judged. The popup's message is the page's own text, unmasked: a host that sends it
+ * anywhere screens it first. The host bounds the judgment's time itself.
  */
 export const makeRunDialogDecision = <Event extends DialogEvent>(input: {
   readonly readOnly: boolean;
   /** The confirms the published write's mint accepted. */
   readonly expectedConfirms?: readonly ExpectedConfirm[] | undefined;
+  /** The run's input, whose values a recorded confirm's message may name. */
+  readonly input?: unknown;
   readonly askCaller?: (event: Event) => Effect.Effect<DialogChoice, DialogFailure>;
+  /** Judges a write's confirm that matched no record, before the caller is asked. */
+  readonly judgeConfirm?: (
+    event: Event,
+    confirm: ObservedConfirm,
+  ) => Effect.Effect<"accept" | "ask", unknown>;
   readonly incidents: IncidentStore;
   readonly askEveryDialog?: boolean;
 }) => {
-  const expected = makeExpectedConfirms(input.expectedConfirms ?? []);
-  return (event: Event, facts: DialogFacts): Effect.Effect<DialogChoice, DialogFailure> => {
-    if (event.type === "confirm" && !input.readOnly) {
-      if (expected.take(event, facts) !== undefined)
-        return input.incidents
-          .record({
-            source: "host",
-            kind: "dialog",
-            reason: "dialog_expected_confirm_accepted",
-            hostBug: false,
-            severity: "info",
-            subCause: "confirm_accept",
-          })
-          .pipe(Effect.as<DialogChoice>({ choice: "accept" }));
-      if (input.askCaller) return input.askCaller(event);
-    }
+  const expected = makeExpectedConfirms(input.expectedConfirms ?? [], input.input);
+  const accepted = (reason: "dialog_expected_confirm_accepted" | "dialog_judged_confirm_accepted") =>
+    input.incidents
+      .record({
+        source: "host",
+        kind: "dialog",
+        reason,
+        hostBug: false,
+        severity: "info",
+        subCause: "confirm_accept",
+      })
+      .pipe(Effect.as<DialogChoice>({ choice: "accept" }));
+  const unexpected = (event: Event) =>
+    input.askCaller ? input.askCaller(event) : settled(event);
+  const settled = (event: Event) => {
     if (input.askEveryDialog === true && input.askCaller) return input.askCaller(event);
     const choice = defaultChoice(event.type);
     return input.incidents
@@ -228,6 +407,22 @@ export const makeRunDialogDecision = <Event extends DialogEvent>(input: {
         subCause: `${event.type}_${choice.choice}`,
       })
       .pipe(Effect.as(choice));
+  };
+  return (event: Event, facts: DialogFacts): Effect.Effect<DialogChoice, DialogFailure> => {
+    if (event.type !== "confirm" || input.readOnly) return settled(event);
+    if (expected.take(event, facts) !== undefined)
+      return accepted("dialog_expected_confirm_accepted");
+    const judge = input.judgeConfirm;
+    const observed = judge === undefined ? undefined : observedConfirmOf(event, facts, input.input);
+    if (judge === undefined || observed === undefined) return unexpected(event);
+    return Effect.suspend(() => judge(event, observed)).pipe(
+      Effect.catchAllCause(() => Effect.succeed("ask" as const)),
+      Effect.flatMap((verdict) =>
+        verdict === "accept"
+          ? accepted("dialog_judged_confirm_accepted")
+          : unexpected(event),
+      ),
+    );
   };
 };
 

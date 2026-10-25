@@ -160,10 +160,14 @@ const publishJournal = journalState.pipe(
   Effect.flatMap((metadata) => send({ kind: "journal", ...metadata })),
   Effect.orDie,
 );
+const revertCommit = baseJournal.notCommitted;
 const journal: typeof baseJournal = {
   ...baseJournal,
   enteringDispatch: baseJournal.enteringDispatch.pipe(Effect.tap(() => publishJournal)),
   enteringCommit: (name) => baseJournal.enteringCommit(name).pipe(Effect.tap(() => publishJournal)),
+  ...(revertCommit === undefined
+    ? {}
+    : { notCommitted: (name: string) => revertCommit(name).pipe(Effect.tap(() => publishJournal)) }),
   confirmed: (confirmation) =>
     baseJournal.confirmed(confirmation).pipe(Effect.tap(() => publishJournal)),
   verified: baseJournal.verified.pipe(Effect.tap(() => publishJournal)),

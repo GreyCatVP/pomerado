@@ -114,27 +114,64 @@ const reviewAll = (options: Omit<GuardianModelOptions, "executionEnvironment">) 
   );
 };
 
-it("sends each review at the reasoning effort its host picks, on one model and one session", async () => {
-  const bodies = wire();
-  const usage = await reviewAll({
-    specialize: (turn) =>
-      turn.pending.screenedInput === quick.screenedInput ? { reasoningEffort: "low" } : {},
-  });
+type WireItem = { readonly type?: string; readonly role?: string; readonly reasoning?: unknown };
+const itemsOf = (body: Record<string, unknown> | undefined) =>
+  (body?.["input"] ?? []) as readonly WireItem[];
 
-  expect(bodies.map((body) => body.model)).toEqual([lunaModel, lunaModel, lunaModel]);
-  expect(bodies.map((body) => (body.reasoning as { effort?: string }).effort)).toEqual([
-    "medium",
-    "low",
-    "medium",
+it("changes a review's reasoning effort with a configuration update, keeping the request's own and its prefix", async () => {
+  const bodies = wire();
+  const efforts = { "{}": undefined, '{"quick":true}': "low" } as const;
+  const { diagnostics, usage } = recording();
+  const guardian = makeGuardian(
+    makeOpenAIReviewer("Synthetic policy {{ tenant_policy_config }}", false, {
+      executionEnvironment: nativeExecutionEnvironment,
+      specialize: (turn) => {
+        const effort = efforts[turn.pending.screenedInput as keyof typeof efforts];
+        return effort === undefined ? {} : { reasoningEffort: effort };
+      },
+    }),
+    diagnostics,
+    {},
+  );
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      for (const review of [pending, quick, quick, pending, pending])
+        yield* guardian.review(review, readCurrent);
+    }),
+  );
+
+  expect(bodies.map((body) => body.model)).toEqual(Array(5).fill(lunaModel));
+  // The request's own effort never changes, so its hidden instructions and cached prefix hold.
+  expect(bodies.map((body) => (body.reasoning as { effort?: string }).effort)).toEqual(
+    Array(5).fill("medium"),
+  );
+  // Each request continues the one before it byte for byte: only items are appended.
+  for (let index = 1; index < bodies.length; index++) {
+    const before = itemsOf(bodies[index - 1]);
+    expect(JSON.stringify(itemsOf(bodies[index]).slice(0, before.length))).toBe(
+      JSON.stringify(before),
+    );
+  }
+  // A configuration update comes right before the request of a review whose effort differs
+  // from the conversation's, and only then: low for the first quick review, medium again after.
+  const last = itemsOf(bodies.at(-1));
+  const updates = last.flatMap((item, index) =>
+    item.type === "configuration_update" ? [{ index, item }] : [],
+  );
+  expect(updates.map(({ item }) => item.reasoning)).toEqual([
+    { effort: "low" },
+    { effort: "medium" },
   ]);
-  // The later reviews continue the same conversation.
-  const requests = (bodies[2]?.input as { role?: string }[]).filter((item) => item.role === "user");
-  expect(requests).toHaveLength(3);
-  expect(usage).toEqual([
-    expect.objectContaining({ details: expect.objectContaining({ reasoningEffort: "medium" }) }),
-    expect.objectContaining({ details: expect.objectContaining({ reasoningEffort: "low" }) }),
-    expect.objectContaining({ details: expect.objectContaining({ reasoningEffort: "medium" }) }),
-  ]);
+  for (const { index } of updates) expect(last[index + 1]?.role).toBe("user");
+  const requests = last.filter((item) => item.role === "user");
+  expect(requests).toHaveLength(5);
+  // The updates precede the second and the fourth review's requests.
+  expect(updates.map(({ index }) => requests.indexOf(last[index + 1] ?? {}))).toEqual([1, 3]);
+  expect(usage).toEqual(
+    ["medium", "low", "low", "medium", "medium"].map((reasoningEffort) =>
+      expect.objectContaining({ details: expect.objectContaining({ reasoningEffort }) }),
+    ),
+  );
 });
 
 it("reviews at medium effort when the host picks none", async () => {

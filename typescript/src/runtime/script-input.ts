@@ -54,6 +54,12 @@ export const ScriptQuestionDeclaration = Schema.Union(
     secretKind: SecretQuestion.fields.secretKind,
     maxLength: SecretQuestion.fields.maxLength,
   }),
+  /**
+   * A required field the site's form adds that no input covers. It has no prompt of its own: each
+   * ask passes the field's label from the page, and its options when it is a select, so it is asked
+   * as a text question or a choice and never as any other kind.
+   */
+  Schema.Struct({ type: Schema.Literal("site_field") }),
   // The pre-unification shape, `{ prompt }`, kept for published revisions: a single choice.
   Schema.Struct({ prompt: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(500)) }),
 );
@@ -97,9 +103,13 @@ export const ScriptOption = Schema.Struct({
 });
 export type ScriptOption = typeof ScriptOption.Type;
 
-/** A question asked now: choices carry the page's options; nothing else carries any. */
+/**
+ * A question asked now: choices carry the page's options; nothing else carries any. A site field
+ * carries its label from the page, with options when it is a select.
+ */
 interface AskSpec {
   readonly options?: ReadonlyArray<ScriptOption>;
+  readonly label?: string;
 }
 
 /** What `ask` returns for one question, by its declaration. */
@@ -121,17 +131,23 @@ export type ScriptAnswer =
   | readonly string[]
   | { readonly confirmed: boolean; readonly text?: string };
 
-/** What each asked question needs at ask time: the page's options for a choice, else nothing. */
-export type AskSpecOf<Declaration> = Declaration extends {
-  readonly type: "text" | "secret" | "confirm";
-}
-  ? { readonly options?: never }
-  : { readonly options: ReadonlyArray<ScriptOption> };
+/**
+ * What each asked question needs at ask time: the page's options for a choice, a site field's
+ * label and any options from the page, else nothing.
+ */
+export type AskSpecOf<Declaration> = Declaration extends { readonly type: "site_field" }
+  ? { readonly label: string; readonly options?: ReadonlyArray<ScriptOption> }
+  : Declaration extends {
+        readonly type: "text" | "secret" | "confirm";
+      }
+    ? { readonly options?: never }
+    : { readonly options: ReadonlyArray<ScriptOption> };
 
 /**
  * `NoResponse`: the caller did not answer in time, and the run fails as `no_response`.
  * `Undeclared`: an id the contract does not declare. `InvalidOptions`: options missing for a
- * choice, given for another type, duplicated, too many, or selection bounds they cannot meet.
+ * choice, given for another type, duplicated, too many, or selection bounds they cannot meet, or a
+ * site field's label missing, empty or given for another type.
  * The others mean the question could not be asked or its answer could not be used.
  *
  * `message`, when set, names the declared question, the option that stopped it by its number
@@ -194,8 +210,11 @@ type GivenSpec = AskSpec | ReadonlyArray<ScriptOption>;
 /** The pre-unification call passed a choice's options directly. */
 const isOptionList = (spec: GivenSpec): spec is ReadonlyArray<ScriptOption> => Array.isArray(spec);
 
-/** The longest label the host takes (`InputOption`), in UTF-16 code units as it counts them. */
-const longestLabel = 256;
+/**
+ * The longest label the host takes (`InputOption`), and the longest site-field prompt, in UTF-16
+ * code units as it counts them.
+ */
+export const longestLabel = 256;
 /**
  * A label the host can show: one past `longestLabel` keeps its start and ends in "…". The cut
  * never splits a surrogate pair, so the start may be one code unit shorter. Options that read
@@ -241,6 +260,10 @@ const askedQuestion = (
   spec: GivenSpec,
 ): Either.Either<Asked, ScriptInputFailure> => {
   const given = isOptionList(spec) ? spec : spec.options;
+  const label = isOptionList(spec) ? undefined : spec.label;
+  // Only a site field takes a label from the page; every other prompt is the declared one.
+  if (label !== undefined && !("type" in declaration && declaration.type === "site_field"))
+    return Either.left(invalidOptions());
   /** A question that takes no options; giving any is a mistake. */
   const plain = (question: Question) =>
     given === undefined
@@ -303,6 +326,19 @@ const askedQuestion = (
         },
         values,
       }));
+    case "site_field": {
+      const prompt = shownLabel(typeof label === "string" ? label.trim() : "");
+      if (prompt === "") return Either.left(invalidOptions());
+      if (given === undefined)
+        return Either.right({
+          question: { id, type: "text" as const, prompt },
+          values: new Map<string, string>(),
+        });
+      return Either.map(offeredOptions(id, given), ({ values, offered }) => ({
+        question: { id, type: "choice" as const, prompt, options: offered },
+        values,
+      }));
+    }
   }
 };
 
@@ -342,7 +378,8 @@ const isIdList = (input: AskInput): input is ReadonlyArray<string> => Array.isAr
  * Asks the caller at any point of a run. The run waits with its browser open, its active budget
  * paused, and continues in place with the answer. `ask("id")` returns that question's answer;
  * `ask(["a", "b"])` and `ask({ seat: { options }, code: {} })` return one per id. A choice's
- * options come from the page at ask time; no other question takes any.
+ * options come from the page at ask time; no other question takes any, except a site field, which
+ * takes its label and, for a select, its options: `ask({ extra: { label, options } })`.
  */
 export const makeScriptInput = (
   declared: ScriptQuestionDeclarations | undefined,

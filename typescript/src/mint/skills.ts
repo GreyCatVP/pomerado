@@ -5,7 +5,12 @@ import { readScopedFile } from "../filesystem/read.js";
 import { MintFailure } from "./contracts.js";
 import { failureDetail } from "../runtime/failure-detail.js";
 import { hostedFeaturesPreamble } from "../hosted-features.js";
-import { publicationLiveTestsPolicy, publicationOutputPolicy } from "../guardian/publication.js";
+import {
+  publicationLiveTestsPolicy,
+  publicationOutputPolicy,
+  publicationWriteOutcomePolicy,
+  publicationWritePathPolicy,
+} from "../guardian/publication.js";
 
 const catalog = [
   {
@@ -33,20 +38,22 @@ const catalog = [
   {
     name: "testing",
     description:
-      "For a read: design a few combined live test cases and run them. A read signed out runs a handful; a signed-in read runs one combined filter case, two at most. A write skips it and proves its tool with one run",
+      "For a read: design a few combined live test cases and run them. A read signed out runs a handful; a signed-in read runs four inputs at most. A write skips it and proves its tool with one run",
     references: [],
   },
   {
     name: "pagination",
     description:
       "Read before settling the schema of any tool that returns a list: page size, the cursor, numbered pages, next links, load more, infinite scroll, the site's own list API, changed lists and when to stop",
-    references: ["pagination.ts"],
+    references: ["pagination.ts", "pager.ts"],
   },
   {
     name: "forms",
     description: "Native/custom selection, resolvers, staged forms and expected terms",
     references: [
       "dates-and-dropdowns.ts",
+      "picker.ts",
+      "picker-first.ts",
       "custom-selection.ts",
       "dialog-picker.ts",
       "dates-and-files.ts",
@@ -88,15 +95,20 @@ const catalog = [
 const workspaceGuideFiles = [{ path: "README.md", sectionKey: "guide" }] as const;
 
 /**
- * The publication review's rules for live tests and output, installed in the workspace for the
- * minter to read while it explores, so it gathers that evidence before its first publication
- * instead of learning it from a denial. It is the text every host's publication policy includes,
- * not a copy, so a change to a rule reaches the minter in the same release. No host render
- * applies: it is not authoring text.
+ * The publication review's rules for live tests, output and a write's outcome and path, installed
+ * in the workspace for the minter to read while it explores, so it gathers that evidence, and
+ * declares a write's whole path, before its first publication or write step instead of learning
+ * them from a denial. It is the text every host's publication policy includes, not a copy, so a
+ * change to a rule reaches the minter in the same release. No host render applies: it is not
+ * authoring text.
  */
 const publicationReviewRules = {
   path: "reference/publication-review.md",
-  text: [publicationLiveTestsPolicy, publicationOutputPolicy].join("\n\n"),
+  text: [
+    publicationLiveTestsPolicy,
+    publicationOutputPolicy,
+    `${publicationWriteOutcomePolicy} ${publicationWritePathPolicy}`,
+  ].join("\n\n"),
 } as const;
 
 export interface WorkspaceGuide {

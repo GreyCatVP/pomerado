@@ -6,7 +6,8 @@ export { DialogChoice, DialogFailure, DialogType } from "../../runtime/dialogs.j
  * the same write accepts the same popup at the same step without asking.
  * The revision is shared, so it keeps only a SHA-256 digest of the popup's normalized message,
  * page origin and generated step, never the page's own text (`expectedConfirmDigest` in
- * `expected.ts`).
+ * `expected.ts`). A message that names a value of the step's input or the page's record
+ * identifier is digested with each such value replaced by where it came from.
  */
 export const ExpectedConfirm = Schema.Struct({
   digest: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),

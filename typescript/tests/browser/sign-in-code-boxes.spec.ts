@@ -1,10 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { Request } from "playwright";
 import { Effect } from "effect";
 import { localSignInLogin, makeSignInBrowser } from "../../src/standalone/authentication.js";
 import { makeInputAsker } from "../../src/inputs/callback.js";
 import { makeRunSecrets } from "../../src/inputs/secrets.js";
-import type { SignInRequest } from "../../src/destinations/sign-in-recipe.js";
 import { signInForRun } from "../../src/runtime/sign-in-replay.js";
 import { expectNotCarried, hostKeyboard, hostPage } from "./autofill-host-page.js";
 
@@ -110,23 +108,6 @@ const recipe = {
   signedIn: { selector: "#account" },
 } as const;
 
-/** Each request `page` sends, as the executor reports it, until the returned function stops it. */
-const pageRequests = (page: Page) => (listener: (request: SignInRequest) => void) => {
-  const heard = (request: Request) => {
-    const document = request.isNavigationRequest();
-    listener({
-      url: request.url(),
-      method: request.method(),
-      body: request.postData(),
-      channel: document ? "navigation" : "http",
-      ...(document ? { frame: request.frame() === page.mainFrame() ? "main" : "sub" } : {}),
-      resourceType: request.resourceType(),
-    });
-  };
-  page.on("request", heard);
-  return () => page.off("request", heard);
-};
-
 /**
  * One run's sign-in with the recipe, answering each code ask with the next of `codes`, and every
  * ask after those with the last, as an owner asked again for the code just given would.
@@ -160,7 +141,6 @@ const run = async (
           keyboard,
           siteOrigin: site,
           authenticationOrigins: [],
-          onRequest: pageRequests(page),
           typing: { typed: false },
         }),
         login: localSignInLogin({ ask, register: secrets.register, siteOrigin: site }),

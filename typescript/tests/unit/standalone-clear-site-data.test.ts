@@ -88,7 +88,6 @@ it("clears only the site's own cookies and storage, and leaves the tab blank", a
     keyboard: { insertText: () => Effect.die("The test types nothing") },
     siteOrigin: "https://app.example.com",
     authenticationOrigins: [],
-    onRequest: () => () => {},
     typing: { typed: false },
   });
   await Effect.runPromise(signIn.clearSiteData?.() ?? Effect.die("No clearSiteData"));

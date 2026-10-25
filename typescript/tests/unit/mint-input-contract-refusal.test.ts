@@ -65,9 +65,44 @@ const decisionLog = () => {
 
 // The maintainer approved this instruction word for word, so any edit to it fails here first.
 it("keeps the approved input contract instruction word for word", () => {
-  expect(inputContractChangedInstruction).toBe(
-    "This publication changes inputs the published tool already declares, and a requested change may only add new optional inputs. brokenInputs names each one and how it changed. Restore each named input as the published tool declares it, keep every new input optional, run the example again with the edited code, and call finish_build with that execution.",
+  const common =
+    "Not published and not reviewed: this publication would refuse values that inputs the published tool already declares accept today, so calls that work now would stop working. brokenInputs names each one and how it changed. A requested change may add optional inputs, widen what an input accepts or add a default, and may narrow an input only to a limit the site itself states, such as its own maxlength or allowed range; it never removes an input or makes one required. Restore each named input so it accepts at least what the published tool's does, up to such a limit, keep every new input optional, ";
+  expect(inputContractChangedInstruction(false)).toBe(
+    `${common}run the example again with the edited code, and call finish_build with that execution.`,
   );
+  expect(inputContractChangedInstruction(true)).toBe(
+    `${common}and call finish_build again with the same executionId; never run the write again for this.`,
+  );
+});
+
+// A write never runs again to fix its inputs: it restores them in the source and publishes its
+// session's execution again, which the host records as a source correction.
+it("tells a write refused for its inputs to publish the same execution, never running the write again", async () => {
+  const { recorded, publicationDecisions } = decisionLog();
+  const answers: Record<string, unknown>[] = [];
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        yield* turn.actions.execute({ ...example, purpose: "act" });
+        answers.push(JSON.parse(yield* turn.actions.finish(publicationOf("execution_one"))));
+      }),
+    {
+      publicationDecisions,
+      publish: () => Effect.fail(refusal("input_contract_changed", { brokenInputs: broken })),
+    },
+  );
+  await f.run({ ...request, effect: "write" });
+  expect(answers[0]).toMatchObject({
+    status: "not_published",
+    reason: "input_contract_changed",
+    brokenInputs: broken,
+  });
+  const instruction = String(answers[0]?.["instruction"]);
+  expect(instruction.endsWith(inputContractChangedInstruction(true))).toBe(true);
+  expect(recorded[0]).toMatchObject({
+    reason: "input_contract_changed",
+    recovery: "correct_source",
+  });
 });
 
 it("hands the minter a host's input contract refusal as exactly the fixed instruction and brokenInputs", async () => {
@@ -102,7 +137,7 @@ it("hands the minter a host's input contract refusal as exactly the fixed instru
     reason: "input_contract_changed",
     brokenInputs: broken,
     userInputRequired: false,
-    instruction: notice + inputContractChangedInstruction,
+    instruction: notice + inputContractChangedInstruction(false),
     decisionId: expect.any(String),
   });
 });
@@ -215,7 +250,7 @@ it("keeps the existing contract refusals as they were beside the input contract 
     [answers[1], mismatch],
   ] as const) {
     expect(answer).not.toHaveProperty("brokenInputs");
-    expect(instruction).not.toContain(inputContractChangedInstruction);
+    expect(instruction).not.toContain(inputContractChangedInstruction(false));
   }
-  expect(changed?.endsWith(inputContractChangedInstruction)).toBe(true);
+  expect(changed?.endsWith(inputContractChangedInstruction(false))).toBe(true);
 });

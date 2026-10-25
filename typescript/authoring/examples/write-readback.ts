@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { defineOperation, timeoutDefaults } from "../../src/browser/index.js";
+import { confirmCommitCode, defineOperation, timeoutDefaults, waitCode } from "../../src/browser/index.js";
 
 const SavedTask = Schema.Struct({
   id: Schema.NonEmptyTrimmedString.annotations({ description: "ID the site gave the saved task" }),
@@ -54,6 +54,7 @@ export default defineOperation(
     const answer = await kernel.browsers.playwright.execute(sessionId, {
       timeout_sec: timeoutSec,
       code: `
+        ${waitCode}
         // On the site: any https host on the host's site domain, else the site origin alone.
         const siteDomain = ${JSON.stringify(siteDomain ?? null)};
         const onSite = (url) => siteDomain === null ? url.origin === ${JSON.stringify(siteOrigin)}
@@ -76,24 +77,35 @@ export default defineOperation(
           return { failure: "form_changed" };
         await form.getByLabel("Title", { exact: true }).fill(title, { timeout: actionTimeout(${timeoutDefaults.action}) });
         await form.getByLabel("Assignee", { exact: true }).fill(assignee, { timeout: actionTimeout(${timeoutDefaults.action}) });
+        // Notes the page's messages and flagged fields once the form is filled, just before the
+        // click, so confirmCommit below counts only what the save adds.
+        ${confirmCommitCode}
         const available = timeLeft();
         if (available <= 2000) return { failure: "not_submitted" };
-        // Wait for the save response in the same call as the click that sends it. A detail
-        // page that was already open cannot supply this receipt.
-        // The response wait outlives the click. Settle both even on failure so a
-        // pending write click cannot fire after this call reports failure.
-        const [receipt, submission] = await Promise.allSettled([
-          page.waitForResponse((response) => {
-            const request = response.request();
-            const fields = new URLSearchParams(request.postData() ?? "");
-            return request.method() === "POST" && request.url() === current.origin + "/tasks" &&
-              fields.get("title") === title && fields.get("assignee") === assignee;
-          }, { timeout: Math.min(35000, available) }),
-          form.getByRole("button", { name: "Create task", exact: true }).click({ noWaitAfter: true, timeout: Math.min(${timeoutDefaults.answerCap}, available - 1000) }),
-        ]);
-        if (submission.status === "rejected") throw submission.reason;
-        if (receipt.status === "rejected") throw receipt.reason;
-        const response = receipt.value;
+        // Race the save response against the form's own refusal, in the same call as the click
+        // that sends it: the wait listens before it clicks, runs the click once, and removes its
+        // listeners when one answer wins. A detail page that was already open cannot supply this
+        // receipt. The click settles inside the wait, so a pending write click cannot fire after
+        // this call reports failure.
+        const answer = await waitForOutcomeResult({
+          invalid: { invalid: form },
+          saved: {
+            response: (response) => {
+              const request = response.request();
+              const fields = new URLSearchParams(request.postData() ?? "");
+              return request.method() === "POST" && request.url() === current.origin + "/tasks" &&
+                fields.get("title") === title && fields.get("assignee") === assignee;
+            },
+          },
+        }, {
+          action: () => form.getByRole("button", { name: "Create task", exact: true }).click({ noWaitAfter: true, timeout: Math.min(${timeoutDefaults.answerCap}, available - 1000) }),
+          siteDomain: siteDomain ?? undefined,
+          deadline: callDeadline,
+        });
+        // A field the form marked invalid stopped the save, or answered it: never resubmit.
+        if (answer.outcome === "invalid") return { failure: "not_saved" };
+        if ((await confirmCommit(answer, page)).state !== "done") return { failure: "not_saved" };
+        const response = answer.response;
         const posted = new URL(response.url());
         const location = new URL(response.headers()["location"] ?? "", posted);
         const id = location.pathname.startsWith("/tasks/") ? location.pathname.slice("/tasks/".length) : "";

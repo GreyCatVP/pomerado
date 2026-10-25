@@ -149,6 +149,8 @@ export const makeMintContinuationFixture = <
       readonly siteOrigin?: string;
       readonly mode?: "mint" | "maintenance";
       readonly observations?: unknown;
+      readonly intent?: string;
+      readonly businessInput?: unknown;
     } = {},
     limits?: Parameters<typeof makeOpenAIMinter>[2],
   ) {

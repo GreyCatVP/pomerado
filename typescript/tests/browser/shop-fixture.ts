@@ -15,6 +15,14 @@ const products = storeProducts
   .filter((item) => item.department === "home")
   .map(({ id, name, priceMinor }) => ({ id, name, priceMinor }));
 export const shopAccount = { username: "ada@example.test", password: "correct-horse-battery-9" };
+/**
+ * The accounts the team sign-in, `/team-sign-in`, takes, by their team: it sends each account on
+ * to its own team's password screen, `/team/<team>/password`.
+ */
+export const teamAccounts = {
+  a: shopAccount,
+  b: { username: "dana@example.test", password: "river-lamp-quiet-4" },
+} as const;
 /** The code the shop asks for after the one-screen sign-in, when `loginCode` is set. */
 export const shopCode = "482913";
 /** How many help links the two-screen sign-in's password screen shows besides its 4 controls. */
@@ -103,6 +111,14 @@ interface ShopState extends StoreState {
    * the next once it holds a digit, as such widgets do.
    */
   codeBoxes: number;
+  /**
+   * How each code box takes one character: `maxlength` by its `maxlength="1"`, `script` by the
+   * widget's own script, as many one-time-code widgets do. A `script` box is a `tel` input with no
+   * `maxlength`, drawn see-through over its digit; the widget keeps one character in each box,
+   * spreads a code typed or pasted into one box across it and the boxes after it, and keeps the
+   * whole code in a hidden field beside the boxes.
+   */
+  codeBoxLimit: "maxlength" | "script";
   /** The code the code screen takes: `shopCode`, or a longer one split across more boxes. */
   code: string;
   /**
@@ -132,6 +148,15 @@ interface ShopState extends StoreState {
   statements: string[];
   /** Each load of `/statements`: the page asked for and whether the browser was signed in. */
   statementLoads: { readonly page: number; readonly signedIn: boolean }[];
+  /** The team of each account the team sign-in signed in, in order. */
+  teamSignIns: string[];
+  /**
+   * How many redirects the two-screen sign-in's session post goes through before the account page,
+   * each answered `sessionHopMs` after it arrives, as a slow network makes a sign-in's redirects
+   * after the site answered its post. 0 sends the post straight on to the account page.
+   */
+  sessionHops: number;
+  sessionHopMs: number;
 }
 
 export interface Shop {
@@ -319,20 +344,48 @@ fetch('/api/products?q='+encodeURIComponent(new URLSearchParams(location.search)
   // code shows the form again under the error.
   const codeBoxes = () =>
     Array.from({ length: state.codeBoxes }, (_, at) => at + 1);
-  const codeForm = () =>
-    state.codeBoxes > 0
-      ? `<form method="post" action="/two-factor"><p>Enter the code we sent you</p><div class="code">${codeBoxes()
-          .map(
-            (box) =>
-              `<input id="code-${box}" name="code-${box}" maxlength="1" inputmode="numeric" aria-label="Digit ${box} of ${state.codeBoxes}"${box === 1 ? ' autocomplete="one-time-code"' : ""}>`,
-          )
-          .join("")}</div><button>Verify</button></form>
+  const maxlengthBoxes = () =>
+    `<form method="post" action="/two-factor"><p>Enter the code we sent you</p><div class="code">${codeBoxes()
+      .map(
+        (box) =>
+          `<input id="code-${box}" name="code-${box}" maxlength="1" inputmode="numeric" aria-label="Digit ${box} of ${state.codeBoxes}"${box === 1 ? ' autocomplete="one-time-code"' : ""}>`,
+      )
+      .join("")}</div><button>Verify</button></form>
 <script>
 const boxes = [...document.querySelectorAll(".code input")];
 boxes.forEach((box, at) => box.addEventListener("input", () => {
   if (box.value !== "" && boxes[at + 1]) boxes[at + 1].focus();
 }));
-</script>`
+</script>`;
+  const scriptBoxes = () =>
+    `<style>.code{position:relative;display:flex;gap:4px}.code input{width:32px;height:40px;opacity:0;margin:0;padding:0;border:0}.drawn{position:absolute;inset:0;display:flex;gap:4px;pointer-events:none}.drawn span{width:32px;height:40px;border:1px solid #888;box-sizing:border-box;text-align:center;line-height:40px}</style>
+<form method="post" action="/two-factor"><p>Enter the code we sent you</p><div class="code"><input type="hidden" name="code">${codeBoxes()
+      .map(
+        (box) =>
+          `<input id="code-${box}" name="code-${box}" type="tel" class="digit" inputmode="numeric" autocomplete="one-time-code" aria-label="Digit ${box} of ${state.codeBoxes}">`,
+      )
+      .join("")}<div class="drawn" aria-hidden="true">${codeBoxes()
+      .map(() => "<span></span>")
+      .join("")}</div></div><button>Verify</button></form>
+<script>
+const boxes = [...document.querySelectorAll(".code input.digit")];
+const drawn = [...document.querySelectorAll(".drawn span")];
+const whole = document.querySelector('.code input[type="hidden"]');
+boxes.forEach((box, at) => box.addEventListener("input", () => {
+  const typed = box.value.replace(/[^0-9]/g, "");
+  const spread = typed.length > 1 ? [...typed].slice(0, boxes.length - at) : [typed.slice(-1)];
+  spread.forEach((digit, offset) => { boxes[at + offset].value = digit; });
+  const next = boxes[at + spread.length];
+  if (typed !== "") (next ?? boxes[at + spread.length - 1]).focus();
+  boxes.forEach((each, index) => { drawn[index].textContent = each.value; });
+  whole.value = boxes.map((each) => each.value).join("");
+}));
+</script>`;
+  const codeForm = () =>
+    state.codeBoxes > 0
+      ? state.codeBoxLimit === "maxlength"
+        ? maxlengthBoxes()
+        : scriptBoxes()
       : `<form method="post" action="/two-factor"><label>Code<input name="code" autocomplete="one-time-code"></label>${state.codeSubmitsOnEnter ? "" : "<button>Verify</button>"}</form>`;
   const twoFactor: Route = async (request, response) => {
     if (request.method !== "POST") {
@@ -472,6 +525,46 @@ ${next === null ? "" : `<a rel="next" href="${next}">Next</a>`}`,
     const form = new URLSearchParams(await readBody(request));
     if (form.get("user") !== shopAccount.username || form.get("password") !== shopAccount.password)
       return html(response, "<title>Password</title><p id='wrong-password'>Wrong password</p>");
+    response.writeHead(state.sessionHops > 0 ? 302 : 303, {
+      location: state.sessionHops > 0 ? `/sign-in/continue?hop=1` : "/account",
+      "set-cookie": [`shop_session=${signedIn}; Path=/; Secure; HttpOnly; SameSite=Lax`],
+    });
+    response.end();
+  };
+  // Each redirect after the session post, while `sessionHops` asks for them.
+  const sessionHop: Route = async (request, response) => {
+    const hop = Number(queryOf(request).get("hop") ?? 0);
+    await new Promise((resolve) => setTimeout(resolve, state.sessionHopMs));
+    response.writeHead(302, {
+      location: hop < state.sessionHops ? `/sign-in/continue?hop=${hop + 1}` : "/account",
+    });
+    response.end();
+  };
+  // The team sign-in's identifier screen, which sends a known account on to its team's password
+  // screen, and that screen, which signs in its team's account.
+  const teamSignIn: Route = async (request, response) => {
+    if (request.method !== "POST")
+      return html(
+        response,
+        `<title>Sign in</title><form method="post" action="/team-sign-in"><label>Email<input id="username" name="username" type="email" autocomplete="username"></label><button id="next">Next</button></form>`,
+      );
+    const username = new URLSearchParams(await readBody(request)).get("username");
+    const team = Object.entries(teamAccounts).find(([, account]) => account.username === username);
+    if (team === undefined) return html(response, "<title>Sign in</title><p>No such account</p>");
+    response.writeHead(303, { location: `/team/${team[0]}/password` });
+    response.end();
+  };
+  const teamPassword: Route = async (request, response) => {
+    const team = new URL(request.url ?? "/", "https://www.shop.test").pathname.split("/")[2] ?? "";
+    if (request.method !== "POST")
+      return html(
+        response,
+        `<title>Password</title><form method="post"><label>Password<input id="password" name="password" type="password" autocomplete="current-password"></label><button id="sign-in">Sign in</button></form>`,
+      );
+    const password = new URLSearchParams(await readBody(request)).get("password");
+    if (Object.entries(teamAccounts).every(([at, account]) => at !== team || account.password !== password))
+      return html(response, "<title>Password</title><p id='wrong-password'>Wrong password</p>");
+    state.teamSignIns.push(team);
     response.writeHead(303, {
       location: "/account",
       "set-cookie": [`shop_session=${signedIn}; Path=/; Secure; HttpOnly; SameSite=Lax`],
@@ -615,6 +708,9 @@ ${next === null ? "" : `<a rel="next" href="${next}">Next</a>`}`,
     ["/sign-in", identifierScreen],
     ["/sign-in/password", passwordScreen],
     ["/sign-in/session", postOnly(passwordSession)],
+    ["/sign-in/continue", sessionHop],
+    ["/team-sign-in", teamSignIn],
+    ["/team/*/password", teamPassword],
     ["/search", search],
     ["/api/products", productsApi],
     ["/api/cart", postOnly(cart)],
@@ -684,6 +780,7 @@ export const startShop = async (directory: string): Promise<Shop> => {
     loginCode: false,
     codeSubmitsOnEnter: false,
     codeBoxes: 0,
+    codeBoxLimit: "maxlength",
     code: shopCode,
     signedInLogin: "form",
     workspaceChooser: false,
@@ -691,6 +788,9 @@ export const startShop = async (directory: string): Promise<Shop> => {
     signOutOn: undefined,
     statements: Array.from({ length: 45 }, (_, index) => `S${index + 1}`),
     statementLoads: [],
+    teamSignIns: [],
+    sessionHops: 0,
+    sessionHopMs: 0,
     ...initialStoreState(),
   };
   const sessionValue = `sess-${randomBytes(12).toString("hex")}`;
@@ -721,7 +821,8 @@ export const startShop = async (directory: string): Promise<Shop> => {
             "",
           );
         }
-        await (routes.get(url.pathname) ?? notFound)(request, response);
+        const route = url.pathname.replace(/^\/team\/[^/]+\/password$/u, "/team/*/password");
+        await (routes.get(route) ?? notFound)(request, response);
       })().catch(() => {
         response.destroy();
       });

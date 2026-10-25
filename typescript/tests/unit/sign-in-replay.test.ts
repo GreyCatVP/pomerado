@@ -6,7 +6,7 @@ import type {
   AutofillStep,
   AutofillStepReport,
 } from "../../src/destinations/autofill-step.js";
-import type { SignInRecipe, SignInRequest } from "../../src/destinations/sign-in-recipe.js";
+import type { SignInRecipe } from "../../src/destinations/sign-in-recipe.js";
 import { makeInputAsker } from "../../src/inputs/callback.js";
 import { makeRunSecrets } from "../../src/inputs/secrets.js";
 import {
@@ -54,8 +54,6 @@ interface SiteOptions {
   readonly questions?: string[];
   /** The login screen sits on another origin of the site than the recipe recorded. */
   readonly loginOrigin?: string;
-  /** The page's requests carry nothing: a fill sends no request the host hears. */
-  readonly silent?: boolean;
   /** The login screen shows `#username-error` after a wrong username. */
   readonly usernameMarker?: boolean;
   /** The entry page fails to load. */
@@ -118,7 +116,6 @@ const fakeSite = (options: SiteOptions = {}) => {
   };
   const fills: { readonly page: Page; readonly values: readonly string[] }[] = [];
   const opened: string[] = [];
-  const listeners = new Set<(request: SignInRequest) => void>();
   const pageOrigin = (page: Page) =>
     page === "login"
       ? (options.loginOrigin ?? origin)
@@ -227,15 +224,6 @@ const fakeSite = (options: SiteOptions = {}) => {
             submit: "failed",
             url: `${origin}/${page}`,
           };
-        const request: SignInRequest = {
-          url: `${pageOrigin(page)}/${page}`,
-          method: "POST",
-          body: new URLSearchParams(values.map((value, index) => [`field${index}`, value])).toString(),
-          channel: "navigation",
-          frame: "main",
-          resourceType: "document",
-        };
-        if (options.silent !== true) for (const listener of [...listeners]) listener(request);
         if (page === "login") {
           const right = values[0] === account.username && values[1] === account.password;
           state.loginError = !right && options.marker === true;
@@ -267,10 +255,6 @@ const fakeSite = (options: SiteOptions = {}) => {
         const onSite = new URL(at).hostname.endsWith(site);
         return { signedIn: false, failed: onSite ? "indicator_not_visible" : "off_site", url };
       }),
-    onRequest: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
     authenticationOrigins: options.authenticationOrigins ?? [],
     open: (url) =>
       options.entryFails === true
@@ -289,7 +273,7 @@ const fakeSite = (options: SiteOptions = {}) => {
           (selector === "#code-error" && state.page === "code" && state.codeError),
       ),
   };
-  return { browser, state, fills, opened, listening: () => listeners.size };
+  return { browser, state, fills, opened };
 };
 
 const loginStep = {
@@ -385,7 +369,6 @@ it("checks without values first and asks nothing when the session is already sig
   expect(asked).toEqual([]);
   expect(fake.fills).toEqual([]);
   expect(fake.opened).toEqual([`${origin}/login`]);
-  expect(fake.listening()).toBe(0);
 });
 
 it("asks one login question once the check finds the sign-in screen, then replays with it", async () => {
@@ -395,9 +378,8 @@ it("asks one login question once the check finds the sign-in screen, then replay
   expect(kinds(asked)).toEqual(["credential:missing_credentials"]);
   expect(asked[0]?.questions[0]).toMatchObject({ type: "credential", allowSave: false, siteOrigin: origin });
   expect(fake.fills).toEqual([{ page: "login", values: [account.username, account.password] }]);
-  // The check and the replay each open the entry page, and nothing listens afterwards.
+  // The check and the replay each open the entry page.
   expect(fake.opened).toHaveLength(2);
-  expect(fake.listening()).toBe(0);
 });
 
 it("corrects a rejected password without sending it again, asking again for a correction that repeats it", async () => {
@@ -657,7 +639,7 @@ it("fails RecipeFailed when a recorded screen shows on another origin than the r
 });
 
 it.each([
-  ["an unknown version", { ...recipeOf(), version: 6 }, "unknown_version"],
+  ["an unknown version", { ...recipeOf(), version: 8 }, "unknown_version"],
   ["a recipe without steps", { ...recipeOf(), steps: [] }, "invalid"],
 ])("refuses %s with MissingRecipe before opening anything", async (_case, recipe, reason) => {
   const fake = fakeSite();
@@ -738,15 +720,6 @@ it("never fills a password the login screen rejected before a later screen, even
     "code",
   ]);
   expect(loginFills(fake).map((values) => values[1])).toEqual([wrong.password, account.password]);
-});
-
-it("counts a sign-in whose submit was clicked after its fill, though no request the page sent carried the values", async () => {
-  const fake = fakeSite({ silent: true });
-  const { ask, asked } = owner();
-  expect(await signIn(recipeOf(), fake, ask)).toEqual(Either.right({ alreadySignedIn: false }));
-  // The click sent the login: what the page's requests carried no longer decides.
-  expect(fake.state.signedIn).toBe(true);
-  expect(kinds(asked)).toEqual(["credential:missing_credentials"]);
 });
 
 it("never fills a username its recorded marker rejected, even when a correction repeats it", async () => {

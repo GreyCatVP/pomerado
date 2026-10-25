@@ -220,3 +220,49 @@ describe("a script question that can't be asked", () => {
     }
   });
 });
+
+describe("a site-field question's label", () => {
+  const declared: ScriptQuestionDeclarations = {
+    extra: { type: "site_field" },
+    pick: { type: "choice", prompt: "Which entry?" },
+  };
+  /** What the script input sends for `asked`, or why it sent nothing. */
+  const sent = (asked: Parameters<ReturnType<typeof makeScriptInput>["ask"]>[0]) => {
+    const requests: InputRequest[] = [];
+    const result = Effect.runSync(
+      Effect.either(
+        makeScriptInput(declared, (request) =>
+          Effect.sync(() => {
+            requests.push(request);
+            const [question] = request.questions;
+            return { extra: question?.type === "choice" ? (question.options[0]?.id ?? "") : "J.D." };
+          }),
+        ).ask(asked),
+      ),
+    );
+    return { result, question: requests[0]?.questions[0] };
+  };
+
+  it("asks the page's label as the prompt and returns the answer, or the picked option's value", () => {
+    expect(sent({ extra: { label: "  Engraving text " } })).toEqual({
+      result: Either.right({ extra: "J.D." }),
+      question: { id: "extra", type: "text", prompt: "Engraving text" },
+    });
+    const { result } = sent({ extra: { label: "Engraving", options: [{ value: "initials-value", label: "Initials" }] } });
+    expect(result).toEqual(Either.right({ extra: "initials-value" }));
+  });
+
+  it("shortens a label over 256 characters, as it does an option's", () => {
+    const label = "Engraving detail ".repeat(20);
+    expect(sent({ extra: { label } }).question?.prompt).toBe(`${label.slice(0, 255)}…`);
+  });
+
+  it("refuses a missing or empty label, and a label on a question that is not a site field", () => {
+    const refused = Either.left(expect.objectContaining({ code: "InvalidOptions" }));
+    expect(sent("extra").result).toEqual(refused);
+    expect(sent({ extra: { label: "   " } }).result).toEqual(refused);
+    expect(
+      sent({ pick: { label: "Engraving", options: [{ value: "a", label: "A" }] } as never }).result,
+    ).toEqual(refused);
+  });
+});

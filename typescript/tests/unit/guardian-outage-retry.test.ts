@@ -1,9 +1,9 @@
 import { OpenAIProvider, setDefaultModelProvider } from "@openai/agents";
-import { Effect, Fiber, TestClock, TestContext } from "effect";
+import { Chunk, Effect, Fiber, Option, TestClock, TestContext } from "effect";
 import { afterEach, expect, it, vi } from "vitest";
 import { makeOpenAIReviewer } from "../../src/guardian/openai.js";
 import { nativeExecutionEnvironment } from "../../src/guardian/execution-policy.js";
-import { ReviewFailure, makeGuardian } from "../../src/guardian/review.js";
+import { ReviewFailure, guardianOutageRetry, makeGuardian } from "../../src/guardian/review.js";
 import type {
   GuardianDiagnostics,
   PendingExecution,
@@ -413,4 +413,83 @@ it("reports the provider's spent quota from Guardian's own model call, without r
   } finally {
     setDefaultModelProvider(new OpenAIProvider());
   }
+});
+
+/**
+ * Runs `effect` on the test clock, moving the clock to each wait it schedules once the review is
+ * parked in it, so the production retry's waits pass without real time.
+ */
+const onTestClock = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const fiber = yield* Effect.fork(effect);
+      for (;;) {
+        if (Option.isSome(yield* Fiber.poll(fiber))) return yield* Fiber.join(fiber);
+        const wake = Chunk.head(yield* TestClock.sleeps());
+        if (Option.isSome(wake)) yield* TestClock.setTime(wake.value);
+        else yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 1)));
+      }
+    }).pipe(Effect.provide(TestContext.TestContext)),
+  );
+
+/** Guardian's own model call failing every time with the provider's error `providerError`. */
+const failingModelReview = async (providerError: () => Error) => {
+  let calls = 0;
+  const retried: unknown[] = [];
+  const record: GuardianDiagnostics["emit"] = (name, details) =>
+    Effect.sync(() => {
+      if (name === "guardian.review_retried") retried.push(details);
+    });
+  setDefaultModelProvider({
+    getModel: () => ({
+      getResponse: () => {
+        calls++;
+        return Promise.reject(providerError());
+      },
+      getStreamedResponse: () => {
+        throw new Error("Unused stream");
+      },
+    }),
+  });
+  try {
+    const result = await onTestClock(
+      Effect.either(
+        makeGuardian(
+          {
+            ...makeOpenAIReviewer("{{ tenant_policy_config }}", false, native),
+            retry: guardianOutageRetry,
+          },
+          { emit: record, retainModelTranscript: record, retainScreenedSource: () => Effect.void },
+        ).review(pending, readSource),
+      ),
+    );
+    return { result, calls, retried };
+  } finally {
+    setDefaultModelProvider(new OpenAIProvider());
+  }
+};
+
+/** A provider's server error, as its SDK raises it, with the provider's own `code`. */
+const serverError = (code: string) =>
+  Object.assign(new Error(`500 Synthetic provider failure (${code})`), {
+    name: "InternalServerError",
+    status: 500,
+    code,
+  });
+
+it("fails a review over the model's context window once, without reviewing again", async () => {
+  const review = await failingModelReview(() => serverError("context_length_exceeded"));
+  expect(review.result).toMatchObject({ _tag: "Left", left: { code: "InputTooLarge" } });
+  // The request is over the model's input limit, so the outage retry neither waits nor sends it
+  // again.
+  expect(review.calls).toBe(1);
+  expect(review.retried).toEqual([]);
+});
+
+it("still reviews again after any other provider error, within the outage budget", async () => {
+  const review = await failingModelReview(() => serverError("server_error"));
+  expect(review.result).toMatchObject({ _tag: "Left", left: { code: "Unavailable" } });
+  // Attempts at 0, 2, 7, 22, 52, 112, 172, 232 and 292 seconds; one more would pass 5 minutes.
+  expect(review.calls).toBe(9);
+  expect(review.retried).toHaveLength(8);
 });

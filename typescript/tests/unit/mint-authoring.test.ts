@@ -18,6 +18,8 @@ import {
   guardianPublicationPolicy,
   publicationLiveTestsPolicy,
   publicationOutputPolicy,
+  publicationWriteOutcomePolicy,
+  publicationWritePathPolicy,
 } from "../../src/guardian/publication.js";
 import { inputFeedbackInstruction } from "../../src/mint/input-feedback.js";
 import {
@@ -27,6 +29,7 @@ import {
 } from "../../src/mint/skills.js";
 import { ExecutionContext, makeEffectJournal } from "../../src/runtime/context.js";
 import { Deadline } from "../../src/runtime/deadline.js";
+import { readBackMatches, sameText } from "../../src/runtime/text.js";
 import { offlineKernel } from "../support/offline-kernel.js";
 import { executeKernelOperation } from "../../src/runtime/kernel-operation-run.js";
 import { runLocalOperation } from "../../src/execution/local-operation.js";
@@ -129,9 +132,14 @@ const contents = (skills: readonly SkillDescriptor[]) =>
  * it gathers that evidence before its first publication instead of learning it from a denial. The
  * file is the text the review reads, so a policy change reaches the minter in the same release.
  */
-it("installs the publication review's test and output rules for the minter", async () => {
-  const rules = `${publicationLiveTestsPolicy}\n\n${publicationOutputPolicy}`;
-  for (const part of [publicationLiveTestsPolicy, publicationOutputPolicy])
+it("installs the publication review's test, output and write path rules for the minter", async () => {
+  const rules = `${publicationLiveTestsPolicy}\n\n${publicationOutputPolicy}\n\n${publicationWriteOutcomePolicy} ${publicationWritePathPolicy}`;
+  for (const part of [
+    publicationLiveTestsPolicy,
+    publicationOutputPolicy,
+    publicationWriteOutcomePolicy,
+    publicationWritePathPolicy,
+  ])
     expect(guardianPublicationPolicy).toContain(part);
   const root = await authoringCopy((_path, text) => composeHostText(text));
   try {
@@ -209,7 +217,7 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   ["core", "- The code works for every value the schema accepts."],
   [
     "core",
-    "- Match the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name, such as a name with or without its accents (Abaca for Abacá), a city alone or with its state and country, or a company with or without Ltd. or Inc. Never require an exact match. When more than one option matches, list them for the caller instead of picking one.",
+    "- Match the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name, such as a name with or without its accents (Abaca for Abacá), a city alone or with its state and country, or a company with or without Ltd. or Inc. Never require an exact match. `sameText` from `pomerado/runtime` matches a name that differs only in case, accents, spacing, apostrophes, periods, commas or hyphens, or in a word the site writes short, such as St-Jean for Saint-Jean, but not one with a word added or dropped. Prefer it for confirming the pick, so the read-back agrees with the choice, but not for choosing from a list, where a short label can match a longer name it isn't, such as UK for Ukraine. When more than one option matches equally, decide per tool: take the first in the site's order and return the one it used, as the site labels it, or list them for the caller to choose one, each selecting exactly one.",
   ],
   ["core", "Take the site origin from the context's `siteOrigin`."],
   ["core", "The tools and the files you may edit are in `AGENTS.md`."],
@@ -294,6 +302,12 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
     "publication",
     "## Check before `finish_build` Before your first `finish_build`, prefer checking the tool against each rule the request states for its inputs, outputs and refusals.",
   ],
+  // Most extra publication rounds were defects the builder could find in its own source, so before
+  // every call, not only the first, it checks its fields, returns, caller values and live cases.
+  [
+    "publication",
+    "Before each `finish_build`, the first and every later one, prefer one pass over your own source with four questions: for each output field, which line fills it and whether its description says where that value comes from; for each branch that returns, whether it returns every required field with values read on this run; for each value the caller gave or answered through `ask`, whether the output labels it as caller input; and whether any live test case still ends failed or flaky on the source you publish. Fix what this finds before you call.",
+  ],
   [
     "publication",
     "- Published files are all of `src/`, the named entrypoints and any `explore/`, `test/` or `scratch/` module they import",
@@ -306,6 +320,14 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
     "Without a no-results answer, move on: it needs no `notTested` entry and no question;",
   ],
   ["publication", "and untested (such as a later page or another layout, live)."],
+  // A part of the output that only some inputs show, such as a date a record has only in one
+  // state, may have no case that shows it, and the owner may have no input that does either. A
+  // build that asked the owner for one and got none ended with no tool, so the publication skill
+  // prefers listing that part as not tested and leaving it out of the description.
+  [
+    "publication",
+    "When a claimed part of the output only appears for some inputs and no case you can run shows it, prefer listing it in `notTested` with the reason and leaving it out of the description. Prefer that over asking the owner for evidence they may not have.",
+  ],
   [
     "publication",
     "| `reason` | `input_feedback_unresolved` | The feedback rounds are spent | End the attempt; do not execute again |",
@@ -380,7 +402,7 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   // types into the box again.
   [
     "core",
-    "After a step that reloads the page, such as choosing a city, prefer typing into the search box again when its suggestions don't appear.",
+    "After a step that reloads the page, such as choosing a city, prefer typing into the search box again when its suggestions still don't appear after the wait that passed the typing as `action`.",
   ],
   // A preselected option that only shares the caller's data, tracks or signs up for marketing is
   // turned off on every run, with no input and no question.
@@ -388,7 +410,7 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   // An obvious refusal settles the caller's run at once; one from the tool's own empty read never
   // claims to be obvious.
   [
-    "core",
+    "caller-input",
     'When the refusal is obvious, start the message with "Caller input error:" so the caller gets it at once.',
   ],
   // A record whose name differs from the caller's only in case or in a usual form of the same name
@@ -402,6 +424,13 @@ const sharedGuidance: readonly (readonly [string, string])[] = [
   [
     "workspace/AGENTS.md",
     "A build can't ask for a file. When the task needs one the request doesn't carry, say so in report_blocked, naming the file the owner should attach when they build again.",
+  ],
+  // The host takes `owner_declined` only after a confirm answered no, and a confirm asked after
+  // the owner picked a stop option repeats their answer, so a plain go-on-or-stop decision is
+  // asked as a confirm. Going on with a changed task still needs an option pick or their words.
+  [
+    "workspace/AGENTS.md",
+    "When the owner decides only whether to go on as asked or stop, prefer a `confirm` question whose no stops the build over a stop option in a `choice` question, so you can end it as `owner_declined` on their no.",
   ],
 ];
 
@@ -431,6 +460,23 @@ const renderedTexts = async (directory: string, render?: (text: string) => strin
   for (const [path, text] of guide.files) texts.set(`workspace/${path}`, text);
   return texts;
 };
+
+/*
+ * A step that lost its result may have entered a mark of the recorded write path, so the
+ * publication skill's row for an unfinished path asks for the read-back first and never for that
+ * step again.
+ */
+it("never tells the minter to run a write path's step that may have committed again", async () => {
+  const publication = (await renderedTexts("typescript/authoring")).get("publication") ?? "";
+  const row = publication
+    .split("\n")
+    .find((line) => line.includes("`write_path_unfinished`"))
+    ?.replace(/\s+/g, " ");
+  expect(row).toContain(
+    "Read back first where a receipt says so; run only steps that never ran, or declare a revised path when the site skips one; never redo one that finished or may have.",
+  );
+  expect(row).not.toMatch(/Run the steps `writePathMarks` names/);
+});
 
 it("gives the local host and a composing host the same shared guidance", async () => {
   // A host that composes empty text into every section keeps only what is shared.
@@ -524,6 +570,42 @@ it("names the local host's own status for a run's uncertain write", async () => 
     const composed = ((await renderedTexts(root)).get("writes") ?? "").replace(/\s+/g, " ");
     expect(composed).toContain("returns `OTHER-STATUS` with any unconfirmed result");
     expect(composed).toContain("An `unverifiable` write reports `OTHER-STATUS` too");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/*
+ * When a write's declared refusal completes a run is the host's own rule, so the writes skill's
+ * declared-refusal sentences and the publication review's refusal check are host sections. Their
+ * standalone text is the local host's rule, unchanged, and a composing host replaces each one.
+ */
+it("lets a host replace when a write's declared refusal completes the run", async () => {
+  const text = (texts: Map<string, string>, name: string) =>
+    (texts.get(name) ?? "").replace(/\s+/g, " ");
+  const local = await renderedTexts("typescript/authoring");
+  expect(text(local, "writes")).toContain(
+    'with those choices. Before any commit mark is entered, the run reports that it changed nothing, so throw a refusal before the mark. A write may instead declare its refusals in its output schema: a branch that requires `status` `"refused"` and a `reason` from a listed set of stable lowercase codes, such as `over_price_limit`, beside the values the caller needs, such as the total and the limit, with no other branch whose `status` could be `"refused"`. Prefer declaring each refusal as its own branch of the output\'s top-level union, and prefer a listed `status` on every other branch, such as `Schema.Literal("rated")`, so the host can tell a refusal from any other output. Returned before the first commit mark, a declared refusal completes the run with that output and reports the write not applied. A refusal returned in a shape the schema does not declare, or returned or thrown after a mark, reports a possible change. See `references/write-session.ts`',
+  );
+  expect(text(local, "publication")).toContain(
+    "never a login; - a write runs every check that can refuse, such as a limit on its total, before the mark of the commit it guards, and refuses with `InvalidInput`, or returns a refusal its output schema declares before its first mark, never in an undeclared output shape; - a composed write",
+  );
+  const replaced = new Set(["writes.declared-refusal", "publication.declared-refusal"]);
+  const root = await authoringCopy((_path, file) =>
+    file.replace(sectionMarker, (marker: string, id: string) =>
+      replaced.has(id) ? `HOST TEXT FOR ${id}` : marker,
+    ),
+  );
+  try {
+    const composed = await renderedTexts(root);
+    expect(text(composed, "writes")).toContain(
+      "with those choices. HOST TEXT FOR writes.declared-refusal See `references/write-session.ts`",
+    );
+    expect(text(composed, "writes")).not.toContain("Returned before the first commit mark");
+    expect(text(composed, "publication")).toContain(
+      "never a login; HOST TEXT FOR publication.declared-refusal - a composed write",
+    );
+    expect(text(composed, "publication")).not.toContain("never in an undeclared output shape");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -636,9 +718,9 @@ it("keeps the HTTP version passages in host sections", async () => {
         ["core", "or the site's own data request, to opening each record's page."],
         ["search", "it never returns unfiltered results as filtered. When setting one control"],
         ["testing", "builds no offline test suite. It still checks its composed script's read-back"],
-        ["testing", "no no-results case and no edge cases. Publication review reads"],
+        ["testing", "other no-results case and no edge cases. Publication review reads"],
         ["testing", "own controls\"). Either way, read the input back"],
-        ["testing", "count toward the same two. The example uses"],
+        ["testing", "count toward the same four. The example uses"],
         ["writes", "run no live test of it. That rule is about running the write"],
         ["workspace/AGENTS.md", "and your own probes. **Read back every input before returning.**"],
         ["workspace/AGENTS.md", "the request the page sends for the rows, to driving such a filter"],
@@ -732,7 +814,7 @@ it("has the minter read back a write, accept recent-search saves and look before
   const text = (name: string) =>
     (contents(skills)[skills.findIndex((skill) => skill.name === name)] ?? "").replace(/\s+/g, " ");
   expect(text("writes")).toContain(
-    "- Before committing, read back from the page what you are about to submit and check each value against the caller's input, normalized as the core skill's Confirm step says, in the session and on every branch of the composed script. Fail before the commit if one does not match. Never read back a field filled with a secret handle.",
+    "- Before committing, read back from the page what you are about to submit and check each value as the core skill's Confirm step says, against the option the tool picked when it picked one, or the site's version of a typed value it rewrote (below), in the session and on every branch of the composed script. Fail if one does not match, and prefer running this check before the step's commit mark, so a mismatch stops the step before it sends anything. Never read back a field filled with a secret handle.",
   );
   expect(text("core")).toContain(
     "Telemetry, analytics and bot-sensor POSTs are normal and need no change. So is an anonymous recent-search, prefill or search-state save the site fires when you submit a search.",
@@ -740,6 +822,65 @@ it("has the minter read back a write, accept recent-search saves and look before
   expect(guide.instructions.replace(/\s+/g, " ")).toContain(
     "Do not infer invalid input from a timeout, missing observation, lost authentication, or failure of our automation. Not finding a value where you first looked is not that evidence. Before you call a value unavailable, check where the site would show it for the requested scope, such as the requested date's calendar or the results for the requested search. Settled evidence for the requested option, such as the site not listing it, is enough, and so is the site showing it sold out or unavailable for a write. A read that finds the requested option greyed out or sold out returns it as unavailable data with the page's alternatives instead",
   );
+});
+
+/*
+ * A site rewrote an address as it was typed, writing Parkway as PKWY, and the read-back refused a
+ * correct save. A write takes the site's version of a typed value, as it would a picked option,
+ * and notes in its output whether the rewrite only reformatted or changed what the caller gave,
+ * never refusing it.
+ */
+it("has a write take the site's rewrite of a typed value and note whether it changed the caller's", async () => {
+  const skills = await Effect.runPromise(loadAuthoringSkills("typescript/authoring"));
+  const text = (name: string) =>
+    (contents(skills)[skills.findIndex((skill) => skill.name === name)] ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "- Read each typed value back once its field settles, before the step's commit. When the site rewrote it as it was typed or on leaving the field, such as an address it standardized, or offered exactly one suggestion for it, take the site's version, as you would a picked option: later read-backs, such as a review page, summary or confirmation, compare against it, and the output returns it for that field. The one suggestion counts only for a free-text value the caller typed, such as an address or a name in a text box the site completes, never for a picker that selects a record, such as a person, assignee, customer, linked record, store or account, which keeps the reference rules in \"Check the read-back\" and the caller-input skill's. Add an optional output field `<input>_note`, such as `address_note`, that reports the rewrite with what the caller sent and what the site kept. Check it once with `sameText(shown, typed, { rewrite: true })`, which only decides what the note says: when it holds, the site only reformatted the value, and the note says so; when it fails, the site dropped or changed part of what the caller gave, and the note says it changed. The write goes on either way: never throw `InputNotApplied` for such a rewrite. A value cut short by the field's length limit, digits an input mask dropped, or a field that cleared is a failed fill, not a rewrite: fill it again in the field's format, or refuse as today. A value the site replaces only when a step saves follows the read-back before committing, above.",
+  );
+  expect(text("core")).toContain(
+    "With none, throw its `pickRefusal`, an `InvalidInput` with `field` and `available`, the entries the site showed, except on a write whose site offered exactly one suggestion for a free-text value the caller typed, never a picker that selects a record: take it as the writes skill says for a value the site rewrites.",
+  );
+  expect(text("core")).toContain(
+    "`wanted` being the option the tool picked from the site's list when it picked one, the site's version of a value a write typed and the site rewrote (writes skill), and the caller's value otherwise. It ignores case, accents, spacing, apostrophes, periods, commas and hyphens between letters, reads a space, hyphen, slash or parentheses between digits as one separator while the groups still count, so 29 59 matches 29-59 but never 2959 or 2 959, and accepts a word the page shortened, such as St for Saint.",
+  );
+  expect(text("forms")).toContain(
+    "On a write, a single suggestion for a free-text value the caller typed is the site's correction instead, never for a picker that selects a record: take it as the writes skill says.",
+  );
+  expect(text("caller-input")).toContain(
+    "or a value a write typed that the site rewrote before any save, kept and reported as the writes skill says.",
+  );
+  // The publication review and the minter's publication skill excuse the note in the same words.
+  const note =
+    "A write's `<input>_note` reporting a value the site rewrote as it was typed, on leaving the field, or through its one suggestion is not unapplied input; the tool read the site's version back and returns it.";
+  expect(publicationOutputPolicy).toContain(note);
+  expect(text("publication")).toContain(note);
+});
+
+/*
+ * A read's search step waited only for the site's results, so a value the site did not recognise
+ * timed out instead of returning the site's own no-match answer. Both hosts read the line once,
+ * right after the core skill's bullet on waiting for every answer a step can give.
+ */
+it("has a search step wait for the site's results or its own no-match state", async () => {
+  const line =
+    "- For a search step, wait for either the site's results or its own no-match state, and return the site's no-match answer with its message rather than waiting on results that may never appear. Prefer refusing a typed value on that no-match state, quoting it, over an empty suggestion list read before the site answered, which is still loading. Prefer refusing a requested date only on what the site's own calendar shows for that day once its month has loaded, such as a greyed-out, disabled or missing day, quoting it, over a calendar read before it filled.";
+  const root = await authoringCopy((_path, text) => text.replace(sectionMarker, ""));
+  try {
+    const hosts = [
+      await renderedTexts("typescript/authoring"),
+      await renderedTexts(root, (text) => {
+        if (text.includes("pomerado:")) throw new Error("Uncomposed section");
+        return text;
+      }),
+    ];
+    for (const texts of hosts) {
+      const core = (texts.get("core") ?? "").replace(/\s+/g, " ");
+      expect(core.split(line)).toHaveLength(2);
+      expect(core).toContain(`paste \`waitCode\` and call it. ${line} - Wait for a change`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 /*
@@ -754,7 +895,7 @@ it("has a write confirm from its first matching read-back, never from state befo
     " ",
   );
   expect(writes).toContain(
-    "- When a read-back is needed, the first one that matches confirms the write; stop there. It matches when it shows the written record after the write, found by something the write produced or entered (its number, its own reference or the values entered), and every field the caller asked for that the view shows agrees (the read before the commit already checked what you entered). Sites reformat what they save, such as line breaks, spaces and dates in the viewer's format, so compare text after the commit normalized as before it (the core skill's Confirm step): pass the caller's text through `normalizeText` from `pomerado/runtime`, as `visibleText` already does with the page's. Compare a chosen option's value only where the view shows that value; otherwise compare the label it shows. When the write changed state that already existed, the same read is also the after read of the before-and-after comparison, which runs after `verified()` (\"Check the read-back\"). Write each read-back step to check the requested fields in its own code and call `verified()` when they hold, so the first one that matches is the confirming step. Read one confirmation, list or detail view: find the record there by that identity, never by its position, such as the first or newest row, and prefer finding each value in it by a stable id, its column header or a `data-` attribute over its cell's position. Read only that record, and the view's other rows only where the before-and-after check or another skill, such as the cart skill, compares them. Read another page, in that same step before `verified()`, only for a field the view did not show and the tool's output promises.",
+    "- When a read-back is needed, the first one that matches confirms the write; stop there. It matches when it shows the written record after the write, found by something the write produced or entered (its number, its own reference or the values entered), and every field the caller asked for that the view shows agrees (the read before the commit already checked what you entered). Sites reformat what they save, such as line breaks, spaces and dates in the viewer's format, so compare text after the commit with `sameText`, as before it (the core skill's Confirm step). Compare a chosen option's value only where the view shows that value; otherwise compare the label it shows. When the write changed state that already existed, the same read is also the after read of the before-and-after comparison, which runs after `verified()` (\"Check the read-back\"). Write each read-back step to check the requested fields in its own code and call `verified()` when they hold, so the first one that matches is the confirming step. Read one confirmation, list or detail view: find the record there by that identity, never by its position, such as the first or newest row, and prefer finding each value in it by a stable id, its column header or a `data-` attribute over its cell's position. Read only that record, and the view's other rows only where the before-and-after check or another skill, such as the cart skill, compares them. Read another page, in that same step before `verified()`, only for a field the view did not show and the tool's output promises.",
   );
   // Entered values find a record but never prove it new.
   expect(writes).toContain(
@@ -762,7 +903,7 @@ it("has a write confirm from its first matching read-back, never from state befo
   );
   // The rules on commit marks and uncertain outcomes stay as they were.
   expect(writes).toContain(
-    "- Mark only the step whose click saves or submits. Opening or filling an unsaved form is not a commit step.",
+    "- Place a commit mark only on the step that sends the change to the site, such as a submit, save or confirm control, or a control whose handler sends the caller's change to the site.",
   );
   expect(writes).toContain(
     "- Never repeat a step blindly. If an `act` step fails after the page sent a state-changing request or opened a socket, after it entered a commit mark, or without returning a result at all (its page was lost), the write may already be committed;",
@@ -774,6 +915,69 @@ it("has a write confirm from its first matching read-back, never from state befo
 });
 
 /*
+ * A write marked opening a form and typing an address as commits, then waited only for the
+ * address suggestions. For an address outside the area the site serves, the site showed a notice
+ * instead, so the run timed out with two marks entered and reported a possible change when
+ * nothing had been sent. Marks go only on steps that send, and a wait names every answer.
+ */
+it("has a write mark only the steps that send and wait for every answer the site can give", async () => {
+  const writes = ((await renderedTexts("typescript/authoring")).get("writes") ?? "").replace(
+    /\s+/g,
+    " ",
+  );
+  // A lookup, suggestion, validation or analytics call from a control's handler, such as an
+  // address autocomplete, sends no change, so it is never a commit.
+  expect(writes).toContain(
+    "- Place a commit mark only on the step that sends the change to the site, such as a submit, save or confirm control, or a control whose handler sends the caller's change to the site. Opening a form and typing into its fields change only the page's own state, so leave them unmarked unless the site's requests show they save the caller's change, such as an autosave; a lookup, suggestion, validation or analytics request saves nothing. Place the first commit mark at the first step that saves on the site.",
+  );
+  expect(writes).toContain(
+    "or a control whose handler sends the caller's change to the site. Opening a form and typing into its fields change only the page's own state, so leave them unmarked unless the site's requests show they save the caller's change, such as an autosave; a lookup, suggestion, validation or analytics request saves nothing. Mark every such step, including autosaves,",
+  );
+  expect(writes).toContain(
+    "- Mark the commit at the step that submits the booking or order; a hold that expires on its own, such as a reserved table or a cart timer, is not the commit.",
+  );
+  // The wait is its own rule, and a field error it reads on the caller's value is the caller's
+  // input error.
+  expect(writes).toContain(
+    "the next step uses. - When a step waits for the site's answer, wait for every answer the site can give, such as results, a no-results message or an out-of-area notice, rather than waiting for results alone. A message about a value the caller gave, such as a field error, is the caller's input error: throw `InvalidInput` naming the field, with the options the site offers as `available` when it lists them.",
+  );
+  // The narrower click-only rule it replaces is gone, so the two never disagree.
+  expect(writes).not.toContain("Mark only the step whose click saves or submits.");
+  expect(writes).not.toContain("Opening or filling an unsaved form is not a commit step.");
+  // These rules are hard rules, never a preference.
+  expect(writes).not.toContain("Prefer placing the first commit mark");
+  expect(writes).not.toContain("Prefer marking the commit");
+  expect(writes).not.toContain("a control whose handler calls the site");
+  expect(writes).not.toContain("return the site's refusal with the caller's options");
+});
+
+/*
+ * A write saved over several pages refused the site's own code for an option on a later page,
+ * which showed only labels, after earlier pages had saved, so a value problem became an outcome
+ * the caller could not know. The site's option values and labels could be read before the first
+ * save, from the form definitions an earlier page loaded.
+ */
+it("has a write check caller values against the site's own option lists before its first save", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "- On a write saved across several pages, when the site's own option lists for a later page can be read before the first save and do not depend on what an earlier page saves, such as the form definitions or option data an earlier page loads, prefer reading them and checking every caller value for those fields against them before the first commit mark, in the session and on every run of the composed script. Match each value by the site's option value as well as its label (forms skill), and refuse with `InvalidInput` and `available` before anything is saved when a value matches neither. A refusal after an earlier save leaves a half-made record and an outcome the caller can't know.",
+  );
+  // A check that can only run after an earlier save keeps its honest possible change.
+  expect(text("writes")).toContain(
+    "A check that can only run after an earlier marked step, such as a total that shows only once a saved address step has run, runs before the later step's mark;",
+  );
+  // It sits after the refusal rule and its exceptions, so that rule's "those checks" still names
+  // the checks before it.
+  expect(text("writes")).toContain(
+    "then throw `InvalidInput` that names the field by its label, and don't click again. - On a write saved across several pages,",
+  );
+  expect(text("forms")).toContain(
+    "Choose the option that matches the input value, by the option's value or its observed label pattern, and read back that the field took it. When the control shows only labels, prefer matching against the site's own table of option values and labels, such as the form definitions or option data the page or an earlier page loads, over the visible words alone, so an input holding the site's code for an option picks that option.",
+  );
+});
+
+/*
  * A write whose own commit request came back 2xx or 3xx, with no error in its body or on the page
  * after it, went through, so the minter confirms it in the commit call instead of opening another
  * page to prove it. It reads the site back only when that request cannot settle the write.
@@ -782,7 +986,7 @@ it("has a write confirm from its own commit request, and read back only when tha
   const texts = await renderedTexts("typescript/authoring");
   const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
   expect(text("writes")).toContain(
-    '- Prefer confirming the write from its commit request. Keep the click on the final commit control, such as Save, Send, Submit, Book or Pay, in its own step. In the same call as that click, wait for the site\'s response to the request it sends, matched by the method and path the session saw carry the commit on the site, and by its body where the body shows the caller\'s values, as `references/write-readback.ts` does. Wait too for every way the page can answer with `waitForOutcome`, listing the site\'s error or validation message first. The write went through when that response is 2xx or 3xx, a body the call can read shows no error, and the page shows no error or validation message after it. A 201 whose Location names the new record went through as soon as it arrives, with no wait for the page. A 200 whose body reports an error, as GraphQL can, did not go through. A 202, or a 2xx whose body says the work is queued, went through too; return that in the output as a status in the core notation, such as `queued`, with the site\'s own word in a `status_label` field. Then read what the output promises from that response or from the page the commit left, match it to the caller\'s values, and call `verified()` with no argument just before returning. Declare `write: { confirmation: "readback" }`. Prefer not opening another page, such as a list, a history or an account screen, only to prove the write: a commit that went through, with the new record\'s id, already proves it. When a commit step returned without calling `verified()` and its `stateChangingRequests` list the commit request with a 2xx or 3xx status, prefer confirming it in the next step from the page as it stands. Make no execute call after `verified()`: a later call reopens the effect. After the confirming step, further `act` steps are refused.',
+    '- Prefer confirming the write from its commit request. Keep the click on the final commit control, such as Save, Send, Submit, Book or Pay, in its own step. In the same call as that click, wait for the site\'s response to the request it sends, matched by the method and path the session saw carry the commit on the site, and by its body where the body shows the caller\'s values, as `references/write-readback.ts` does: a `{ response }` answer of `waitForOutcomeResult`, beside every way the page can answer, listing the site\'s error or validation message (`{ invalid: form }`) first. The write went through when that response is 2xx or 3xx, a body the call can read shows no error, and the page shows no error or validation message after it. A 201 whose Location names the new record went through as soon as it arrives, with no wait for the page. A 200 whose body reports an error, as GraphQL can, did not go through. A 202, or a 2xx whose body says the work is queued, went through too; return that in the output as a status in the core notation, such as `queued`, with the site\'s own word in a `status_label` field. Then read what the output promises from that response or from the page the commit left, match it to the caller\'s values, and call `verified()` with no argument just before returning. Declare `write: { confirmation: "readback" }`. Prefer not opening another page, such as a list, a history or an account screen, only to prove the write: a commit that went through, with the new record\'s id, already proves it. When a commit step returned without calling `verified()` and its `stateChangingRequests` list the commit request with a 2xx or 3xx status, prefer confirming it in the next step from the page as it stands. Make no execute call after `verified()`: a later call reopens the effect. After the confirming step, further `act` steps are refused.',
   );
   // Every case the request cannot settle keeps a read-back.
   expect(text("writes")).toContain(
@@ -807,6 +1011,28 @@ it("has a write confirm from its own commit request, and read back only when tha
   );
 });
 
+/*
+ * A write's own status and body checks for its commit response missed a case each time, such as
+ * a 3xx it rejected or a success field holding an error word, and each fix opened another. The
+ * writes skill and its reference confirm the final commit through the runtime's one check.
+ */
+it("points a write's commit confirmation at confirmCommit", async () => {
+  const writes = ((await renderedTexts("typescript/authoring")).get("writes") ?? "").replace(
+    /\s+/g,
+    " ",
+  );
+  expect(writes).toContain(
+    "- Prefer confirming the final commit with `confirmCommit(answer, page)`: import `confirmCommitCode` from `pomerado/runtime`, paste it after `waitCode` in the commit call, once the form is filled and just before the click's wait, and pass it the `{ response }` answer of that click's `waitForOutcomeResult` and the page. It applies the commit-response and page-error rules above in one place, so prefer it over writing your own status and body checks, and call `verified()` only when it reports done.",
+  );
+  const reference = await readFile("typescript/authoring/examples/write-readback.ts", "utf8");
+  expect(reference).toContain("${confirmCommitCode}");
+  expect(reference).toContain("await confirmCommit(answer, page)");
+  // Pasted after the fills, so what the fills draw is noted, and before the click's wait.
+  const paste = reference.indexOf("${confirmCommitCode}");
+  expect(paste).toBeGreaterThan(reference.lastIndexOf(".fill("));
+  expect(paste).toBeLessThan(reference.indexOf("await waitForOutcomeResult("));
+});
+
 // A write that passed the page's headings to `verified` lost its receipt. With no argument there
 // is nothing to get wrong, so no skill or reference teaches the argument form any more.
 it("teaches every write to call verified() with no argument and declare a read-back", async () => {
@@ -819,6 +1045,169 @@ it("teaches every write to call verified() with no argument and declare a read-b
   ).toStrictEqual([]);
   expect(placeOrder.write).toEqual({ confirmation: "readback", commits: ["place-order"] });
   expect(bookSeat.write).toEqual({ confirmation: "readback", commits: ["book-seat"] });
+});
+
+/*
+ * A form saved over several pages: the first save of one page kept the site's own value for a
+ * number the caller gave, the next page did not show it, and the final commit went out with the
+ * site's value. A second save of that page keeps the caller's value. The write reads back each
+ * saved value the site shows before its final commit, saves the page once more when one differs
+ * and saving it again updates the same record, and stops when it still differs. A value the tool
+ * picked from the site's list is compared as the label it picked: a caller's CA picked as
+ * California reads back as California, which readBackMatches never confirms for CA.
+ */
+it("has a write read back each saved caller value before its final commit, and save a page again once", async () => {
+  const writes = ((await renderedTexts("typescript/authoring")).get("writes") ?? "").replace(
+    /\s+/g,
+    " ",
+  );
+  expect(writes).toContain(
+    "- On a form saved over several pages, before the final commit, read back what the site saved for the caller's values, from a summary, a review page or each saved page, in the session and in the composed script. Compare each value the site shows with `readBackMatches(shown, wanted)` from `pomerado/runtime`, against the option the tool picked when it picked one, or the site's version of a typed value it rewrote (above): `wanted` is that option's label or that version, and the caller's value otherwise. It accepts the same value in another format or word order, and every number must match exactly, the same numbers in the same order. When the site kept a different value, save that page again once with the same entries and read it back again, but only when saving it again updates the same record or page, never when the save adds an item, such as a cart line or a row. Prefer `saveAndReadBack` from `pomerado/runtime` for such a page's save: it does both and returns the values that still differ. When one still differs, or a page whose save adds an item kept a different value, stop before the final commit's mark and throw `InputNotApplied` with its `field`, `requested` and `applied`.",
+  );
+  expect(readBackMatches("California", "California")).toBe(true);
+  expect(readBackMatches("California", "CA")).toBe(false);
+  expect(readBackMatches("Yes", "true")).toBe(false);
+});
+
+/*
+ * The read-back after a commit decides whether the tool calls verified(). It compares with
+ * sameText, which refuses a different value that holds the wanted one, such as Not paid for Paid.
+ * readBackMatches, for a page saved before the final commit, accepts it.
+ */
+it("has a write compare its read-back after the commit with sameText, which refuses Not paid for Paid", async () => {
+  const writes = ((await renderedTexts("typescript/authoring")).get("writes") ?? "").replace(
+    /\s+/g,
+    " ",
+  );
+  expect(writes).toContain(
+    "so compare text after the commit with `sameText`, as before it (the core skill's Confirm step).",
+  );
+  expect(writes).not.toContain("compare text after the commit with `readBackMatches`");
+  for (const [shown, wanted] of [
+    ["Not paid", "Paid"],
+    ["Premium Economy", "Economy"],
+    ["West Virginia", "Virginia"],
+    ["Jane Mary Doe", "Jane Doe"],
+  ] as const) {
+    expect(sameText(shown, wanted), `${shown} | ${wanted}`).toBe(false);
+    expect(readBackMatches(shown, wanted), `${shown} | ${wanted}`).toBe(true);
+  }
+});
+
+// A click that saved nothing but flagged a field no question may ask ends as the caller's refusal,
+// with the step unsent, never a second click.
+it("has a write refuse a field no site-field question may ask once its click saved nothing", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "When `blockingRequiredFields(form, before, { unaskable: true })` returns `{ unaskable: true }` after the step's first click, the click saved nothing but a field it flagged is one no site-field question may ask, such as a card or bank field: call `notCommitted` for the step, then throw `InvalidInput` that names the field by its label, and don't click again.",
+  );
+});
+
+// The click's proof puts its step back before the site-field question, so a run that ends on the
+// question reports nothing sent.
+it("has a write put its step back before asking a field its click proved missing", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "When such a field shows only after the step's click, ask it once `blockingRequiredFields` returns it, which proves the click saved nothing: call `notCommitted` for the step before you ask, then fill the answer, check the step again, then call `enteringCommit` again with the step's name, and click once.",
+  );
+  expect(text("caller-input")).toContain(
+    "A second click on a marked step is not a resubmission when `blockingRequiredFields` returned the fields you asked for and you called `notCommitted` for that step before asking: fill the answers, check the step again, then call `enteringCommit` again for that step, and click once, as the writes skill says.",
+  );
+});
+
+// A write still refuses an option the page does not offer, unless the caller's own task asks for
+// whatever the site ends up with: then it follows the site's preselected substitute and returns it.
+it("has a write follow the site's substitute only when the caller's task asks for what it ends up with", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const writes = (texts.get("writes") ?? "").replace(/\s+/g, " ");
+  // The refusal rule stays as it was, and the exception comes right after it.
+  expect(writes).toContain(
+    "- When one of those checks rules the task out, such as a total over the caller's limit, an item out of stock or a variant the page does not offer, the script refuses before the mark with `InvalidInput` (the caller-input skill, \"Throw the error that matches what happened\"), or returns a refusal its output schema declares before its first mark (below).",
+  );
+  expect(writes).toContain(
+    "A report of the form's fields, its validation messages or the options to pick from is a refusal (`InvalidInput` with `available`) or a failure (`OperationFailure`), not the write's output.",
+  );
+  expect(writes).toContain(
+    "(`site_declined` when the site refused this example). A build whose session never reached the end publishes nothing. - When the caller's own task asks for whatever the site ends up with, such as the product a quote ended up on, follow the site's preselected substitute and return the value the site used instead of throwing `InvalidInput`. Only the caller's task text counts this way; an output field or description you wrote does not. - When a write's form adds required fields",
+  );
+});
+
+// The core and caller-input rules that refuse an unoffered value or forbid another one each name
+// that one exception, so no older rule reads as overriding it.
+it("has every unoffered-value rule name the task-asked substitute exception", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  const only =
+    "a write follows the site's preselected substitute only when the caller's own task asks for whatever the site ends up with (writes skill).";
+  const instead =
+    "A write follows the site's preselected substitute instead when the caller's own task asks for whatever the site ends up with (writes skill).";
+  expect(text("core")).toContain(
+    `Never pick a near match, the page's default or the first option; the same proper noun in another usual form is not a near match (input schema above). ${instead} A broader choice that covers the value`,
+  );
+  expect(text("core")).toContain(
+    `A write throws \`InvalidInput\` with \`field\` and \`available\`, the selectable options. Neither picks another value for the caller; ${only} - For an input whose options depend on another`,
+  );
+  expect(text("caller-input")).toContain(
+    `Don't add your own constraints between inputs, filter them, or swap in a value the caller didn't give; ${only} For example,`,
+  );
+  expect(text("caller-input")).toContain(
+    `The caller corrects the input and runs again. ${instead} - \`InputNotApplied\`:`,
+  );
+  expect(text("caller-input")).toContain(
+    `it follows .agents/core/SKILL.md ("Configure, then read"), which never substitutes another value; ${only} Asking the owner`,
+  );
+  expect(text("caller-input")).toContain(
+    `- An option the page lists but greys out, such as a booked date or a sold-out size: not an error on a read, \`InvalidInput\` with \`available\` on a write (core skill, "Configure, then read"); ${only} - A read whose site says no`,
+  );
+});
+
+/*
+ * The site's own no to a valid request, such as sold out or not offered for these facts, is the
+ * task's answer, not a broken tool and not the caller's input error. A tool prefers returning it
+ * as a refusal its output schema declares, quoting the site's words in `site_message`, from what
+ * the site shows in that run only. A field error on the caller's value stays the caller's input
+ * error, and a challenge, block or error page stays a failure. After a commit mark the tool
+ * returns the refusal only where the declared-refusal rule says it completes the run there, which
+ * the standalone rule never does, so the standalone text never contradicts itself.
+ */
+it("has a tool return the site's no to a valid request as a declared refusal quoting the site", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("writes")).toContain(
+    "when it lists them. - When the site says no to a valid request, such as sold out, no availability, not eligible, not offered for these facts or not served in this area, that no is the task's answer. Prefer returning it as a refusal the output schema declares (below), with a `reason` code of the tool's own, listed in the tool's description, `site_message`, the site's own words exactly as the page shows them, and any alternatives the site offers, exactly as shown. Return it only from what the site shows in this run, never from a rule copied into the tool's own checks, and never from a challenge, block, access-denied, error or maintenance page, which is a failure (`OperationFailure`). After a commit mark, return it only where the declared-refusal rule below says one returned there completes the run; otherwise prefer throwing `InvalidInput` with the site's words. - When the site swaps the request for something the caller didn't ask for, such as another product, a later date or a higher amount, stop before the step that would confirm it and return the refusal as above, with the site's words and its offer, unless the caller's own task asks for whatever the site ends up with. - Report a confirm popup",
+  );
+  expect(text("writes")).not.toContain("naming the field the site refused");
+  // The standalone rule completes no refusal returned after a mark.
+  expect(text("writes")).toContain(
+    "A refusal returned in a shape the schema does not declare, or returned or thrown after a mark, reports a possible change.",
+  );
+  expect(text("caller-input")).toContain(
+    "- A write that declines the task because the caller's own limit or the page's state rules it out, such as a total over the caller's price limit or a product number whose page names another item than the caller's: `InvalidInput`, thrown before the mark of the commit it guards (writes skill). Pass `field`, the input the caller would change, `kind`, the reason as a stable lowercase token such as `over_price_limit` or `item_mismatch`, and `available` where the page lists choices,",
+  );
+  expect(text("caller-input")).toContain(
+    "A write returns a refusal as its output only when its output schema declares that refusal, and only where the writes skill says one completes the run, such as before its first mark: any other output a write returns without `verified()` reports a possible change. - When the site itself says no to a valid request, such as an item out of stock or a variant it does not offer, prefer the writes skill's refusal quoting the site. - A write whose steps",
+  );
+  expect(text("caller-input")).toContain(
+    "(writes skill). - A read whose site says no to the whole request, such as a product it no longer sells, prefers returning that no as a declared refusal with `site_message` over throwing (writes skill). - A write that declines",
+  );
+  expect(text("caller-input")).toContain(
+    "The cases above that return results with what applied, and a declared refusal, are the only exceptions.",
+  );
+  expect(text("caller-input")).not.toContain("`out_of_stock`");
+  expect(text("core")).toContain(
+    "A write throws `InputNotApplied` (above) before its first commit step instead; for a location the site says it does not serve, it prefers the writes skill's refusal quoting the site.",
+  );
+});
+
+// An access code is asked privately, as the site-field question's secret classification treats it.
+it("asks for an access code with a private secret question", async () => {
+  const texts = await renderedTexts("typescript/authoring");
+  const text = (name: string) => (texts.get(name) ?? "").replace(/\s+/g, " ");
+  expect(text("caller-input")).toContain(
+    "Prefer a `secret` question of kind `private_text` for an access code, such as a gate, door, alarm or lockbox code.",
+  );
 });
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -841,17 +1230,17 @@ it("renders the pinned standalone authoring", async () => {
       .filter(([path]) => path !== "reference/publication-review.md")
       .map(([path, text]) => [sha256(text), `workspace/${path}`]),
   ]).toStrictEqual([
-    ["7d4c600331865a0fbf269476f99eb0585b77c3f2235a7d46dca43c9e5e651a7d", "core"],
-    ["0d2259dda1fd5a909a036b6b10b918c0d1b4a88da3aa3486cc06027312ceb39d", "search"],
-    ["a7fc96fde666bc71ed3be8c86c79907b176da291aa02da20e5896f1caa7cd23e", "auth"],
-    ["fa90f2aa2b56572021f6d254465a7920257698fda21213b5143f7f87ddb33e17", "testing"],
-    ["be11a02976c7e9521941546c48f113c6237a02cc8d78e7f9e1287e241dc75d79", "pagination"],
-    ["12b198d6503ef35853f9ff42aefefe641dc3b59c8b2a3e5a1424aabb4f6af2f4", "forms"],
-    ["5586df355fdc48579df047aaf65c52d9987a600eadeb4f6067a564255b198e5b", "writes"],
+    ["af492176af61cced32699203a64175b7adfca3591a4dad39fe65b305151f9636", "core"],
+    ["a896a59d7b924a2940a90437b8d4488cd515c4f4afc70da9fe14953b1583dd93", "search"],
+    ["1b7d4195a350f19b2eee83ba2ae48f2c4dc68dc0d5c4a4f395e54d34ada30068", "auth"],
+    ["ead4c4ffc04505a9951a6f24ec69ff795019f0142adf63c7bf7e4f66e74527d9", "testing"],
+    ["3cc71d02f70447f1de02e062695095682a0cabab4ed668abe1309d017bc0cf83", "pagination"],
+    ["49373d05397797d5862f12f62101615c99257e025056c7385b2b9bb5ebcd5f7d", "forms"],
+    ["7308f56f0ac66a427deac277366104e8e6e023aa83debdbd616d22b11ea3f95f", "writes"],
     ["01eb1c98d8945987929ca3d8c68d4d848e64415d2042fc844166a490ca9457cb", "cart"],
-    ["a3a3b9de15fe58391adc4e5185e4bff3fa7f01a95b89a9cc6a87852f749d346e", "caller-input"],
-    ["a6eb9a6bd969759a27a04f49871779b6e790f03a5084e9cba02fbca18e07f41b", "publication"],
-    ["5dc498ccc611294d2181bc0679daf89c89bd00a07d482f9c53cf917586a58343", "workspace/AGENTS.md"],
+    ["582b80d4f682d4c6af6d101515a3a12febb016e2e4c5d7f0fbf3f51b3aab4dbd", "caller-input"],
+    ["c6bcadcf0be7d9dc94fe00a7bf884efb261b0d8e5748340639e90615207f4656", "publication"],
+    ["5dd148b3ac57ded02ef984c61418399ebe11e2ea1017a2ebb19f70e0d905cff4", "workspace/AGENTS.md"],
     ["9501ae9c273d5d4db8976a544879f7aee44212c8a616b00e74263dcd3c593035", "workspace/README.md"],
   ]);
 });
@@ -941,7 +1330,7 @@ const loadAuthoring = async (
 /*
  * A host turns the search URL fast path on with `searchUrlFastPath`. Off, which is also what
  * omitting it gives, renders the URL guidance as it stood before; on renders the fast path's
- * text, whose workspace guide digest is the one pinned before the flag. Either way the search
+ * text. Either way the search
  * skill's page-data paragraph ends with the same data-request sentence, once. Every other file
  * renders the same either way.
  */
@@ -971,8 +1360,8 @@ it("renders the search URL fast path only when a host turns it on", async () => 
     ...on.digests.filter(([, name]) => name === "search"),
     [sha256(on.agents), "workspace/AGENTS.md"],
   ]).toStrictEqual([
-    ["3eab0c3ce4fe41164a06d06ffaa9544c66c85870e618fb5d1ae48a553cf98b06", "search"],
-    ["6f1d1e76923e9b7bb52eccb2730b0630b7ef8a1c1b2f6c7bb0bf6017207e4572", "workspace/AGENTS.md"],
+    ["ea3c3bc8472c8c9db7aa9dd9b99b682f525f5ab55c091b944946dcf75f5ec83e", "search"],
+    ["b8de1a1430d36ce8cab3e6191dec38f63789446b0237ffef06f9ed0843982b42", "workspace/AGENTS.md"],
   ]);
   expect(on.digests.filter(([, name]) => name !== "search")).toStrictEqual(
     off.digests.filter(([, name]) => name !== "search"),

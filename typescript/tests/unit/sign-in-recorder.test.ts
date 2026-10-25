@@ -1,4 +1,4 @@
-import { Effect, Exit } from "effect";
+import { Duration, Effect, Exit } from "effect";
 import { expect, it } from "vitest";
 import type {
   AutofillInspection,
@@ -7,12 +7,11 @@ import type {
   AutofillStep,
   AutofillStepReport,
 } from "../../src/destinations/autofill-step.js";
-import type { SignInBrowser, SignInRequest } from "../../src/destinations/sign-in-recipe.js";
+import type { SignedOutSnapshot } from "../../src/destinations/signed-in-marker.js";
 import { MintFailure, type SignInStep } from "../../src/mint/contracts.js";
 import { makeSignInRecorder } from "../../src/mint/sign-in-recorder.js";
 import type { WebsiteCredentials } from "../../src/runtime/authentication.js";
 import type { InputAsker, InputRequest } from "../../src/runtime/input-request.js";
-import { askingValueHooks } from "../../src/runtime/sign-in-values.js";
 import { makeSignInBrowser } from "../../src/standalone/authentication.js";
 
 const site = "example.test";
@@ -43,31 +42,11 @@ const described = {
   text: null,
 };
 
-/** The form request a fill's submit sends, carrying each of `values`. */
-const formRequest = (values: readonly string[]): SignInRequest => ({
-  url: `${origin}/session`,
-  method: "POST",
-  body: new URLSearchParams(values.map((value, index) => [`field${index}`, value])).toString(),
-  channel: "navigation",
-  frame: "main",
-  resourceType: "document",
-});
-
-const decoded = (text: string) => {
-  try {
-    return decodeURIComponent(text.replaceAll("+", " "));
-  } catch {
-    return text;
-  }
-};
-
 interface Options {
   /** The login the build already holds. */
   readonly held?: WebsiteCredentials;
   /** The logins the owner gives as corrections, in order. */
   readonly corrections?: readonly WebsiteCredentials[];
-  /** What each fill's submit sends; the form request carrying every value by default. */
-  readonly send?: (step: AutofillStep, values: readonly string[]) => readonly SignInRequest[];
   /** What each fill reports; every field filled and the submit clicked by default. */
   readonly report?: (step: AutofillStep) => AutofillStepReport;
   /** The live address the host finds a screen at. */
@@ -81,11 +60,16 @@ interface Options {
   /** The owner's answers to each question by id, in order. */
   readonly answers?: Record<string, string[]>;
   readonly approve?: boolean;
-  readonly refuseIndicator?: boolean;
-  /** The selectors that show on the page now, which an account rejection names. */
+  /** The selectors that show on the page now, which a rejection's marker names. */
   readonly visible?: readonly string[];
-  /** The configured sign-in origins off the site. */
-  readonly authenticationOrigins?: readonly string[];
+  /** A selector the page shows once the first fill clicked its submit, as a site's message does. */
+  readonly toast?: string;
+  /** The pages the build saw signed out. */
+  readonly signedOutPages?: readonly SignedOutSnapshot[];
+  /** How many checks the page answers before it draws the marker. */
+  readonly lateMarker?: number;
+  /** The one-character code boxes the screen shows, by the code fields' order. */
+  readonly codeBoxes?: number;
 }
 
 /** A recorder over a synthetic site, with what it asked, filled, reviewed and checked. */
@@ -99,14 +83,17 @@ const harness = (options: Options = {}) => {
   const given: (readonly string[])[] = [];
   const reviewed: AutofillStep[] = [];
   const confirmed: unknown[] = [];
-  const listeners = new Set<(request: SignInRequest) => void>();
   const questions = [...(options.questions ?? [])];
   const answers = Object.fromEntries(
     Object.entries(options.answers ?? {}).map(([id, values]) => [id, [...values]]),
   );
-  const browser: SignInBrowser<never> = {
-    inspect: (step) =>
-      Effect.sync((): AutofillInspection => ({
+  let hidden = options.lateMarker ?? 0;
+  /** The selectors the page shows now; a test takes one away as the site's message goes. */
+  const shown = new Set(options.visible ?? []);
+  const inspect = (step: AutofillStep) =>
+    Effect.sync((): AutofillInspection => {
+      let box = 0;
+      return {
         url: options.liveUrl ?? `${origin}/login`,
         page: options.page ?? `${origin}/login`,
         targets: { fields: step.fields.map(() => target), submit: target },
@@ -120,17 +107,22 @@ const harness = (options: Options = {}) => {
             ...(field.slot === "private_answer" && questions.length > 0
               ? { questionText: questions.shift() ?? "" }
               : {}),
+            ...(field.slot === "code" && options.codeBoxes !== undefined
+              ? { codeBox: { box: (box += 1), of: options.codeBoxes } }
+              : {}),
           })),
           submit: described,
           buttons: [],
         },
-      })),
-    fill: ({ step, values }) =>
+      };
+    });
+  const browser = {
+    inspect,
+    fill: ({ step, values }: { readonly step: AutofillStep; readonly values: readonly string[] }) =>
       Effect.sync(() => {
         filled.push({ step, values: [...values] });
         given.push(values);
-        for (const request of options.send?.(step, values) ?? [formRequest(values)])
-          for (const listener of [...listeners]) listener(request);
+        if (options.toast !== undefined && filled.length === 1) shown.add(options.toast);
         return (
           options.report?.(step) ?? {
             outcome: "filled" as const,
@@ -140,18 +132,24 @@ const harness = (options: Options = {}) => {
           }
         );
       }),
-    confirm: (indicator, screens, challengeScreens) =>
+    confirm: (
+      indicator: unknown,
+      screens: readonly unknown[],
+      challengeScreens: readonly unknown[],
+    ) =>
       Effect.sync((): AutofillSignedInCheck => {
         confirmed.push({ indicator, screens, challengeScreens });
+        if (hidden > 0) {
+          hidden -= 1;
+          return { signedIn: false, failed: "indicator_not_visible", url: `${origin}/account` };
+        }
         return options.challengeAsks === true && challengeScreens.length > 0
           ? { signedIn: false, failed: "challenge_form_visible", url: `${origin}/account` }
           : { signedIn: true, url: `${origin}/account` };
       }),
-    onRequest: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    authenticationOrigins: options.authenticationOrigins ?? [],
+    authenticationOrigins: [],
+    open: () => Effect.void,
+    markerVisible: (selector: string) => Effect.succeed(shown.has(selector)),
   };
   const ask: InputAsker = (request) =>
     Effect.sync(() => {
@@ -177,45 +175,27 @@ const harness = (options: Options = {}) => {
         current = account;
         return account;
       }),
-      correct: (field, held) =>
+      correct: (field, held, triesLeft) =>
         Effect.sync(() => {
-          logins.push(`invalid_credentials:${field}`);
+          logins.push(`invalid_credentials:${field}:${triesLeft}`);
           current = corrections.shift() ?? held;
           return current;
         }),
     },
-    values: askingValueHooks({ ask, register: () => {}, site, siteOrigin: origin }),
+    ask,
+    secrets: { register: () => {}, assertAbsent: () => Effect.void },
     review: (step) =>
       Effect.sync(() => {
         reviewed.push(step);
       }),
     site,
-    carries: (expected, texts) =>
-      Effect.succeed(
-        expected.length > 0 &&
-          expected.every((value) =>
-            texts.some((text) => text.includes(value) || decoded(text).includes(value)),
-          ),
-      ),
-    ...(options.visible === undefined
-      ? {}
-      : {
-          markerVisible: (selector: string) =>
-            Effect.succeed(options.visible?.includes(selector) === true),
-        }),
-    ...(options.refuseIndicator === true
-      ? {
-          refuseIndicator: () => ({
-            signedIn: false,
-            failed: "marker_matches_signed_out_page",
-          }),
-        }
-      : {}),
+    signedOutPages: () => options.signedOutPages ?? [],
+    markerSettle: { within: Duration.millis(200), interval: Duration.millis(10) },
   });
-  /** Runs `use` with the recorder, in its own scope. */
-  const run = <A, E>(use: (made: Effect.Effect.Success<typeof recorder>) => Effect.Effect<A, E>) =>
-    Effect.runPromise(Effect.scoped(Effect.flatMap(recorder, use)));
-  return { run, asked, logins, filled, given, reviewed, confirmed, listeners };
+  /** Runs `use` with the recorder. */
+  const run = <A, E>(use: (made: typeof recorder) => Effect.Effect<A, E>) =>
+    Effect.runPromise(use(recorder));
+  return { run, asked, logins, filled, given, reviewed, confirmed, shown };
 };
 
 const identifierAndPassword: SignInStep = {
@@ -225,13 +205,29 @@ const identifierAndPassword: SignInStep = {
   ],
   submit: "#sign-in",
 };
+const identifierOnly: SignInStep = {
+  fields: [{ selector: "#user", accepts: ["username"] }],
+  submit: "#next",
+};
 const passwordOnly: SignInStep = {
   fields: [{ selector: "#password", slot: "password" }],
   submit: "#sign-in",
 };
+/** The login screen with the site's error for a wrong password recorded. */
+const markedLogin: SignInStep = {
+  ...identifierAndPassword,
+  rejectedMarkers: [{ slot: "password", selector: "#wrong-password" }],
+};
 const signedIn: SignInStep = { signedIn: { selector: "#account-menu" } };
+const rejectedPassword: SignInStep = { rejected: { slot: "password" } };
 
-it("records a value-free recipe once a request carried the login, entered from the login URL", async () => {
+/** A page the build saw signed out, which shows `body`. */
+const signedOutPage = (body: string): SignedOutSnapshot => ({
+  url: `${origin}/`,
+  dom: `<!doctype html><html><body>${body}</body></html>`,
+});
+
+it("records a value-free recipe once a clicked submit sent the login, entered from the login URL", async () => {
   const host = harness();
   const published = await host.run((recorder) =>
     Effect.gen(function* () {
@@ -270,8 +266,6 @@ it("records a value-free recipe once a request carried the login, entered from t
   // One login question for the build, asked once the screen was reviewed.
   expect(host.logins).toEqual(["missing_credentials"]);
   expect(host.reviewed).toHaveLength(1);
-  // The sign-in is over: the host stopped hearing the page's requests.
-  expect(host.listeners.size).toBe(0);
 });
 
 it("enters from the first screen's live address, without its fragment, when no login URL was given", async () => {
@@ -316,7 +310,6 @@ it("refuses a screen whose address names the account before anything is asked or
   });
   expect(host.filled).toEqual([]);
   expect(host.asked).toEqual([]);
-  expect(host.listeners.size).toBe(0);
 });
 
 it("keeps a sign-in open through a marker check while its recorded challenge still asks", async () => {
@@ -336,508 +329,119 @@ it("keeps a sign-in open through a marker check while its recorded challenge sti
   expect(result.result).toMatchObject({ signedIn: false, failed: "challenge_form_visible" });
 });
 
-it("refuses a signed-in check until a request carried the identifier and a password or code", async () => {
-  // The page's own request carries nothing the host filled.
-  const host = harness({ send: () => [formRequest(["unrelated"])] });
+it("refuses a signed-in check before a screen sent the login's password or code, in the shared words", async () => {
+  const host = harness();
   const checked = await host.run((recorder) =>
     Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      // The identifier went out, but no password or code yet.
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
       const result = yield* recorder.step(signedIn, undefined, Effect.void);
       expect(recorder.published()).toBeUndefined();
       return result;
     }),
   );
   expect(checked.verified).toBeUndefined();
-  expect(checked.result).toMatchObject({ signedIn: false, failed: "credentials_not_submitted" });
+  expect(checked.result).toEqual({
+    signedIn: false,
+    failed: "credentials_not_submitted",
+    nextStep:
+      "No screen on this browser was submitted after the host filled the login's identifier with a password, code, or protected approval, so the host cannot take this page as signed in yet. Send each sign-in screen's signInStep (its fields and submit) first, then signedIn, then inspect read-only and correct the sign-in steps from the page's evidence.",
+  });
   expect(host.confirmed).toEqual([]);
 });
 
-it("counts a script's sign-in request only when it carries every filled value", async () => {
-  const fetchRequest = (values: readonly string[]): SignInRequest => ({
-    url: `https://api.example.test/sign-in`,
-    method: "POST",
-    body: JSON.stringify(values),
-    channel: "http",
-    resourceType: "fetch",
-  });
-  const partial = harness({ send: (_step, values) => [fetchRequest(values.slice(0, 1))] });
-  expect(
-    await partial.run((recorder) =>
-      Effect.gen(function* () {
-        yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-        return (yield* recorder.step(signedIn, undefined, Effect.void)).result;
-      }),
-    ),
-  ).toMatchObject({ failed: "credentials_not_submitted" });
-  const whole = harness({ send: (_step, values) => [fetchRequest(values)] });
-  expect(
-    await whole.run((recorder) =>
-      Effect.gen(function* () {
-        yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-        return yield* recorder.step(signedIn, undefined, Effect.void);
-      }),
-    ),
-  ).toMatchObject({ verified: true });
-});
-
-/** An identity service off the site that a sign-in script posts the login to. */
-const identity = "https://identity.provider.test";
-/** The script's request to it, carrying the login's identifier and password. */
-const identityRequest = (values: readonly string[]): SignInRequest => ({
-  url: `${identity}/v1/sign-in?key=public-key`,
-  method: "POST",
-  body: JSON.stringify({ email: values[0], password: values[1] }),
-  channel: "http",
-  resourceType: "fetch",
-});
-
-it("names the origin off the site a script sent the whole login to, and counts nothing sent", async () => {
-  // A request to another off-site origin that carries only part of the login is not named.
-  const partial = (values: readonly string[]): SignInRequest => ({
-    url: "https://telemetry.other.test/collect",
-    method: "POST",
-    body: JSON.stringify({ field: values[0] }),
-    channel: "http",
-    resourceType: "xhr",
-  });
-  const untrusted = harness({
-    send: (_step, values) => [partial(values), identityRequest(values)],
-  });
-  const checked = await untrusted.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      const result = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(recorder.published()).toBeUndefined();
-      return result;
-    }),
-  );
-  expect(checked.verified).toBeUndefined();
-  expect(checked.untrustedSignInOrigins).toEqual([identity]);
-  // Exactly the origin, with no path, query or value.
-  expect(checked.result).toMatchObject({
-    signedIn: false,
-    failed: "credentials_not_submitted",
-    untrustedSignInOrigins: [identity],
-  });
-  expect(checked.result["nextStep"]).toContain("untrustedSignInOrigins");
-  expect(JSON.stringify(checked.result)).not.toContain(account.password);
-  expect(JSON.stringify(checked.result)).not.toContain(account.username);
-  expect(JSON.stringify(checked.result)).not.toContain("/v1/sign-in");
-  expect(untrusted.confirmed).toEqual([]);
-  // A login the page's own request never carried names no origin.
-  const unsent = harness({ send: () => [formRequest(["unrelated"])] });
-  const plain = await unsent.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      return (yield* recorder.step(signedIn, undefined, Effect.void)).result;
-    }),
-  );
-  expect(plain).toMatchObject({ failed: "credentials_not_submitted" });
-  expect(plain).not.toHaveProperty("untrustedSignInOrigins");
-});
-
-it("verifies a script's sign-in request to a configured sign-in origin off the site", async () => {
-  const trusted = harness({
-    authenticationOrigins: [identity],
-    send: (_step, values) => [identityRequest(values)],
-  });
-  const verified = await trusted.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      const result = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(recorder.published()).toBeDefined();
-      return result;
-    }),
-  );
-  expect(verified).toMatchObject({ verified: true, result: { signedIn: true } });
-});
-
-it("verifies once the caller trusts the origin the script sent the whole login to, with no second fill, and records the configured sign-in's recipe", async () => {
-  const send = (_step: AutofillStep, values: readonly string[]) => [identityRequest(values)];
-  const untrusted = harness({ send });
-  const trustedLater = await untrusted.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBeUndefined();
-      expect(recorder.untrustedOrigins()).toEqual([identity]);
-      // An origin no request carried the login to credits nothing.
-      recorder.trustOrigins(["https://other.provider.test"]);
-      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBeUndefined();
-      recorder.trustOrigins([identity]);
-      expect(recorder.untrustedOrigins()).toEqual([]);
-      const checked = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(checked).toMatchObject({ verified: true, result: { signedIn: true } });
-      return recorder.published();
-    }),
-  );
-  expect(untrusted.filled).toHaveLength(1);
-  const configured = harness({ authenticationOrigins: [identity], send });
-  const trustedUpFront = await configured.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      yield* recorder.step(signedIn, undefined, Effect.void);
-      return recorder.published();
-    }),
-  );
-  expect(trustedLater).toBeDefined();
-  expect(trustedLater).toEqual(trustedUpFront);
-});
-
-/** An identifier-first sign-in's first screen, its identifier alone. */
-const identifierOnly: SignInStep = {
-  fields: [{ selector: "#user", accepts: ["username"] }],
-  submit: "#next",
-};
-/**
- * An identifier-first sign-in's script: the first screen's request sends the identifier alone to
- * the identity service, and the second's sends the password alone, with the state handle it got,
- * to `passwordTo`.
- */
-const identifierFirst =
-  (passwordTo: string) =>
-  (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] =>
-    step.fields.some((field) => "accepts" in field)
-      ? [
-          {
-            url: `${identity}/v1/identify`,
-            method: "POST",
-            body: JSON.stringify({ identifier: values[0] }),
-            channel: "http",
-            resourceType: "fetch",
-          },
-        ]
-      : [
-          {
-            url: `${passwordTo}/v1/challenge`,
-            method: "POST",
-            body: JSON.stringify({ stateHandle: "state-1", password: values[0] }),
-            channel: "http",
-            resourceType: "fetch",
-          },
-          // Another origin that first hears the password alone is never named.
-          {
-            url: "https://telemetry.other.test/collect",
-            method: "POST",
-            body: JSON.stringify({ field: values[0] }),
-            channel: "http",
-            resourceType: "xhr",
-          },
-        ];
-
-it("verifies once the caller trusts the origin an identifier-first sign-in sent each screen's value to, and records the configured sign-in's recipe", async () => {
-  const send = identifierFirst(identity);
-  const untrusted = harness({ send });
-  const trustedLater = await untrusted.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const first = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(first.untrustedSignInOrigins).toEqual([identity]);
-      expect(recorder.untrustedOrigins()).toEqual([identity]);
-      recorder.trustOrigins([identity]);
-      const checked = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(checked).toMatchObject({ verified: true, result: { signedIn: true } });
-      return recorder.published();
-    }),
-  );
-  expect(untrusted.filled).toHaveLength(2);
-  const configured = harness({ authenticationOrigins: [identity], send });
-  const trustedUpFront = await configured.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const checked = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(checked).toMatchObject({ verified: true });
-      return recorder.published();
-    }),
-  );
-  expect(trustedLater).toBeDefined();
-  expect(trustedLater).toEqual(trustedUpFront);
-});
-
-it("verifies an identifier-first sign-in that sends the identifier off the site and the password alone to the site only when that origin is configured up front", async () => {
-  const send = identifierFirst(origin);
-  const later = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const first = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(first.untrustedSignInOrigins).toEqual([identity]);
-      recorder.trustOrigins([identity]);
-      return yield* recorder.step(signedIn, undefined, Effect.void);
-    }),
-  );
-  // A known limit: the site's request carried the password without the identifier, and trusting
-  // the identity service later credits only the identifier it heard.
-  expect(later.verified).toBeUndefined();
-  expect(later.result).toMatchObject({ failed: "credentials_not_submitted" });
-  const configured = await harness({ authenticationOrigins: [identity], send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      return yield* recorder.step(signedIn, undefined, Effect.void);
-    }),
-  );
-  expect(configured).toMatchObject({ verified: true });
-});
-
-it("asks nothing about an origin that heard the identifier alone once the caller trusted the one that received the password", async () => {
-  const analytics = "https://analytics.other.test";
-  const send = (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] => [
-    ...identifierFirst(identity)(step, values),
-    ...(step.fields.some((field) => "accepts" in field)
-      ? [
-          {
-            url: `${analytics}/capture`,
-            method: "POST",
-            body: JSON.stringify({ email: values[0] }),
-            channel: "http" as const,
-            resourceType: "xhr" as const,
-          },
-        ]
-      : []),
-  ];
-  const checked = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const first = yield* recorder.step(signedIn, undefined, Effect.void);
-      // Only the identity service received the password, so only it is named and asked about.
-      expect(first.untrustedSignInOrigins).toEqual([identity]);
-      recorder.trustOrigins([identity]);
-      // The password counts as sent now, so the analytics origin is still never named.
-      expect(recorder.untrustedOrigins()).toEqual([]);
-      // What the build names keeps the trusted origin until a sign-in verifies, never the other.
-      expect(recorder.namedOrigins([identity, analytics])).toEqual([identity]);
-      return yield* recorder.step(signedIn, undefined, Effect.void);
-    }),
-  );
-  expect(checked).toMatchObject({ verified: true });
-});
-
-it("names only the origin that received the password in what a build names, though an early check named one that heard the identifier alone", async () => {
-  const analytics = "https://analytics.other.test";
-  const send = (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] => [
-    ...identifierFirst(identity)(step, values),
-    ...(step.fields.some((field) => "accepts" in field)
-      ? [
-          {
-            url: `${analytics}/capture`,
-            method: "POST",
-            body: JSON.stringify({ email: values[0] }),
-            channel: "http" as const,
-            resourceType: "xhr" as const,
-          },
-        ]
-      : []),
-  ];
-  const { early, later, named } = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      // A check before the password screen: neither origin received a proof yet.
-      const first = yield* recorder.step(signedIn, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const second = yield* recorder.step(signedIn, undefined, Effect.void);
-      // The build keeps every origin a check named, as the local host does.
-      const checked = [
-        ...(first.untrustedSignInOrigins ?? []),
-        ...(second.untrustedSignInOrigins ?? []),
-      ];
-      return {
-        early: first.untrustedSignInOrigins,
-        later: second.untrustedSignInOrigins,
-        named: recorder.namedOrigins(checked),
-      };
-    }),
-  );
-  expect(early).toEqual([identity, analytics]);
-  expect(later).toEqual([identity]);
-  expect(named).toEqual([identity]);
-});
-
-it("says whether the open sign-in sent a password or a code anywhere, the site included and counted or not, so a host can tell a check before the password screen apart", async () => {
-  const analytics = "https://analytics.other.test";
-  /** A script's post of `body` to `url`. */
-  const post = (url: string, body: object): SignInRequest => ({
-    url,
-    method: "POST",
-    body: JSON.stringify(body),
-    channel: "http",
-    resourceType: "fetch",
-  });
-  // The identifier screen's email reaches the identity service and an analytics script; the
-  // password screen's requests are `password`'s.
-  const sending =
-    (password: (values: readonly string[]) => readonly SignInRequest[]) =>
-    (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] =>
-      step.fields.some((field) => "accepts" in field)
-        ? [
-            post(`${identity}/v1/identify`, { identifier: values[0] }),
-            post(`${analytics}/capture`, { email: values[0] }),
-          ]
-        : password(values);
-  const toIdentity = (values: readonly string[]) => [
-    post(`${identity}/v1/challenge`, { stateHandle: "state-1", password: values[0] }),
-  ];
-  const host = harness({ send: sending(toIdentity) });
-  const proofs = await host.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      // A check before the password screen names both, and no password went anywhere yet.
-      const early = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(early.untrustedSignInOrigins).toEqual([identity, analytics]);
-      const beforePassword = recorder.receivedProof();
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const later = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(later.untrustedSignInOrigins).toEqual([identity]);
-      const afterPassword = recorder.receivedProof();
-      recorder.trustOrigins([identity]);
-      const verified = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(verified).toMatchObject({ verified: true });
-      return { beforePassword, afterPassword, afterVerified: recorder.receivedProof() };
-    }),
-  );
-  expect(proofs).toEqual({ beforePassword: false, afterPassword: true, afterVerified: false });
-  expect(host.filled).toHaveLength(2);
-  /** Signs in through both screens and checks: what the check named, and whether a proof went. */
-  const afterCheck = (password: (values: readonly string[]) => readonly SignInRequest[]) =>
-    harness({ send: sending(password) }).run((recorder) =>
-      Effect.gen(function* () {
-        yield* recorder.step(identifierOnly, undefined, Effect.void);
-        yield* recorder.step(passwordOnly, undefined, Effect.void);
-        const checked = yield* recorder.step(signedIn, undefined, Effect.void);
-        return { named: checked.untrustedSignInOrigins, proof: recorder.receivedProof() };
-      }),
-    );
-  // The password went to the site without the identifier: nothing counts, and both origins off
-  // the site heard the email alone, but a password went somewhere.
-  const toSite = await afterCheck((values) => [
-    post(`${origin}/api/password`, { stateHandle: "state-1", password: values[0] }),
-  ]);
-  expect(toSite).toEqual({ named: [identity, analytics], proof: true });
-  // A password screen whose request the host never heard sent nothing it can tell.
-  const unheard = await afterCheck(() => []);
-  expect(unheard).toEqual({ named: [identity, analytics], proof: false });
-});
-
-it("names the origin an identifier-first sign-in sent the identifier to when the password went in the site's own form post, and a yes verifies", async () => {
-  // The identifier goes to the identity service by script; the password screen posts natively to
-  // the site's form, which counts the password alone.
-  const send = (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] =>
-    step.fields.some((field) => "accepts" in field)
-      ? identifierFirst(identity)(step, values)
-      : [formRequest(values)];
-  const later = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const first = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(first.untrustedSignInOrigins).toEqual([identity]);
-      expect(first.result).toMatchObject({ untrustedSignInOrigins: [identity] });
-      expect(recorder.untrustedOrigins()).toEqual([identity]);
-      recorder.trustOrigins([identity]);
-      return yield* recorder.step(signedIn, undefined, Effect.void);
-    }),
-  );
-  expect(later).toMatchObject({ verified: true });
-  const configured = await harness({ authenticationOrigins: [identity], send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      return yield* recorder.step(signedIn, undefined, Effect.void);
-    }),
-  );
-  expect(configured).toMatchObject({ verified: true });
-});
-
-it("fails a check plainly, naming no origin, when every value an origin off the site heard already counts as sent", async () => {
-  // The identity service hears the identifier, which the site's own form post then also counts;
-  // no password or code was sent anywhere.
-  const send = (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] => [
-    ...identifierFirst(identity)(step, values),
-    formRequest(values),
-  ];
-  const { checked, named } = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      const result = yield* recorder.step(signedIn, undefined, Effect.void);
-      return { checked: result, named: recorder.namedOrigins([]) };
-    }),
-  );
-  expect(checked.untrustedSignInOrigins).toBeUndefined();
-  expect(checked.result).toMatchObject({ signedIn: false, failed: "credentials_not_submitted" });
-  expect(checked.result).not.toHaveProperty("untrustedSignInOrigins");
-  expect(checked.result["nextStep"]).not.toContain("untrustedSignInOrigins");
-  expect(named).toEqual([]);
-});
-
-it("names only the origins off the site that received the password, never one that heard the identifier alone, with or without a check", async () => {
-  const analytics = "https://analytics.other.test";
-  // An analytics script captures the email the first screen sends; the second screen's script
-  // sends the whole login to the identity service.
-  const send = (step: AutofillStep, values: readonly string[]): readonly SignInRequest[] =>
-    step.fields.some((field) => "accepts" in field)
-      ? [
-          {
-            url: `${analytics}/capture`,
-            method: "POST",
-            body: JSON.stringify({ email: values[0] }),
-            channel: "http",
-            resourceType: "xhr",
-          },
-        ]
-      : [identityRequest([account.username, values[0] ?? ""])];
-  const { checked, named } = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      const result = yield* recorder.step(signedIn, undefined, Effect.void);
-      return { checked: result, named: recorder.untrustedOrigins() };
-    }),
-  );
-  expect(checked.untrustedSignInOrigins).toEqual([identity]);
-  expect(checked.result).toMatchObject({ untrustedSignInOrigins: [identity] });
-  expect(named).toEqual([identity]);
-  // With no check at all, the open sign-in names the same origin.
-  const unchecked = await harness({ send }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      yield* recorder.step(passwordOnly, undefined, Effect.void);
-      // The host checks each request it heard on its own, after the fill returns.
-      yield* Effect.sleep("20 millis");
-      return recorder.untrustedOrigins();
-    }),
-  );
-  expect(unchecked).toEqual([identity]);
-  // No origin is named once a sign-in verified.
-  const configured = await harness({
-    authenticationOrigins: [identity],
-    send: (_step, values) => [identityRequest(values)],
-  }).run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      yield* recorder.step(signedIn, undefined, Effect.void);
-      return recorder.untrustedOrigins();
-    }),
-  );
-  expect(configured).toEqual([]);
-});
-
-it("takes a code an exploration typed as the proof after a sent identifier", async () => {
+it("counts a screen as sent once the host clicked its submit, whatever the page's requests carried", async () => {
   const host = harness();
-  const result = await host.run((recorder) =>
+  const checked = await host.run((recorder) =>
     Effect.gen(function* () {
-      yield* recorder.step(
-        { fields: [{ selector: "#user", accepts: ["username"] }], submit: "#next" },
-        undefined,
-        Effect.void,
-      );
-      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBeUndefined();
-      recorder.codeTyped();
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
+      yield* recorder.step(passwordOnly, undefined, Effect.void);
       return yield* recorder.step(signedIn, undefined, Effect.void);
     }),
   );
-  expect(result.verified).toBe(true);
+  expect(checked).toMatchObject({ verified: true, result: { signedIn: true } });
+  expect(host.confirmed).toHaveLength(1);
+});
+
+it("counts a screen as sent once the minter goes on after the host's click failed", async () => {
+  const host = harness({
+    report: (step) => ({
+      outcome: "filled",
+      fields: step.fields.map((field) => ({ slot: field.slot, status: "filled" as const })),
+      submit: "failed",
+      url: `${origin}/login`,
+    }),
+  });
+  const published = await host.run((recorder) =>
+    Effect.gen(function* () {
+      const screen = yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      expect(screen.result["nextStep"]).toContain("its click of the submit failed");
+      // The minter clicked that one submit itself, then checks.
+      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBe(true);
+      return recorder.published();
+    }),
+  );
+  expect(published?.recipe.steps[0]).toMatchObject({ submittedBy: "minter" });
+});
+
+// A refused step shows the minter went on from the screen before, as a method chooser shows
+// only once the login screen was sent, so that screen's password counts as sent before the
+// refusal. A corrected login then never fills the same password a third time.
+it.each<[string, SignInStep]>([
+  [
+    "masked method",
+    {
+      fields: [],
+      submit: "#sms",
+      methods: [{ method: "sms", selector: "button:has-text('Text ***-***-1234')" }],
+    },
+  ],
+  ["[private] selector", { fields: [], submit: "button:has-text('Continue as [private]')" }],
+])("counts the screen before as sent when a %s step is refused, so a corrected login's third fill of the same password is refused", async (_, refusedStep) => {
+  let fills = 0;
+  const host = harness({
+    held: account,
+    visible: ["#no-account"],
+    corrections: [
+      { ...account, username: "ada-corrected" },
+      { ...account, username: "ada-second" },
+    ],
+    // The host's click fails on the first screen, and goes through on every later one.
+    report: (step) => ({
+      outcome: "filled",
+      fields: step.fields.map((field) => ({ slot: field.slot, status: "filled" as const })),
+      submit: (fills += 1) === 1 ? "failed" : "clicked",
+      url: `${origin}/login`,
+    }),
+  });
+  const login: SignInStep = {
+    ...identifierAndPassword,
+    rejectedMarkers: [{ slot: "username", selector: "#no-account" }],
+  };
+  const rejectedUsername: SignInStep = { rejected: { slot: "username" } };
+  const third = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(login, undefined, Effect.void);
+      const refused = yield* recorder.step(refusedStep, undefined, Effect.void);
+      expect(refused.result).toMatchObject({
+        step: { outcome: "refused", reason: "selector_names_contact" },
+      });
+      for (let round = 0; round < 2; round++) {
+        if (round > 0) yield* recorder.step(login, undefined, Effect.void);
+        const corrected = yield* recorder.step(rejectedUsername, undefined, Effect.void);
+        expect(corrected.result).toMatchObject({ corrected: true });
+      }
+      return yield* recorder.step(login, undefined, Effect.void);
+    }),
+  );
+  // The password went out on two fills, so the third login screen types nothing.
+  expect(third.result).toMatchObject({
+    step: { outcome: "refused", reason: "credential_already_filled" },
+  });
+  expect(host.filled.map(({ values }) => values)).toEqual([
+    [account.username, account.password],
+    ["ada-corrected", account.password],
+  ]);
 });
 
 it("confirms an approval after a sent identifier, records it as version 2, and verifies with it", async () => {
@@ -846,11 +450,7 @@ it("confirms an approval after a sent identifier, records it as version 2, and v
     Effect.gen(function* () {
       const early = yield* recorder.step({ approval: "device" }, undefined, Effect.void);
       expect(early.result).toMatchObject({ approved: false, failed: "identifier_not_submitted" });
-      yield* recorder.step(
-        { fields: [{ selector: "#user", accepts: ["username"] }], submit: "#next" },
-        undefined,
-        Effect.void,
-      );
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
       const approved = yield* recorder.step({ approval: "device" }, undefined, Effect.void);
       expect(approved).toMatchObject({ approved: true, result: { approved: true } });
       expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBe(true);
@@ -870,19 +470,35 @@ it("confirms an approval after a sent identifier, records it as version 2, and v
   });
 });
 
-it("keeps the sign-in open when the host refuses an indicator a signed-out page showed", async () => {
-  const host = harness({ refuseIndicator: true });
-  const result = await host.run((recorder) =>
+it("refuses a marker a signed-out page shows, and a sign-in page's path, before reading the page, keeping the sign-in open", async () => {
+  const host = harness({ signedOutPages: [signedOutPage(`<nav id="site-menu">Menu</nav>`)] });
+  await host.run((recorder) =>
     Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      const refused = yield* recorder.step(signedIn, undefined, Effect.void);
-      expect(refused.result).toMatchObject({ failed: "marker_matches_signed_out_page" });
+      yield* recorder.step(identifierAndPassword, `${origin}/login`, Effect.void);
+      const shown = yield* recorder.step(
+        { signedIn: { selector: "#site-menu" } },
+        undefined,
+        Effect.void,
+      );
+      expect(shown.result).toEqual({
+        signedIn: false,
+        failed: "marker_matches_signed_out_page",
+        nextStep:
+          "This marker also shows on a page the host saw signed out, so it cannot tell a signed-in page from a signed-out one. The host checks this marker after resets, at every operation start, after page loads in the middle of a run and on whatever page a failure lands on, so pick a site-wide element only a signed-in user sees, such as the global header's account menu or a sign-out control, preferring an aria-label, role or visible text to generated class names. Test it with check_signed_in_marker until every check passes, then send signedIn again.",
+      });
+      const path = yield* recorder.step(
+        { signedIn: { urlPath: "/login" } },
+        undefined,
+        Effect.void,
+      );
+      expect(path.result).toMatchObject({ signedIn: false, failed: "marker_is_login_path" });
+      expect(host.confirmed).toEqual([]);
       expect(recorder.published()).toBeUndefined();
-      return refused;
+      // The sign-in stayed open: another marker verifies it with nothing filled again.
+      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBe(true);
     }),
   );
-  expect(result.verified).toBeUndefined();
-  expect(host.listeners.size).toBe(0);
+  expect(host.filled).toHaveLength(1);
 });
 
 it("refuses an indicator, a selector or a page that names the account, typing nothing", async () => {
@@ -920,6 +536,110 @@ it("refuses an indicator, a selector or a page that names the account, typing no
       expect(indicator.result).toMatchObject({ failed: "indicator_holds_identity" });
     }),
   );
+});
+
+/** What the minter reads when a recorded selector names the account. */
+const selectorsNotice =
+  'A screen\'s selectors and submit publish with the tool, so they never name this account\'s username, email, phone or account number (such as a "Continue as …" button or a data attribute holding it). Name each control by its role, label or a stable attribute, and send the step again.';
+
+it("refuses a recorded selector holding [private], the mask the minter sees for every value it was given, typing nothing", async () => {
+  const host = harness({ held: account });
+  await host.run((recorder) =>
+    Effect.gen(function* () {
+      // The page said "No account found for [private]", and the minter recorded that as the
+      // username's error.
+      const marker = yield* recorder.step(
+        {
+          ...identifierAndPassword,
+          rejectedMarkers: [{ slot: "username", selector: "text=No account found for [private]" }],
+        },
+        undefined,
+        Effect.void,
+      );
+      expect(marker.result).toEqual({
+        step: { outcome: "refused", reason: "selector_names_contact", target: 0 },
+        nextStep: selectorsNotice,
+      });
+      for (const step of [
+        { fields: [{ selector: "input[value='[private]']", accepts: ["username"] }] },
+        { fields: [{ selector: "#user", accepts: ["username"] }], submit: "#go-[private]" },
+        {
+          fields: [
+            {
+              selector: "#answer",
+              slot: "private_answer",
+              questionSelector: "text=Hello [private]",
+            },
+          ],
+          submit: "#next",
+        },
+        {
+          fields: [],
+          submit: "#send",
+          methods: [{ method: "email", selector: "text=Email [private]" }],
+        },
+      ] satisfies SignInStep[]) {
+        const refused = yield* recorder.step(step, undefined, Effect.void);
+        expect(refused.result).toMatchObject({
+          step: { outcome: "refused", reason: "selector_names_contact" },
+        });
+      }
+      expect(host.filled).toEqual([]);
+      expect(host.reviewed).toEqual([]);
+      // The `[password]`, `[code]` and `[recovery_code]` placeholders are refused by the shared guard as before.
+      const placeholder = yield* recorder.step(
+        {
+          fields: [{ selector: "#user", accepts: ["username"] }],
+          submit: "button:has-text('[password]')",
+        },
+        undefined,
+        Effect.void,
+      );
+      expect(placeholder.result).toMatchObject({
+        step: { outcome: "refused", reason: "selector_names_contact" },
+      });
+      expect(host.filled).toEqual([]);
+    }),
+  );
+});
+
+it("refuses a signed-in check holding [private] before it reads the page", async () => {
+  const host = harness({ held: account });
+  const result = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      return yield* recorder.step(
+        { signedIn: { selector: "text=Hi [private]" } },
+        undefined,
+        Effect.void,
+      );
+    }),
+  );
+  expect(result.result).toEqual({
+    signedIn: false,
+    failed: "indicator_holds_identity",
+    nextStep:
+      "The signed-in check names this account's own identity, which publishes with the tool and fails for every other login. Name a marker every signed-in account shows, such as a sign-out control or the account menu, never the account's name, email or number, then inspect read-only and correct the sign-in steps from the page's evidence.",
+  });
+  expect(host.confirmed).toEqual([]);
+});
+
+it.each([
+  ["path", { urlPath: "/accounts/[private]" }],
+  ["account page", { selector: "#account-menu", openPath: "/accounts/[private]/settings" }],
+])("refuses a signed-in check whose %s holds [private] before it reads the page", async (_, check) => {
+  const host = harness({ held: account });
+  const result = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      const refused = yield* recorder.step({ signedIn: check }, undefined, Effect.void);
+      expect(recorder.published()).toBeUndefined();
+      return refused;
+    }),
+  );
+  expect(result.verified).toBeUndefined();
+  expect(result.result).toMatchObject({ signedIn: false, failed: "indicator_holds_identity" });
+  expect(host.confirmed).toEqual([]);
 });
 
 it("refuses a password screen before any identifier screen while the build holds no login", async () => {
@@ -1029,36 +749,41 @@ it("fills a password twice at most in one sign-in, and a ZIP once", async () => 
   expect(host.filled).toHaveLength(3);
 });
 
-it("accepts a rejected value only once it was sent, and corrects a password once in place", async () => {
-  const corrected = { ...account, password: "corrected-password" };
-  const host = harness({ corrections: [corrected, { ...corrected, password: "third" }] });
+it("takes a rejected password only once its recorded marker shows, and corrects it twice with the tries left", async () => {
+  const host = harness({
+    visible: ["#wrong-password"],
+    corrections: [
+      { ...account, password: "corrected-password" },
+      { ...account, password: "second-correction" },
+    ],
+  });
   const exit = await host.run((recorder) =>
     Effect.gen(function* () {
-      const early = yield* recorder.step(
-        { rejected: { slot: "password" } },
-        undefined,
-        Effect.void,
-      );
-      expect(early.result).toMatchObject({ step: { reason: "nothing_rejected" } });
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      const correction = yield* recorder.step(
-        { rejected: { slot: "password" } },
-        undefined,
-        Effect.void,
-      );
-      expect(correction.result).toMatchObject({ corrected: true });
-      // The corrected login starts a new sign-in, filled with the new password.
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      return yield* Effect.exit(
-        recorder.step({ rejected: { slot: "password" } }, undefined, Effect.void),
-      );
+      for (const expected of ["corrected-password", "second-correction"]) {
+        yield* recorder.step(markedLogin, undefined, Effect.void);
+        const correction = yield* recorder.step(rejectedPassword, undefined, Effect.void);
+        expect(correction.result).toEqual({
+          corrected: true,
+          nextStep:
+            "The owner gave a corrected login. Start the sign-in screens again from the login page: send each screen's signInStep, then signedIn.",
+        });
+        expect(expected).toBeDefined();
+      }
+      yield* recorder.step(markedLogin, undefined, Effect.void);
+      return yield* Effect.exit(recorder.step(rejectedPassword, undefined, Effect.void));
     }),
   );
+  // Each corrected login starts a new sign-in, filled with its own password.
   expect(host.filled.map(({ values }) => values[1])).toEqual([
     account.password,
-    corrected.password,
+    "corrected-password",
+    "second-correction",
   ]);
-  expect(host.logins).toEqual(["missing_credentials", "invalid_credentials:password"]);
+  expect(host.logins).toEqual([
+    "missing_credentials",
+    "invalid_credentials:password:2",
+    "invalid_credentials:password:1",
+  ]);
   expect(exit).toEqual(
     Exit.fail(
       expect.objectContaining({ code: "CredentialsRejected", rejectedCredential: "password" }),
@@ -1066,48 +791,84 @@ it("accepts a rejected value only once it was sent, and corrects a password once
   );
 });
 
-// A page that says the account is locked is no field the owner can correct: once the login's
-// identifier went out and the element that says so shows, the sign-in ends as an account-level
-// rejection, and nothing is asked.
-it("ends the sign-in as AccountLocked once the site visibly refused the account the login named", async () => {
-  const host = harness({ corrections: [account], visible: ["#locked"] });
-  const exit = await host.run((recorder) =>
+it("takes no verdict on a reported rejection no recorded marker shows, and asks nobody", async () => {
+  const host = harness({ held: account });
+  const result = await host.run((recorder) =>
     Effect.gen(function* () {
-      const locked = (selector: string): SignInStep => ({
-        rejected: { account: "locked", selector },
-      });
-      const early = yield* recorder.step(locked("#locked"), undefined, Effect.void);
-      expect(early.result).toMatchObject({ step: { reason: "nothing_rejected" } });
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      const hidden = yield* recorder.step(locked("#other"), undefined, Effect.void);
-      expect(hidden.result).toMatchObject({ step: { reason: "marker_not_visible" } });
-      return yield* Effect.exit(recorder.step(locked("#locked"), undefined, Effect.void));
+      yield* recorder.step(markedLogin, undefined, Effect.void);
+      return yield* recorder.step(rejectedPassword, undefined, Effect.void);
     }),
   );
-  expect(exit).toEqual(
-    Exit.fail(
-      expect.objectContaining({
-        authentication: expect.objectContaining({ code: "AccountLocked", account: "locked" }),
-      }),
-    ),
+  expect(result.result).toEqual({
+    rejected: false,
+    reason: "no_rejection_marker",
+    nextStep:
+      "No recorded error marker for the password shows on the page, so the host neither marks the login nor asks its owner. If the page shows the site's error for that field, send that screen's signInStep again with the error as its rejectedMarkers, then report the rejection again. Otherwise explore read-only to see the page, then inspect read-only and correct the sign-in steps from the page's evidence.",
+  });
+  expect(host.logins).toEqual([]);
+});
+
+it("takes a rejected password whose recorded marker showed right after the host's submit, though it went before the report", async () => {
+  const host = harness({
+    toast: "#wrong-password",
+    corrections: [{ ...account, password: "corrected-password" }],
+  });
+  const result = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(markedLogin, undefined, Effect.void);
+      // The site's message showed for a few seconds and went before the minter reported it.
+      host.shown.clear();
+      return yield* recorder.step(rejectedPassword, undefined, Effect.void);
+    }),
   );
-  expect(host.logins).toEqual(["missing_credentials"]);
+  expect(result.result).toMatchObject({ corrected: true });
+  expect(host.logins).toEqual(["missing_credentials", "invalid_credentials:password:2"]);
+});
+
+it("keeps the markers it read right after a submit only until the next screen", async () => {
+  const host = harness({ held: account, toast: "#wrong-password" });
+  const result = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(markedLogin, undefined, Effect.void);
+      host.shown.clear();
+      // The next screen's submit showed no error, so the earlier message no longer counts.
+      yield* recorder.step(passwordOnly, undefined, Effect.void);
+      return yield* recorder.step(rejectedPassword, undefined, Effect.void);
+    }),
+  );
+  expect(result.result).toMatchObject({ rejected: false, reason: "no_rejection_marker" });
+  expect(host.logins).toEqual([]);
+});
+
+it("refuses a rejection of a value this sign-in never sent", async () => {
+  const host = harness();
+  const early = await host.run((recorder) =>
+    recorder.step(rejectedPassword, undefined, Effect.void),
+  );
+  expect(early.result).toEqual({
+    step: { outcome: "refused", reason: "nothing_rejected", target: 0 },
+    nextStep:
+      "No password was sent in this sign-in, so there is nothing for the site to have rejected. Explore read-only to see the page, then send the next signInStep.",
+  });
 });
 
 it("ends the build when the correction repeats the rejected password", async () => {
-  const host = harness({ corrections: [account] });
+  const host = harness({ visible: ["#wrong-password"], corrections: [account] });
   const exit = await host.run((recorder) =>
     Effect.gen(function* () {
-      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
-      return yield* Effect.exit(
-        recorder.step({ rejected: { slot: "password" } }, undefined, Effect.void),
-      );
+      yield* recorder.step(markedLogin, undefined, Effect.void);
+      return yield* Effect.exit(recorder.step(rejectedPassword, undefined, Effect.void));
     }),
   );
   expect(Exit.isFailure(exit) && exit.cause._tag === "Fail" && exit.cause.error).toBeInstanceOf(
     MintFailure,
   );
-  expect(exit).toEqual(Exit.fail(expect.objectContaining({ code: "CredentialsRejected" })));
+  expect(exit).toEqual(
+    Exit.fail(
+      expect.objectContaining({ code: "CredentialsRejected", rejectedCredential: "password" }),
+    ),
+  );
+  expect(host.filled).toHaveLength(1);
 });
 
 it("asks a new code after the site rejected one, and ends once three were rejected", async () => {
@@ -1120,7 +881,11 @@ it("asks a new code after the site rejected one, and ends once three were reject
         yield* recorder.step(code, undefined, Effect.void);
         expect(
           (yield* recorder.step({ rejected: { slot: "code" } }, undefined, Effect.void)).result,
-        ).toMatchObject({ rejected: "code" });
+        ).toEqual({
+          rejected: "code",
+          nextStep:
+            "The host will ask the owner for a new code at the next code step. Send the code screen's signInStep again.",
+        });
       }
       yield* recorder.step(code, undefined, Effect.void);
       return yield* Effect.exit(
@@ -1135,115 +900,211 @@ it("asks a new code after the site rejected one, and ends once three were reject
   ]);
   expect(host.asked.map(({ questions }) => questions[0]?.prompt)).toEqual([
     "Enter the sign-in code example.test sent you.",
-    `The site did not accept the last code, so it needs a new one. Enter the sign-in code example.test sent you.`,
-    `The site did not accept the last code, so it needs a new one. Enter the sign-in code example.test sent you.`,
+    "The site refused the last code. Enter the newest sign-in code example.test sent you.",
+    "The site refused the last code. Enter the newest sign-in code example.test sent you.",
   ]);
   expect(exit).toEqual(
     Exit.fail(expect.objectContaining({ code: "CredentialsRejected", rejectedCredential: "code" })),
   );
 });
 
-// A code widget that sends itself when its last box is filled, with no button: the host clicks
-// nothing, and the page moving on is what says the code may have gone out.
-const selfSendingCode: SignInStep = { fields: [{ selector: "#code", slot: "code" }] };
-const isCode = (step: AutofillStep) => step.fields.some((field) => field.slot === "code");
-const pageSentHarness = (send: NonNullable<Options["send"]>) =>
-  harness({
+// A page that says the account is locked is no field the owner can correct: once the login went
+// out and the element that says so shows, the sign-in ends as an account-level rejection.
+it("ends the sign-in as AccountLocked once the site visibly refused the account the login named", async () => {
+  const host = harness({
+    visible: ["#locked", "#site-menu"],
+    signedOutPages: [signedOutPage(`<nav id="site-menu">Menu</nav>`)],
+  });
+  const locked = (selector: string): SignInStep => ({ rejected: { account: "locked", selector } });
+  const exit = await host.run((recorder) =>
+    Effect.gen(function* () {
+      const early = yield* recorder.step(locked("#locked"), undefined, Effect.void);
+      expect(early.result).toEqual({
+        rejected: false,
+        reason: "nothing_rejected",
+        nextStep:
+          "No screen of an open sign-in on this browser submitted the login, so the site cannot have refused its account. Send the sign-in screens' signInSteps first, then inspect read-only and correct the sign-in steps from the page's evidence.",
+      });
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
+      // The identifier alone is no login the site could refuse the account for.
+      expect((yield* recorder.step(locked("#locked"), undefined, Effect.void)).result).toMatchObject(
+        { reason: "nothing_rejected" },
+      );
+      yield* recorder.step(passwordOnly, undefined, Effect.void);
+      const everywhere = yield* recorder.step(locked("#site-menu"), undefined, Effect.void);
+      expect(everywhere.result).toEqual({
+        rejected: false,
+        reason: "marker_matches_signed_out_page",
+        nextStep:
+          "This marker also shows on a page the host saw signed out, before the login was sent, so it cannot tell a lock message from the rest of the site. Report the account again with a selector of the message itself, then inspect read-only and correct the sign-in steps from the page's evidence.",
+      });
+      const hidden = yield* recorder.step(locked("#other"), undefined, Effect.void);
+      expect(hidden.result).toEqual({
+        rejected: false,
+        reason: "no_rejection_marker",
+        nextStep:
+          "The marker does not show on the page the sign-in led to, so the host takes no verdict on the account. Explore read-only to see the page, and report the account again with a selector of the message it shows, then inspect read-only and correct the sign-in steps from the page's evidence.",
+      });
+      return yield* Effect.exit(recorder.step(locked("#locked"), undefined, Effect.void));
+    }),
+  );
+  expect(exit).toEqual(
+    Exit.fail(
+      expect.objectContaining({
+        authentication: expect.objectContaining({ code: "AccountLocked", account: "locked" }),
+      }),
+    ),
+  );
+  expect(host.logins).toEqual(["missing_credentials"]);
+});
+
+// A phone field the site's country picker preset to another country keeps other digits than the
+// number: the fill stops before its submit, and the agent hears the number's calling code, so it
+// sets the picker and sends the step again. Nobody is asked to correct the number.
+it("tells the agent the calling code of a phone the field changed, asking nobody and sending nothing", async () => {
+  let sends = 0;
+  const host = harness({
+    held: { ...account, phone: "+7 912 345-67-89" },
+    report: (step) => {
+      sends += 1;
+      return {
+        outcome: "filled",
+        fields: step.fields.map((field) => ({
+          slot: field.slot,
+          status: sends === 1 ? ("changed" as const) : ("filled" as const),
+        })),
+        submit: sends === 1 ? "not_attempted" : "clicked",
+        url: `${origin}/login`,
+        ...(sends === 1 ? { typed: true as const } : {}),
+      };
+    },
+  });
+  const phoneScreen: SignInStep = {
+    fields: [{ selector: "#phone", accepts: ["phone"] }],
+    submit: "#next",
+  };
+  const [changed, again] = await host.run((recorder) =>
+    Effect.all([
+      recorder.step(phoneScreen, undefined, Effect.void),
+      recorder.step(phoneScreen, undefined, Effect.void),
+    ]),
+  );
+  expect(changed.result["nextStep"]).toBe(
+    "The phone field kept different digits than the number the host typed, as when the site's country picker is set to another country. Nothing was submitted and nobody was asked. The number's country calling code is +7. If the screen has a country picker, prefer setting it to that country with an explore step, then send this signInStep again.",
+  );
+  expect(JSON.stringify(changed.result)).not.toContain("912");
+  expect(again.report).toMatchObject({ submit: "clicked" });
+  expect(host.asked).toEqual([]);
+  expect(host.filled.map(({ values }) => values)).toEqual([
+    ["+7 912 345-67-89"],
+    ["+7 912 345-67-89"],
+  ]);
+});
+
+it("refuses a code step that names only some of the screen's one-character boxes, asking nothing", async () => {
+  const host = harness({ held: account, codeBoxes: 6, answers: { code: ["482913"] } });
+  const result = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      return yield* recorder.step(
+        { fields: [1, 2, 3].map((box) => ({ selector: `#otp-${box}`, slot: "code" as const })) },
+        undefined,
+        Effect.void,
+      );
+    }),
+  );
+  expect(result.report).toMatchObject({ outcome: "refused", reason: "code_boxes_incomplete" });
+  expect(result.result["nextStep"]).toContain("splits its code across 6 one-character boxes");
+  expect(host.asked).toEqual([]);
+  expect(host.filled).toHaveLength(1);
+});
+
+it("asks a code screen of one-character boxes for its code once, types a character in each, and verifies once its page sent it", async () => {
+  const host = harness({
     held: account,
-    answers: { code: ["482913", "482913", "482913"] },
-    send,
+    codeBoxes: 6,
+    answers: { code: ["482 913"] },
     report: (step) => ({
       outcome: "filled",
       fields: step.fields.map((field) => ({ slot: field.slot, status: "filled" as const })),
-      submit: isCode(step) ? "page" : "clicked",
+      submit: step.fields.some((field) => field.slot === "code") ? "page" : "clicked",
       url: `${origin}/next`,
     }),
   });
-
-it("tells the minter a code screen's page may have sent its code itself, and counts the code as filled, but verifies only once a request carried it", async () => {
-  // The page's own request for the code never reaches the host.
-  const unheard = pageSentHarness((step, values) => (isCode(step) ? [] : [formRequest(values)]));
-  await unheard.run((recorder) =>
-    Effect.gen(function* () {
-      yield* recorder.step(identifierOnly, undefined, Effect.void);
-      const screen = yield* recorder.step(selfSendingCode, undefined, Effect.void);
-      expect(screen.report).toMatchObject({ outcome: "filled", submit: "page" });
-      expect(screen.result["nextStep"]).toContain("the page may have sent them itself");
-      // It may have gone out, so it counts toward the code's two fills in one sign-in.
-      yield* recorder.step(selfSendingCode, undefined, Effect.void);
-      expect((yield* recorder.step(selfSendingCode, undefined, Effect.void)).result).toMatchObject({
-        step: { outcome: "refused", reason: "credential_already_filled" },
-      });
-      expect((yield* recorder.step(signedIn, undefined, Effect.void)).result).toMatchObject({
-        signedIn: false,
-        failed: "credentials_not_submitted",
-      });
-      expect(recorder.published()).toBeUndefined();
-    }),
-  );
-  expect(unheard.confirmed).toEqual([]);
-  // The page's own request carries the code, so the code proves the sign-in.
-  const heard = pageSentHarness((step, values) =>
-    isCode(step)
-      ? [
-          {
-            url: `${origin}/api/code`,
-            method: "POST",
-            body: JSON.stringify({ code: values[0] }),
-            channel: "http",
-            resourceType: "fetch",
-          },
-        ]
-      : [formRequest(values)],
-  );
-  expect(
-    await heard.run((recorder) =>
-      Effect.gen(function* () {
-        yield* recorder.step(identifierOnly, undefined, Effect.void);
-        yield* recorder.step(selfSendingCode, undefined, Effect.void);
-        return yield* recorder.step(signedIn, undefined, Effect.void);
-      }),
-    ),
-  ).toMatchObject({ verified: true, result: { signedIn: true } });
-});
-
-it("asks a code screen of one-character boxes for its code once, types a character in each, and verifies once a request carried the code whole", async () => {
   const boxes: SignInStep = {
     fields: [1, 2, 3, 4, 5, 6].map((box) => ({ selector: `#otp-${box}`, slot: "code" as const })),
   };
-  /** The code screen's own request, with `body` made of what the boxes were filled with. */
-  const sending = (body: (values: readonly string[]) => string) =>
-    pageSentHarness((step, values) =>
-      isCode(step)
-        ? [
-            {
-              url: `${origin}/api/code`,
-              method: "POST",
-              body: body(values),
-              channel: "http",
-              resourceType: "fetch",
-            },
-          ]
-        : [formRequest(values)],
-    );
-  const signIn = (made: ReturnType<typeof sending>) =>
-    made.run((recorder) =>
-      Effect.gen(function* () {
-        yield* recorder.step(identifierOnly, undefined, Effect.void);
-        yield* recorder.step(boxes, undefined, Effect.void);
-        return yield* recorder.step(signedIn, undefined, Effect.void);
-      }),
-    );
-  // A request with the last box's digit alone carries no code.
-  expect(await signIn(sending((values) => JSON.stringify({ step: values.at(-1) })))).toMatchObject({
-    result: { signedIn: false, failed: "credentials_not_submitted" },
-  });
-  const host = sending((values) => JSON.stringify({ code: values.join("") }));
-  expect(await signIn(host)).toMatchObject({ verified: true, result: { signedIn: true } });
+  const checked = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
+      const screen = yield* recorder.step(boxes, undefined, Effect.void);
+      expect(screen.result["nextStep"]).toContain("the page may have sent them itself");
+      return yield* recorder.step(signedIn, undefined, Effect.void);
+    }),
+  );
+  expect(checked).toMatchObject({ verified: true, result: { signedIn: true } });
   expect(
     host.asked.flatMap((request) => request.questions).filter((question) => question.id === "code"),
   ).toHaveLength(1);
   expect(host.filled.at(-1)?.values).toEqual(["4", "8", "2", "9", "1", "3"]);
+});
+
+it.each([6, 7, 8])("asks a code screen of %i one-character boxes for its code once, types a character in each, and verifies once the host's click sent it", async (count) => {
+  const digits = "4829135706".slice(0, count);
+  const host = harness({ held: account, codeBoxes: count, answers: { code: [digits] } });
+  const boxes: SignInStep = {
+    fields: Array.from({ length: count }, (_, at) => ({ selector: `#otp-${at + 1}`, slot: "code" as const })),
+    submit: "#verify",
+  };
+  const published = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
+      yield* recorder.step(boxes, undefined, Effect.void);
+      const checked = yield* recorder.step(signedIn, undefined, Effect.void);
+      expect(checked).toMatchObject({ verified: true, result: { signedIn: true } });
+      return recorder.published();
+    }),
+  );
+  expect(host.asked.flatMap((r) => r.questions).filter((q) => q.id === "code")).toHaveLength(1);
+  expect(host.filled.at(-1)?.values).toEqual(Array.from(digits));
+  expect(published?.recipe.steps[1]).toEqual({
+    page: `${origin}/login`, fields: boxes.fields, submit: "#verify", submittedBy: "host",
+  });
+});
+
+it.each([7, 8])("keeps a %i-box code unsent when its last box did not fill, so the check does not verify", async (count) => {
+  const digits = "4829135706".slice(0, count);
+  const host = harness({
+    held: account,
+    codeBoxes: count,
+    answers: { code: [digits] },
+    report: (step) => {
+      const codes = step.fields.some((field) => field.slot === "code");
+      return {
+        outcome: "filled",
+        fields: step.fields.map((field, at) => ({
+          slot: field.slot,
+          status: codes && at === step.fields.length - 1 ? ("failed" as const) : ("filled" as const),
+        })),
+        submit: codes ? ("not_attempted" as const) : ("clicked" as const),
+        url: `${origin}/next`,
+      };
+    },
+  });
+  const boxes: SignInStep = {
+    fields: Array.from({ length: count }, (_, at) => ({ selector: `#otp-${at + 1}`, slot: "code" as const })),
+    submit: "#verify",
+  };
+  const checked = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
+      yield* Effect.either(recorder.step(boxes, undefined, Effect.void));
+      return yield* Effect.either(recorder.step(signedIn, undefined, Effect.void));
+    }),
+  );
+  expect(host.filled).toHaveLength(2);
+  expect(JSON.stringify(checked)).not.toContain('"verified":true');
+  expect(host.confirmed).toEqual([]);
 });
 
 it("records a private answer's question selector in version 1, never its question or answer", async () => {
@@ -1272,7 +1133,7 @@ it("records a private answer's question selector in version 1, never its questio
     { selector: "#answer", slot: "private_answer", questionSelector: "#question" },
   ]);
   expect(host.asked.at(-1)?.questions[0]?.prompt).toBe(
-    `What was your first pet's name? (${origin})`,
+    "example.test asks this security question: What was your first pet's name?",
   );
   const text = JSON.stringify(published);
   for (const secret of ["first pet", "synthetic-answer", account.password, "Field"])
@@ -1303,18 +1164,66 @@ it("discards a private answer from the values it filled once the fill is over", 
   expect(host.given[0]).toEqual([account.username, ""]);
 });
 
-it("publishes only the latest verified sign-in, and none once a later one started", async () => {
-  const host = harness({ held: account });
+it("publishes only the latest verified sign-in, and none once a later one reached the page", async () => {
+  const unreached = (step: AutofillStep): AutofillStepReport => ({
+    outcome: "filled",
+    fields: step.fields.map((field) => ({ slot: field.slot, status: "not_attempted" as const })),
+    submit: "not_attempted",
+    url: `${origin}/login`,
+  });
+  let reach = true;
+  const host = harness({
+    held: account,
+    report: (step) =>
+      reach
+        ? {
+            outcome: "filled",
+            fields: step.fields.map((field) => ({ slot: field.slot, status: "filled" as const })),
+            submit: "clicked",
+            url: `${origin}/next`,
+          }
+        : unreached(step),
+  });
   await host.run((recorder) =>
     Effect.gen(function* () {
       yield* recorder.step(identifierAndPassword, undefined, Effect.void);
       yield* recorder.step(signedIn, undefined, Effect.void);
       expect(recorder.published()).toBeDefined();
+      // A later first screen that reached nothing leaves the verified one published.
+      reach = false;
+      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      expect(recorder.published()).toBeDefined();
       // A later sign-in's screen reached the page, so the verified one no longer describes it.
+      reach = true;
       yield* recorder.step(identifierAndPassword, undefined, Effect.void);
       expect(recorder.published()).toBeUndefined();
     }),
   );
+});
+
+it("takes a code an exploration typed as the proof after a sent identifier", async () => {
+  const host = harness();
+  const result = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierOnly, undefined, Effect.void);
+      expect((yield* recorder.step(signedIn, undefined, Effect.void)).verified).toBeUndefined();
+      recorder.codeTyped();
+      return yield* recorder.step(signedIn, undefined, Effect.void);
+    }),
+  );
+  expect(result.verified).toBe(true);
+});
+
+it("waits for a marker the page draws late before it takes the check's answer", async () => {
+  const host = harness({ held: account, lateMarker: 2 });
+  const checked = await host.run((recorder) =>
+    Effect.gen(function* () {
+      yield* recorder.step(identifierAndPassword, undefined, Effect.void);
+      return yield* recorder.step(signedIn, undefined, Effect.void);
+    }),
+  );
+  expect(checked).toMatchObject({ verified: true, result: { signedIn: true } });
+  expect(host.confirmed).toHaveLength(3);
 });
 
 it("judges a later build's first screen as typed into once an earlier build typed on the session's page", async () => {
@@ -1337,7 +1246,6 @@ it("judges a later build's first screen as typed into once an earlier build type
       keyboard: { insertText: () => Effect.fail(new Error("Insertion reply lost")) },
       siteOrigin: origin,
       authenticationOrigins: [],
-      onRequest: () => () => {},
       typing,
     });
   const step = {

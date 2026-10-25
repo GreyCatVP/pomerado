@@ -37,8 +37,11 @@ import {
   Schema,
 } from "effect";
 import type { ModelDiagnosticTiming } from "../models/model-diagnostic-timing.js";
+import type { WritePath } from "../mint/contracts.js";
 import type { RuntimeRecordInput } from "../models/model-runtime-record.js";
 import type { GuardianReasoningEffort } from "./model.js";
+import type { PromptCacheDiagnostic } from "../models/cached-instructions.js";
+export type { PromptCacheDiagnostic } from "../models/cached-instructions.js";
 import {
   cutToLimit,
   GuardianAction,
@@ -54,6 +57,7 @@ import type {
 } from "./review-contracts.js";
 import {
   decisionForKind,
+  guardianOutcomes,
   outcomeAccepted,
   reviewKindOf,
   reviewOutcomesOf,
@@ -129,6 +133,23 @@ const boundedRationale = (raw: unknown): unknown => {
   return { ...raw, rationale: cutToLimit(rationale, rationaleLimit) };
 };
 
+/** The characters an allow's advice may hold; the host cuts a longer one to fit. */
+const adviceLimit = 2000;
+/**
+ * A decision with its advice kept only on an allow and only when it says something, cut to its
+ * limit. Advice never blocks a step, so on a deny or escalate, whose rationale already carries
+ * everything the agent must change, the host drops it.
+ */
+const allowAdvice = (raw: unknown): unknown => {
+  if (typeof raw !== "object" || raw === null || !("advice" in raw)) return raw;
+  const { advice, ...rest } = raw as Record<string, unknown>;
+  return Reflect.get(raw, "outcome") === "allow" &&
+    typeof advice === "string" &&
+    advice.trim() !== ""
+    ? { ...rest, advice: cutToLimit(advice, adviceLimit) }
+    : rest;
+};
+
 export const GuardianDecision = Schema.Struct({
   outcome: Schema.Literal("allow", "deny", "escalate"),
   rationale: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4000)),
@@ -156,6 +177,12 @@ export const GuardianDecision = Schema.Struct({
    * reviewer that predates it, the host counts the refusal as `final`. Other kinds have none.
    */
   refusal: Schema.optional(Schema.suspend(() => GuardianRefusal)),
+  /**
+   * An execution or recovery allow's note for the agent, such as a doubt about which page value
+   * the request asks for. It never blocks the step; the host returns it with the allow. Other
+   * outcomes and kinds have none.
+   */
+  advice: Schema.optional(Schema.String.pipe(Schema.minLength(1), Schema.maxLength(adviceLimit))),
 });
 export type GuardianDecision = typeof GuardianDecision.Type;
 export class ReviewFailure extends Data.TaggedError("ReviewFailure")<{
@@ -187,6 +214,12 @@ export class ReviewFailure extends Data.TaggedError("ReviewFailure")<{
      * review again.
      */
     | "ModelCallStalled"
+    /**
+     * The model provider refused the review's request as over the model's input limit, its context
+     * window. That is no outage, and the same request fails the same way, so it is never retried as
+     * one.
+     */
+    | "InputTooLarge"
     /**
      * An execution review allowed without reading the submitted entrypoint, still after the
      * in-review rounds that asked for it. A verdict on unread source, not an outage: no retry.
@@ -246,7 +279,10 @@ const withoutDetail = (failure: ReviewFailure): ReviewFailure =>
 export interface HostReview {
   /** The host's name for the kind, sent as trusted_review.kind. */
   readonly kind: string;
-  /** The host's policy for the kind, sent as trusted_review.policy. */
+  /**
+   * The host's policy for the kind, sent as trusted_review.policy, after the policy the
+   * reviewer's `GuardianHostPolicies.hostKinds` registers for the kind, if that is other text.
+   */
   readonly policy: string;
   /** What the kind judges, sent as host_review. Untrusted unless the policy says otherwise. */
   readonly evidence: unknown;
@@ -305,6 +341,16 @@ export interface PendingExecution {
    */
   readonly taskUpdates?: readonly ReviewedTaskUpdate[];
   readonly screenedInput: string;
+  /**
+   * Execution reviews only: the agent's own description of the step, the screened `intent` of its
+   * execute call. Untrusted, never authority; the review reads at most its first 500 characters.
+   */
+  readonly agentNote?: string;
+  /**
+   * Execution reviews only: the write path a write build's act step declares or revises, screened,
+   * as its execute call carries it. Untrusted call data, never authority.
+   */
+  readonly writePath?: WritePath;
   readonly screenedObservations: string;
   readonly accountScope: string;
   readonly allowedOrigins: readonly string[];
@@ -401,6 +447,12 @@ export interface PendingExecution {
      * as part of that sign-in. A code asked any other time is never listed.
      */
     readonly signInCodes?: readonly string[];
+    /**
+     * A write build's recorded write path, screened: the one an act step declared or revised that
+     * an execution review allowed, recorded once that step dispatched. Absent before the session's
+     * first act step, and for a session a host started without one.
+     */
+    readonly writePath?: WritePath;
     readonly captureIndex?: string;
     /**
      * The host's own notice, present once it replaced the attempt's browser (a proxy, mode or
@@ -455,7 +507,35 @@ export interface PendingExecution {
       readonly entrypoint?: string;
       readonly outcome: "done" | "not_done" | "unknown" | "unassessed";
     }[];
+    /**
+     * Execution reviews only: this attempt's latest live test batches, and any older one holding
+     * a failure that still stands on its source, oldest first, as the harness judged them
+     * (`LiveTestHost.bindBatches`). Empty before a batch ran in this attempt,
+     * a takeover's included; absent from a host that does not bind them.
+     */
+    readonly liveTests?: readonly ReviewedLiveTestBatch[];
   };
+}
+
+/**
+ * One live test batch as an execution review sees it: the host facts that show which cases passed
+ * on which source, so a review can tell whether a suite already ran on the source it judges.
+ */
+export interface ReviewedLiveTestBatch {
+  /** The batch's own Guardian review, or the harness's id for a host that names none. */
+  readonly batchId: string;
+  /** The entrypoint the batch ran, under `operation/` as the review reads it. */
+  readonly entrypoint: string;
+  /** The digest of the source the batch ran: its entrypoint and its static import closure. */
+  readonly sourceDigest: string;
+  /** Whether that entrypoint and its static import closure are unchanged since the batch ran. */
+  readonly sourceUnchanged: boolean;
+  readonly cases: readonly {
+    readonly id: string;
+    readonly verdict: "pass" | "fail" | "inconclusive";
+    /** `cold`: the case ran first on a new browser with an empty profile. */
+    readonly start?: "cold" | "warm";
+  }[];
 }
 
 /** Token counts of one review's model calls, summed over its calls. */
@@ -464,8 +544,16 @@ export interface GuardianUsage {
   readonly inputTokens: number;
   readonly cachedTokens: number;
   readonly cacheWriteTokens: number;
+  /** `cacheWriteTokens` written for 30 minutes and for 12 hours; a host's own reviewer may leave them out. */
+  readonly cacheWrite30mTokens?: number;
+  readonly cacheWrite12hTokens?: number;
   readonly outputTokens: number;
   readonly reasoningTokens: number;
+  /**
+   * Each model call's prompt cache comparison with the conversation's previous response, in call
+   * order, for the calls whose response reported one: enums and counts only.
+   */
+  readonly promptCacheDiagnostics?: readonly PromptCacheDiagnostic[];
   /** The reasoning effort the review ran at; a host's own reviewer may leave it out. */
   readonly reasoningEffort?: GuardianReasoningEffort;
 }
@@ -561,9 +649,9 @@ export interface ReviewRetry {
 
 /**
  * Production retry for Guardian outages: provider errors and a required source read that failed.
- * A review that ran out of turns or whose model call stalled is not an outage, and is not started
- * again. A decision that did not decode is reviewed once more only when its review got no
- * correction.
+ * A review that ran out of turns, whose model call stalled or whose request is over the model's
+ * context window is not an outage, and is not started again. A decision that did not decode is
+ * reviewed once more only when its review got no correction.
  */
 export const guardianOutageRetry: ReviewRetry = {
   delays: ["2 seconds", "5 seconds", "15 seconds", "30 seconds", "60 seconds"],
@@ -679,6 +767,53 @@ export const reviewFollowUpRounds = requiredReadRounds + 3;
 /** The longest decode error a follow-up quotes. */
 const decodeErrorLimit = 2000;
 
+/** The indefinite article before a word in the host's text. */
+const article = (word: string) => (/^[aeiou]/i.test(word) ? "an" : "a");
+
+/**
+ * A refused decision's outcome as the host's text names it: one of the shared format's outcomes,
+ * never another string a reviewer sent, which could carry anything into readable records.
+ */
+const refusedOutcome = (raw: unknown): GuardianOutcome | undefined => {
+  const outcome: unknown =
+    typeof raw === "object" && raw !== null ? Reflect.get(raw, "outcome") : undefined;
+  return guardianOutcomes.find((known) => known === outcome);
+};
+
+/**
+ * Which of a built-in kind's own outcomes holds what a reviewer that answers with another kind's
+ * outcome most often means: that what it reviews should change first. A host-defined kind's
+ * policy says that itself.
+ */
+const refusedOutcomeHint: Record<Exclude<ReviewKind, "host">, string> = {
+  execution:
+    "A step that should change before it runs, or that needs the caller first, is a deny or an escalate, as its policy says.",
+  recovery: "A request for a new browser that should not be granted is a deny.",
+  publication: "A tool that should change before it publishes is a deny.",
+  question: "A request that should change before its caller sees it is a reword.",
+  update:
+    "An update that needs the caller's confirmation and lacks it or gives it ambiguously is a clarify, and one that is wrong as written is a reword.",
+};
+
+/**
+ * The follow-up, once in a review, for a decision whose outcome its kind does not return: the
+ * outcome it refused, the outcomes the kind returns, and which of them holds a change first.
+ */
+const outcomeCorrection = (
+  kind: ReviewKind,
+  kindName: string,
+  outcomes: readonly GuardianOutcome[],
+  raw: unknown,
+) => {
+  const refused = refusedOutcome(raw);
+  return [
+    `The host did not accept this decision: ${refused === undefined ? "its outcome is not one" : `${refused} is not an outcome`} ${article(kindName)} ${kindName} review returns.`,
+    `It returns only ${outcomes.join(", ")}, as trusted_review.outcomes lists.`,
+    "Decide this review again under its policy and return one of them.",
+    ...(kind === "host" ? [] : [refusedOutcomeHint[kind]]),
+  ].join(" ");
+};
+
 /**
  * Why a decision fails to decode, when its decode settles at once with `InvalidDecision`.
  * Undefined when it decodes, fails otherwise, or needs asynchronous work, which is stopped.
@@ -712,7 +847,7 @@ const decisionFailure = (
   });
 
 const decodeDecision = (raw: unknown) =>
-  Schema.decodeUnknown(GuardianDecision)(boundedRationale(raw)).pipe(
+  Schema.decodeUnknown(GuardianDecision)(allowAdvice(boundedRationale(raw))).pipe(
     Effect.mapError(decisionFailure),
   );
 
@@ -737,9 +872,10 @@ const knownRefusal = (raw: unknown): unknown => {
 /**
  * The ground an execution deny or escalate rests on (`refusalGround`) when the host's own record
  * settles it the other way: retry permission when trusted_execution_context.repeatableRead is
- * true, since the host itself refuses before review any run it does not permit, or committing a
- * listed write again for a step the review labels a read, which changes nothing. Undefined for
- * any other decision.
+ * true, since the host itself refuses before review any run it does not permit, committing a
+ * listed write again for a step the review labels a read, which changes nothing, or missing write
+ * authority for a step whose own authority grants the write (`writeAuthority`), such as an act step
+ * reviewed right after a read-only explore. Undefined for any other decision.
  */
 const settledGroundOf = (
   pending: PendingExecution,
@@ -752,6 +888,7 @@ const settledGroundOf = (
   const ground: unknown = Reflect.get(raw, "refusalGround");
   if (ground === "retry_permission" && pending.mintContext?.repeatableRead === true) return ground;
   if (ground === "committed_write" && Reflect.get(raw, "action") === "read") return ground;
+  if (ground === "write_authority" && pending.writeAuthority === true) return ground;
   return undefined;
 };
 
@@ -761,6 +898,8 @@ const settledGroundCorrection: Record<GuardianRefusalGround, string> = {
     "The host did not accept this refusal: it rests on retry permission, and trusted_execution_context.repeatableRead is true. Whether a step may run again is the host's to decide: it refuses before review any run it does not permit, and it permits this one, a corrected example included. Judge this step's own source and effects under the policy and decide again, without retry permission as a ground.",
   committed_write:
     "The host did not accept this refusal as given: it rests on committing a listed write again, yet this review labels the step a read. If the submitted code changes the site, label it write and keep the refusal. If it changes nothing, it commits nothing again: reading back a write's result, the record it created or changed included, on any page of the authorized site, and the request's other remaining steps toward the same task stay allowed, so judge the step under the policy's other rules and decide again without the earlier write as a ground.",
+  write_authority:
+    "The host did not accept this refusal: it rests on this step having no write authority, and the host's record gives this step write authority, as its own trusted_authority.allowedEffects say. An earlier review's allowed effects are not this step's. Judge this step's own source and effects under the policy and decide again, without missing write authority as a ground.",
 };
 
 /**
@@ -1382,7 +1521,7 @@ export const makeGuardian = (
             if (!outcomeCorrected && !privateKind && outcomeRefused(output)) {
               outcomeCorrected = true;
               followUpRounds++;
-              return `The host did not accept this decision: a ${kindName} review returns only the outcome ${outcomes.join(", ")}, as trusted_review.outcomes lists. Decide this review again under its policy and return one of them.`;
+              return outcomeCorrection(kind, kindName, outcomes, output);
             }
             // A label its outcome does not carry fails to decode; this names the labels it carries.
             const carried =
@@ -1436,11 +1575,16 @@ export const makeGuardian = (
           | undefined;
         const raw =
           pushback === undefined ? output : afterGroundPushback(pending, pushback, output);
-        if (outcomeRefused(raw))
+        if (outcomeRefused(raw)) {
+          // A private kind's failure names no outcome, as its decode failures name no value.
+          const refused = privateKind ? undefined : refusedOutcome(raw);
           return yield* decisionFailure(
-            new Error(`The outcome is not one a ${kind} review returns`),
+            new Error(
+              `The outcome${refused === undefined ? "" : ` ${refused}`} is not one ${article(kind)} ${kind} review returns`,
+            ),
             "InvalidOutcome",
           );
+        }
         // Output that is not a decision at all fails to decode as InvalidDecision.
         const decision = yield* decode(decisionForKind(pending, raw)).pipe(
           Effect.tapError((failure) =>

@@ -2,7 +2,8 @@ import { Effect } from "effect";
 
 /**
  * A native dialog a run's host settled by itself: a confirm accepted from the tool's record, a
- * dialog its safe default decided, or one dismissed because its decision never came. It carries
+ * confirm the host's own judgment accepted, a dialog its safe default decided, or one dismissed
+ * because its decision never came. It carries
  * finite codes only, never page text.
  */
 export interface DialogIncident {
@@ -10,6 +11,7 @@ export interface DialogIncident {
   readonly kind: "dialog";
   readonly reason:
     | "dialog_expected_confirm_accepted"
+    | "dialog_judged_confirm_accepted"
     | "dialog_default_decision"
     | "dialog_decision_expired";
   readonly hostBug: false;

@@ -1,6 +1,7 @@
 import { Clock, Effect, Fiber, Option, TestClock, TestContext } from "effect";
 import { describe, expect, it } from "vitest";
 import type { AutofillSignedIn } from "../../src/destinations/autofill-step.js";
+import { matchSignedOutSnapshots } from "../../src/destinations/signed-in-marker.js";
 import { makeMarkerChecks } from "../../src/standalone/signed-in-marker.js";
 
 const origin = "https://www.shop.test";
@@ -226,7 +227,7 @@ describe("makeMarkerChecks", () => {
     );
     // What it showed, it showed signed out.
     const shown = { selector: "p", openPath: "/account" };
-    expect(markers.signedOutShows(shown)).toBe(true);
+    expect(matchSignedOutSnapshots(shown, markers.signedOutPages())).toBe("matches");
     expect(await Effect.runPromise(markers.check(shown))).toHaveProperty(
       "signedOutSnapshot",
       "matches",

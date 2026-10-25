@@ -26,7 +26,7 @@ const JsonText = Schema.parseJson();
  * Preflight's refusal of a step's `testInput`, if any: an input the agent chose runs only as a
  * read's live test (purpose test, target liveBrowser), as JSON text, on the Playwright or the HTTP
  * version alike. A write never runs one: its act session is the one run that proves it. A read
- * signed out runs as many as it needs. A signed-in read runs a few, its combined filter case, only
+ * signed out runs as many as it needs. A signed-in read runs a few, only
  * on a host that supports signed-in live tests (`signedInTests`, beside
  * `LiveTestHost.signedInBatches`): the harness holds it to `signedInTestInputLimit` distinct
  * inputs, counted with its live_tests batches. Otherwise a signed-in read runs none. The host

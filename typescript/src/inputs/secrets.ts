@@ -5,7 +5,7 @@ import {
   isCardSlot,
   shortCardPart,
 } from "../destinations/payment-frames.js";
-import { formDecoded, shownForms } from "../privacy/value-forms.js";
+import { shownForms } from "../privacy/value-forms.js";
 
 /**
  * A short form of a secret (`shownForms`) counts in source only as a whole token, as the
@@ -81,33 +81,6 @@ export const makeRunSecrets = () => {
         ? Effect.fail(new Error("Source contains a caller-supplied secret"))
         : Effect.void,
     );
-  /**
-   * Whether `texts` carry every value in `expected`, each one registered: one of its registered
-   * forms in a text as written or form-decoded, where a short form counts only as a whole token,
-   * as in source. Only a sign-in's seen-sent rule asks it, about a request the host heard.
-   */
-  const carries = (expected: readonly string[], texts: readonly string[]) =>
-    Effect.sync(() => {
-      const read = texts.flatMap((text) => {
-        const decoded = formDecoded(text);
-        return decoded === undefined || decoded === text ? [text] : [text, decoded];
-      });
-      return (
-        expected.length > 0 &&
-        expected.every((value) => {
-          const forms = shownForms(value).filter(([form]) => values.has(form));
-          return (
-            forms.length > 0 &&
-            forms.some(([form]) => {
-              const token = values.get(form);
-              return read.some((text) =>
-                token === undefined ? text.includes(form) : token.test(text),
-              );
-            })
-          );
-        })
-      );
-    });
   const json = (value: unknown) =>
     // error-reporting-allow: typed-recovery an observation getter may throw raw secrets, so only the finite serialization failure crosses this redaction boundary
     Effect.try({
@@ -137,7 +110,6 @@ export const makeRunSecrets = () => {
     redact,
     redactCut,
     assertAbsent,
-    carries,
     json,
     clear: () => {
       values.clear();

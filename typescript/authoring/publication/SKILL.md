@@ -55,6 +55,13 @@ pomerado:section publication.metadata-readers:end -->:
 Before your first `finish_build`, prefer checking the tool against each rule the request states
 for its inputs, outputs and refusals.
 
+Before each `finish_build`, the first and every later one, prefer one pass over your own source
+with four questions: for each output field, which line fills it and whether its description says
+where that value comes from; for each branch that returns, whether it returns every required field
+with values read on this run; for each value the caller gave or answered through `ask`, whether the
+output labels it as caller input; and whether any live test case still ends failed or flaky on the
+source you publish. Fix what this finds before you call.
+
 Guardian reports what it finds in rounds, and each round costs minutes, so settle all of these
 first:
 
@@ -92,12 +99,9 @@ first:
 - **Inputs.** Nothing the caller could vary is a literal, and every control the flow offers
   that narrows, orders or configures what the tool returns, a location included, is an optional
   input, even one the request never mentioned and one you never asked about (core skill, the
-  input schema). The one exception is a choice the request, the caller or the owner declined,
-  which is never an input for any caller (core skill), unless it is a costly choice a write still
-  meets on its path, one that changes what the caller buys or pays or whether the action can be
-  cancelled or refunded (a paid add-on within the tool's purpose, a rate, fare or plan tier, a
-  refundable option, shipping speed, the payment method or the delivery address), which stays an
-  input or a declared question (writes skill). Guardian counts such an input as
+  input schema; the search skill, "Find the filters"). The one exception is a choice the request,
+  the caller or the owner declined, which is never an input for any caller (core skill), unless
+  it is a costly choice a write still meets on its path (writes skill). Guardian counts such an input as
   part of the tool, never as scope drift or an unsupported claim. Each input you accept is
   applied and read back (core skill, the input schema, and `AGENTS.md`; the search skill for a search). An input
   that tailors the answer, such as a location, store or vehicle, that the site won't apply
@@ -120,8 +124,11 @@ first:
   your live test cases and gives the review that record (`publication/tests.json`): each case's
   purpose, input, expectation and result on the source you publish, and what you listed under
   `notTested` with why. Guardian judges the tool's claims no passing case tests, and failing and
-  stale cases, and checks every `notTested` reason against the captures and the request. A
-  signed-in read reports its example and its combined case, and gets the same host record of the
+  stale cases, and checks every `notTested` reason against the captures and the request. When a
+  claimed part of the output only appears for some inputs and no case you can run shows it,
+  prefer listing it in `notTested` with the reason and leaving it out of the description. Prefer
+  that over asking the owner for evidence they may not have. A signed-in read reports its example
+  and its signed-in cases, and gets the same host record of the
   cases it ran signed in; the review judges a failing case but never a gap. A write reports its
   one run, the act session, and lists what that run did not exercise as untested without testing
   it; the review judges that run alone.
@@ -139,10 +146,14 @@ first:
     skill); with
     no results a sort has nothing to apply, so return the empty result ("Unapplied supplied
     input");
-  - a free-text place, name or venue that matches several of the site's options lists them for
-    the caller instead of picking one (core skill, the input schema);
+  - A write's `<input>_note` reporting a value the site rewrote as it was typed, on leaving the
+    field, or through its one suggestion is not unapplied input; the tool read the site's version
+    back and returns it.
+  - a free-text place, name or venue that matches several of the site's options equally either
+    takes the first in the site's order and returns the one it used, as the site labels it, or
+    lists them for the caller to choose one, as the tool decides (core skill, the input schema);
   - a check that refuses a past date compares with today in the site's time zone, or the
-    place's, not with today in UTC (core skill) ("Past date in UTC");
+    place's, not with today in UTC (caller-input skill) ("Past date in UTC");
   - in a read signed out, each declared input is used, or changed from its default, by a passing
     case, and a case whose expectation you changed because the site itself gave another answer
     for that input names the capture of that answer, such as the site's no-results page for that
@@ -158,11 +169,9 @@ first:
   refuses them for the username or keys they carry, so never block, route around or suppress
   them to satisfy review. Your code, page code it runs included, must never send the caller's
   password, codes or answers off the site: Guardian refuses that.<!-- pomerado:section publication.recorded-requests -->
-- **Consent and privacy.** Turn safety defaults off (core skill): an option that shares the
-  caller's data with another company, opts into tracking or signs up for marketing ends off.
-  Never turn one on yourself, in a form or a request body. For a consent flag the site sets for
-  the user in a request body, send the value read at run time or leave the field out. Dismiss a
-  covering consent banner as the forms skill says.
+- **Consent and privacy.** Turn safety defaults off (core skill, "Safety defaults"): an
+  option that shares the caller's data with another company, opts into tracking or signs up for
+  marketing ends off. Dismiss a cookie banner as the core skill says.
 - **Imports.** Import `effect`, the workspace's `runtime/` and `browser/` modules and your own
   files; do not rely on any other package, such as an HTML parser, being installed.
 - **Host-owned files.** <!-- pomerado:section publication.host-owned:start
@@ -200,17 +209,17 @@ pomerado:section publication.saved-files:end -->.
    - the input schema: no account-specific value (a passenger, loyalty or member number, saved
      card or address, account ID) as an enum member, example or default; every input as general
      as the site's field, never narrowed to the example's value; on a write, every option the
-     session met on the path is an input or a settled default, and a costly choice, one that
-     changes what the caller buys or pays or whether the action can be cancelled or refunded
-     (core skill), is an input or a run-time question whose default may only decline it, never
-     left to the page's default or hard-coded from the build's request or answers, which spoke
-     for one caller; a paid upsell outside the tool's purpose is declined;
+     session met on the path is an input or a settled default, and a costly choice is an input
+     or a run-time question whose default may only decline it (writes skill); a paid upsell
+     outside the tool's purpose is declined;
    - a pop-up that shows only for some accounts, states or visits is handled when present and
      never required;
    - declared questions ask only what the page or the caller uniquely knows, never a login;
-   - a write runs every check that can refuse, such as a limit on its total, before the mark of
+   <!-- pomerado:section publication.declared-refusal:start
+- a write runs every check that can refuse, such as a limit on its total, before the mark of
      the commit it guards, and refuses with `InvalidInput`, or returns a refusal its output
      schema declares before its first mark, never in an undeclared output shape;
+pomerado:section publication.declared-refusal:end -->
    - a composed write reproduces the session's flow and returns the confirmation or read-back it
      declares, without committing twice, and its checks reject no correct write: a
      before-and-after comparison that compares whole objects or serialized text, reads through
@@ -247,7 +256,9 @@ A `not_published` result says why in `reason` and, for most reasons, what to do 
 | `reason`                   | `secret_handle`<!-- pomerado:section publication.token-codes -->                                                                  | A published file holds a handle<!-- pomerado:section publication.token-meaning -->                                         | Read the value at run time instead (a declared question<!-- pomerado:section publication.token-source -->), then call again.<!-- pomerado:section publication.token-retest -->                                                                                                                            |
 | `reason`                   | `confirmation_undeclared`, `commit_marks_undeclared`, `confirmation_unrecorded`, `confirm_action_unmatched`, `contract_input_mismatch` | The composed write's contract does not match its session                           | Fix the declaration the instruction names and call again with the same `executionId`. Never run the write again                                                                                                                                                                              |
 | `reason`                   | `commit_marks_unentered`                                                                                                               | The composed script declares a mark no session act step entered                    | Correct the declaration only to match marks the session actually entered, then call again with the same `executionId`. A completed session with no entered marks cannot publish: end and explain that its commit steps were not marked. Never repeat the write or enter a retrospective mark |
-| `reason`                   | `write_not_submitted`                                                                                                                  | The session did not demonstrate the requested write                                | Follow the instruction: read back first, continue the remaining work, or ask about revising inputs the site cannot take                                                                                                                                                                                                                                                     |<!-- pomerado:section publication.host-rejections -->
+| `reason`                   | `write_not_submitted`                                                                                                                  | The session did not demonstrate the requested write                                | Follow the instruction: read back first, continue the remaining work, or ask about revising inputs the site cannot take                                                                                                                                                                                                                                                     |
+| `reason`                   | `write_path_unfinished`                                                                                                                | The session has not settled every mark of its recorded write path                  | Read back first where a receipt says so; run only steps that never ran, or declare a revised path when the site skips one; never redo one that finished or may have. Then call again naming the step that confirmed the path's end                                                                                                                                          |
+| `reason`                   | `write_path_undeclared`                                                                                                                | The composed script leaves marks of the recorded write path out of `write.commits` | Run and declare every step of the path in the composed script, then call again with the same `executionId`. Never run the write again                                                                                                                                                                                                                                       |<!-- pomerado:section publication.host-rejections -->
 | `reason`                   | `missing_receipt`, `receipt_incomplete`<!-- pomerado:section publication.protected-result -->, `wrong_execution_purpose`                                         | The `executionId` names no completed example or confirming act step                | Call again with the `executionId` of the completed read example or the write step that confirmed it                                                                                                                                                                                          |<!-- pomerado:section publication.screening-rejections -->
 | `diagnostic.review.reason` | `privacy`, `source_correction`, `unsupported_claim`, `authority`, `evidence`                                                           | Guardian's review blocked it                                                       | Each finding names a published file (`path`, and `file` as your workspace names it), a UTF-8 byte range (`byteStart`, `byteEnd`) and a `category`, and its `explanation` says what is wrong, the evidence and the fix. Fix every finding in source or metadata, then call again with the same `executionId`. For a host-owned file, see the check list |
 

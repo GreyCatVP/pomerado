@@ -1,6 +1,6 @@
 import { Usage } from "@openai/agents";
 import type { ModelRequest, ModelResponse } from "@openai/agents";
-import { Effect, Exit, Scope } from "effect";
+import { Effect } from "effect";
 import { afterEach, expect, it } from "vitest";
 import type { AutofillPage } from "../../src/destinations/autofill-step.js";
 import type {
@@ -15,7 +15,6 @@ import {
 import { makeOpenAIMinter } from "../../src/mint/openai.js";
 import { autofillRefusalFailure, signInFailureFeedback } from "../../src/mint/sign-in-failure.js";
 import { makeSignInRecorder } from "../../src/mint/sign-in-recorder.js";
-import { askingValueHooks } from "../../src/runtime/sign-in-values.js";
 import { makeSignInBrowser } from "../../src/standalone/authentication.js";
 import { mintError } from "../../src/standalone/errors.js";
 import { makeMintContinuationFixture, readAllow } from "../support/mint-fixtures.js";
@@ -73,40 +72,27 @@ type ScreenRefusal = "not_focused" | Exclude<InsertionRefusal, "question_changed
 
 /** The login the build already holds, so a password screen may come first. */
 const heldLogin = { username: "synthetic-owner", password: "synthetic-password" };
-/** The standalone host's sign-in recorder on `page`, open until the test ends. */
-const recorderOn = (page: AutofillPage, keyboard: CredentialKeyboard) => {
-  const scope = Effect.runSync(Scope.make());
-  cleanups.push(() => Effect.runPromise(Scope.close(scope, Exit.void)));
-  return Effect.runSync(
-    Scope.extend(
-      makeSignInRecorder<Error>({
-        browser: makeSignInBrowser({
-          page,
-          keyboard,
-          siteOrigin: site,
-          authenticationOrigins: [],
-          onRequest: () => () => {},
-          typing: { typed: false },
-        }),
-        login: {
-          held: () => heldLogin,
-          values: Effect.succeed(heldLogin),
-          correct: () => Effect.succeed(heldLogin),
-        },
-        values: askingValueHooks({
-          ask: () => Effect.dieMessage("The test asks the owner nothing"),
-          register: () => {},
-          site: "member.example.test",
-          siteOrigin: site,
-        }),
-        review: () => Effect.void,
-        site: "member.example.test",
-        carries: () => Effect.succeed(false),
-      }),
-      scope,
-    ),
-  );
-};
+/** The standalone host's sign-in recorder on `page`. */
+const recorderOn = (page: AutofillPage, keyboard: CredentialKeyboard) =>
+  makeSignInRecorder({
+    browser: makeSignInBrowser({
+      page,
+      keyboard,
+      siteOrigin: site,
+      authenticationOrigins: [],
+      typing: { typed: false },
+    }),
+    login: {
+      held: () => heldLogin,
+      values: Effect.succeed(heldLogin),
+      correct: () => Effect.succeed(heldLogin),
+    },
+    ask: () => Effect.dieMessage("The test asks the owner nothing"),
+    secrets: { register: () => {}, assertAbsent: () => Effect.void },
+    review: () => Effect.void,
+    site: "member.example.test",
+    signedOutPages: () => [],
+  });
 
 /**
  * A synthetic password screen behind the standalone host's sign-in: each authenticate inspects

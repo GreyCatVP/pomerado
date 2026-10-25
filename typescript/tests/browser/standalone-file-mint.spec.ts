@@ -11,6 +11,7 @@ import {
   patch,
   recordingGuardian,
   toolResult,
+  writePath,
 } from "./guardian-context-fixture.js";
 import { act, mint } from "./standalone-mint-fixture.js";
 import { receiptTool, startFileSite, statement, statementSha256 } from "./file-fixture.js";
@@ -67,7 +68,7 @@ test("a write build sees the caller's file as a handle, uploads it in its act st
         () => [removal("explore/literal.mjs")],
         () => patch({ "src/tool.mjs": receiptTool(), "explore/notes.mjs": notesProbe }),
         () => [call("execute", { ...act("explore/notes.mjs"), purpose: "explore" }, "notes")],
-        () => [call("execute", act("src/tool.mjs"), "upload")],
+        () => [call("execute", act("src/tool.mjs", undefined, writePath("upload")), "upload")],
         // Published source never holds a handle either.
         () => patch({ "src/receipt.mjs": 'export const receipt = "{{file.f1}}";' }),
         (request) => [finish(executionIdOf(request, "upload"), "send_receipt", "held")],

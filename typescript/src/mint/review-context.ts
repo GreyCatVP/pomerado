@@ -1,7 +1,12 @@
 import { DateTime, Effect } from "effect";
-import type { GuardianDecision, PendingExecution, ReviewFailure } from "../guardian/review.js";
+import type {
+  GuardianDecision,
+  PendingExecution,
+  ReviewedLiveTestBatch,
+  ReviewFailure,
+} from "../guardian/review.js";
 import { failureDetailMetadata } from "../runtime/failure-detail.js";
-import { MintFailure } from "./contracts.js";
+import { MintFailure, type WritePath } from "./contracts.js";
 import { executedSourceClosure } from "./operation-source.js";
 import type { MintProjection } from "./projection.js";
 import { screenMintText } from "./workspace.js";
@@ -39,7 +44,26 @@ export interface MintReviewHost {
   readonly signInCodes: () => readonly string[];
   /** This build's tracked writes and their newest assessments; only execution reviews carry them. */
   readonly writes?: () => readonly WriteOutcome[];
+  /**
+   * This attempt's latest judged live test batches (`LiveTestHost.bindBatches`), undefined until
+   * the harness binds them; only execution reviews carry them.
+   */
+  readonly liveTests?: () => Effect.Effect<readonly ReviewedLiveTestBatch[]> | undefined;
+  /** A write build's recorded write path, once an allowed act step that carried one dispatched. */
+  readonly writePath?: () => WritePath | undefined;
 }
+
+/** A write path as a review reads it: each step's and the ending's text screened, marks as is. */
+export const screenedWritePath = (
+  projection: MintProjection,
+  path: WritePath,
+): Effect.Effect<WritePath, MintFailure> =>
+  Effect.gen(function* () {
+    const steps = yield* Effect.forEach(path.steps, ({ commit, does }) =>
+      projection.text(does, "review").pipe(Effect.map((screened) => ({ commit, does: screened }))),
+    );
+    return { steps, ends: yield* projection.text(path.ends, "review") };
+  });
 
 /**
  * What Guardian may approve for an anonymous read or exploration. Opening the public sign-in
@@ -129,6 +153,11 @@ export const mintReviewContext = (
     const schema = reviewsSource ? host.inputSchema() : undefined;
     const signInCodes = currentExecution === undefined ? [] : host.signInCodes();
     const writes = currentExecution === undefined ? [] : (host.writes?.() ?? []);
+    const readLiveTests = currentExecution === undefined ? undefined : host.liveTests?.();
+    const liveTests = readLiveTests === undefined ? undefined : yield* readLiveTests;
+    const recordedPath = host.writePath?.();
+    const writePath =
+      recordedPath === undefined ? undefined : yield* screenedWritePath(projection, recordedPath);
     return {
       repeatableRead: host.repeatableRead(),
       operationSources: [...step.sources.keys()],
@@ -141,11 +170,14 @@ export const mintReviewContext = (
       ...(currentExecution === undefined ? {} : { currentExecution }),
       browser,
       ...(signInCodes.length === 0 ? {} : { signInCodes: [...signInCodes] }),
+      ...(writePath === undefined ? {} : { writePath }),
       ...(page === undefined || browser !== "active" || step.startsOnFreshPage === true
         ? {}
         : { currentPage: page }),
       executions: [...host.executions()],
       ...(writes.length === 0 ? {} : { writes: trackedWrites(writes) }),
+      // Empty once bound, so a review after a takeover sees that no batch is on record now.
+      ...(liveTests === undefined ? {} : { liveTests: [...liveTests] }),
     };
   });
 

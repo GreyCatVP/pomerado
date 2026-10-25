@@ -1,7 +1,8 @@
 import type { InputRequest, Question } from "../runtime/input-request.js";
-import type {
-  ScriptQuestionDeclaration,
-  ScriptQuestionDeclarations,
+import {
+  longestLabel,
+  type ScriptQuestionDeclaration,
+  type ScriptQuestionDeclarations,
 } from "../runtime/script-input.js";
 
 // The host's check that a running script asks only what publication reviewed. The questions come
@@ -36,6 +37,13 @@ const keepsBounds: Readonly<
     question.type === "secret" &&
     question.secretKind === declaration.secretKind &&
     question.maxLength === declaration.maxLength,
+  // The page's label is the prompt, so only its length is checked. It is a text question or a
+  // choice the caller answers from the page's options alone, never another kind.
+  site_field: (question, declaration) =>
+    declaration.type === "site_field" &&
+    question.prompt.length <= longestLabel &&
+    ((question.type === "text" && question.maxLength === undefined) ||
+      (question.type === "choice" && question.allowOther !== true && question.allowNote !== true)),
 };
 const typed = (declaration: ScriptQuestionDeclaration): Typed =>
   // The pre-unification `{ prompt }` declaration is a plain choice.
@@ -44,15 +52,17 @@ const typed = (declaration: ScriptQuestionDeclaration): Typed =>
 /**
  * Whether one asked question is exactly one its operation declared: the same id, type and prompt,
  * and the same bounds on what the caller may answer. Only a choice's options come from the page
- * at ask time. The host checks this against the declarations publication reviewed, never against
- * the ones the running script reports, since the sandbox runs the minted code.
+ * at ask time, and a site field's label. The host checks this against the declarations
+ * publication reviewed, never against the ones the running script reports, since the sandbox runs
+ * the minted code.
  */
 const matchesDeclaration = (
   question: Question,
   declaration: ScriptQuestionDeclaration | undefined,
 ): boolean => {
-  if (declaration === undefined || question.prompt !== declaration.prompt) return false;
+  if (declaration === undefined) return false;
   const declared = typed(declaration);
+  if (declared.type !== "site_field" && question.prompt !== declared.prompt) return false;
   return keepsBounds[declared.type](question, declared);
 };
 

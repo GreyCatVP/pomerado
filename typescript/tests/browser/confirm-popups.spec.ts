@@ -15,7 +15,13 @@ import { noIncidents } from "../../src/runtime/incidents.js";
 import { InputRequestFailure, type InputRequest } from "../../src/runtime/input-request.js";
 import { createPomerado } from "../../src/standalone/pomerado.js";
 import { RunOutcomeFailure } from "../../src/standalone/run-report.js";
-import { call, executionIdOf, recordingGuardian, toolResult } from "./guardian-context-fixture.js";
+import {
+  call,
+  executionIdOf,
+  recordingGuardian,
+  toolResult,
+  writePath,
+} from "./guardian-context-fixture.js";
 import { act, mint } from "./standalone-mint-fixture.js";
 import { runExample } from "./authoring-fixture.js";
 import {
@@ -32,8 +38,9 @@ import {
 const orderHost = "www.order.test";
 
 /**
- * A controlled HTTPS order page: its Place button raises a native confirm with `message`, and
- * only an accepted confirm posts the order and shows "Order placed".
+ * A controlled HTTPS order page: its Place button raises a native confirm with `message`, where
+ * `{name}` stands for the order name typed in the page, and only an accepted confirm posts the
+ * order and shows "Order placed".
  */
 const startOrderSite = async (directory: string) => {
   await promisify(execFile)("openssl", [
@@ -65,9 +72,10 @@ const startOrderSite = async (directory: string) => {
       }
       response.setHeader("Content-Type", "text/html");
       response.end(
-        `<title>Order</title><button id="place">Place order</button><script>
+        `<title>Order</title><input id="name"><button id="place">Place order</button><script>
 document.querySelector("#place").onclick = () => {
-  if (confirm(${JSON.stringify(state.message)}))
+  const name = document.querySelector("#name").value;
+  if (confirm(${JSON.stringify(state.message)}.replaceAll("{name}", name)))
     fetch("/order", { method: "POST" }).then(() => {
       document.body.innerHTML = "<div id=placed>Order placed</div>";
     });
@@ -115,6 +123,15 @@ async ({kernel,sessionId,decideDialog,enteringCommit,verified}) => {
   return {placed:answered.result === true};
 });`;
 
+/** The order write for a named order: it types the input's name before it clicks Place. */
+const placeNamedOrder = placeOrder
+  .replace("input:Schema.Struct({})", "input:Schema.Struct({name:Schema.String})")
+  .replace("async ({kernel,sessionId,", "async ({input,kernel,sessionId,")
+  .replace(
+    "const raised = ",
+    "await kernel.browsers.playwright.execute(sessionId,{code:`await page.locator('#name').fill(${JSON.stringify(input.name)});`,timeout_sec:10});\n  const raised = ",
+  );
+
 /** The question a native dialog puts to the owner, while building, or the caller, in a run. */
 const dialogQuestion = (request: InputRequest) =>
   request.questions.some(
@@ -127,7 +144,10 @@ const dialogAnswer = (request: InputRequest, choice: "accept" | "dismiss") =>
     : { choice };
 
 /** Mints the order write, the owner accepting its confirm, and returns the published artifact. */
-const mintOrder = async (site: Awaited<ReturnType<typeof startOrderSite>>) => {
+const mintOrder = async (
+  site: Awaited<ReturnType<typeof startOrderSite>>,
+  named?: { readonly name: string },
+) => {
   const { built, asked } = await mint({
     effect: "write",
     url: site.url,
@@ -144,14 +164,14 @@ const mintOrder = async (site: Awaited<ReturnType<typeof startOrderSite>>) => {
           operation: {
             type: "create_file",
             path: "src/order.mjs",
-            diff: `${placeOrder
+            diff: `${(named === undefined ? placeOrder : placeNamedOrder)
               .split("\n")
               .map((line) => `+${line}`)
               .join("\n")}\n`,
           },
         },
       ],
-      () => [call("execute", act("src/order.mjs", {}), "place")],
+      () => [call("execute", act("src/order.mjs", named ?? {}, writePath("place")), "place")],
       (request) => [
         call(
           "finish_build",
@@ -178,6 +198,7 @@ const runOrder = async (
   site: Awaited<ReturnType<typeof startOrderSite>>,
   artifact: Awaited<ReturnType<typeof mintOrder>>,
   choice: "accept" | "dismiss",
+  input: Record<string, unknown> = {},
 ) => {
   const asked: InputRequest[] = [];
   const result = await Effect.runPromise(
@@ -197,7 +218,7 @@ const runOrder = async (
           url: site.url,
           intent: "Place the order",
           effect: "write",
-          input: {},
+          input,
         });
       }),
     ).pipe(Effect.either),
@@ -256,6 +277,27 @@ test("a write's run accepts the confirm its build accepted, and asks about a cha
   });
 });
 
+test("a write's run accepts the confirm its build accepted when it names the run's own order", async () => {
+  test.setTimeout(120_000);
+  await withOrderSite(async (site) => {
+    site.state.message = "Place order {name}?";
+    const artifact = await mintOrder(site, { name: "Spring Order 1001" });
+    expect(site.state.orders).toBe(1);
+    // The confirm named the order the build's input gave, so the record keeps no order name.
+    expect(artifact.acceptedConfirms).toHaveLength(1);
+    expect(JSON.stringify(artifact)).not.toContain("Spring Order 1001?");
+    const run = await runOrder(site, artifact, "dismiss", { name: "Summer Order 2002" });
+    expect(run.result).toEqual(Either.right({ placed: true }));
+    expect(run.asked).toEqual([]);
+    expect(site.state.orders).toBe(2);
+    // The same confirm with other wording still asks the caller.
+    site.state.message = "Place order {name} and subscribe?";
+    const changed = await runOrder(site, artifact, "dismiss", { name: "Summer Order 2002" });
+    expect(changed.asked).toHaveLength(1);
+    expect(site.state.orders).toBe(2);
+  });
+});
+
 test("a write whose composed script raises its accepted confirm under another step is not published", async () => {
   test.setTimeout(120_000);
   await withOrderSite(async (site) => {
@@ -287,7 +329,7 @@ test("a write whose composed script raises its accepted confirm under another st
             placeOrder.replace('step:"place-order"', 'step:"submit-order"'),
           ),
         ],
-        () => [call("execute", act("src/order.mjs", {}), "place")],
+        () => [call("execute", act("src/order.mjs", {}, writePath("place")), "place")],
         (request) => [
           call(
             "finish_build",

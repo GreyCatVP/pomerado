@@ -8,6 +8,7 @@ import { makeGuardian, ReviewFailure, type PendingExecution } from "../../src/gu
 import { GuardianSessionSnapshot } from "../../src/guardian/session.js";
 import { makeSourceInspector } from "../../src/guardian/source.js";
 import { publicationDeltaPolicy } from "../../src/guardian/publication-delta.js";
+import { instructionsOf } from "../support/guardian-requests.js";
 
 afterEach(() => {
   setDefaultModelProvider(new OpenAIProvider());
@@ -356,6 +357,7 @@ describe("a publication reviewed again in the same build", () => {
       String(Reflect.get(Object(reviewRequest(request)["trusted_review"]), "policy"));
     expect(policyOf(requests[0])).not.toContain(publicationDeltaPolicy);
     expect(policyOf(requests[2])).toContain(publicationDeltaPolicy);
+    expect(instructionsOf(requests[2])).not.toContain(publicationDeltaPolicy);
   });
 
   it("reaches a host that sends its own publication policy and index", async () => {

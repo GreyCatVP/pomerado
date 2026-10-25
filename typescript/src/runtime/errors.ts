@@ -133,7 +133,8 @@ export class WriteConfirmationRefused extends Data.TaggedError("WriteConfirmatio
 /**
  * A maintenance execution entered a settled commit step: one the original run confirmed, or one
  * it marked `sent` that this run's read-back did not find missing. It fails before the step's
- * execute call, so this call sends nothing.
+ * execute call, so this call sends nothing. A run's `notCommitted` fails with it too when the step
+ * may already have saved, so the step stays sent.
  */
 export class CommitAlreadySent extends Data.TaggedError("CommitAlreadySent")<{
   readonly name: string;

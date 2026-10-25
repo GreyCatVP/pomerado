@@ -2,11 +2,13 @@ import { makeReplayScreenWait } from "./autofill-replay-screens.js";
 import { Effect } from "effect";
 import type { YieldableError } from "effect/Cause";
 import { logicalRejectedField, recordedRejections, rejectableSlot } from "./autofill-rejection.js";
-import type {
-  AutofillRecipe,
-  AutofillRecipeStep,
-  RejectedMarker,
-  SignInMethodChoice,
+import {
+  pageMatches,
+  pathMatches,
+  type AutofillRecipe,
+  type AutofillRecipeStep,
+  type RejectedMarker,
+  type SignInMethodChoice,
 } from "../destinations/autofill-recipe.js";
 import { resolvedPage, type SignInRecipeStep } from "../destinations/sign-in-recipe.js";
 import { signedInCheckOrigin, workspaceHost, workspaceToPin } from "./workspace-origin.js";
@@ -88,14 +90,15 @@ const workspaceScreens = <E extends YieldableError, V extends string, L extends 
         : step,
     );
   /**
-   * Whether a page (origin and path) is this recorded screen: its exact page, or for a workspace
+   * Whether a page (origin and path) is this recorded screen: its recorded page, or for a workspace
    * screen its path on the workspace origin this replay knows, or, while it knows none, on a host
-   * that passes the gates. Typing there still waits for the screen's admission.
+   * that passes the gates. Paths compare with any trailing slash but the root's dropped. Typing
+   * there still waits for the screen's admission.
    */
   const matchesRecorded = (page: string, recorded: SignInRecipeStep) => {
-    if (recorded.origin !== "workspace") return page === recorded.page;
+    if (recorded.origin !== "workspace") return pageMatches(page, recorded);
     const at = URL.parse(page);
-    if (at === null || at.pathname !== recorded.page) return false;
+    if (at === null || !pathMatches(at.pathname, recorded.page, recorded.anySegments)) return false;
     return progress.workspace !== undefined ? at.origin === progress.workspace : sibling(at.origin);
   };
   return { sibling, resolvedSteps, matchesRecorded };

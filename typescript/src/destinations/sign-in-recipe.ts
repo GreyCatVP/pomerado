@@ -1,4 +1,4 @@
-import { Deferred, Effect, Either, FiberId, Option, Schema } from "effect";
+import { Effect, Either, Option, Schema } from "effect";
 import type {
   AutofillApproval,
   AutofillPopup,
@@ -8,10 +8,12 @@ import type {
 import {
   autofillRecipe,
   autofillRecipePath,
+  DismissAutofillRecipe,
   KeySubmitAutofillRecipe,
   LegacyAutofillRecipe,
   PopupAutofillRecipe,
   publishedAutofillRecipe,
+  WildcardAutofillRecipe,
   WorkspaceAutofillRecipe,
   type AutofillRecipeOrigins,
   type AutofillRecipeStep,
@@ -23,16 +25,10 @@ import type {
   AutofillScreens,
   AutofillSignedIn,
   AutofillSignedInCheck,
-  AutofillSlot,
   AutofillStep,
   AutofillStepReport,
-  ExtraSecretSlot,
-  IdentifierKind,
-  SecretSlot,
 } from "./autofill-step.js";
 import type { CredentialRejectedField, WebsiteCredentials } from "../runtime/authentication.js";
-import type { InputAsker } from "../runtime/input-request.js";
-import { sameSite } from "../runtime/same-site.js";
 import { recordedScreenPage } from "../runtime/workspace-origin.js";
 
 /**
@@ -53,7 +49,8 @@ export const SignInRecipeV3 = Schema.Struct({
   ),
 );
 /**
- * A recipe this host reads: version 1, 2, 4 or 5 as every host writes it, or this host's version 3.
+ * A recipe this host reads: version 1, 2, 4, 5, 6 or 7 as every host writes it, or this host's
+ * version 3.
  */
 export const SignInRecipe = Schema.Union(
   LegacyAutofillRecipe,
@@ -61,6 +58,8 @@ export const SignInRecipe = Schema.Union(
   SignInRecipeV3,
   WorkspaceAutofillRecipe,
   KeySubmitAutofillRecipe,
+  DismissAutofillRecipe,
+  WildcardAutofillRecipe,
 );
 export type SignInRecipe = typeof SignInRecipe.Type;
 export type SignInRecipeStep = AutofillRecipeStep;
@@ -71,12 +70,12 @@ export const resolvedPage = (step: SignInRecipeStep, workspace: string | undefin
     ? undefined
     : recordedScreenPage(step, workspace);
 
-const knownVersions: readonly unknown[] = [1, 2, 3, 4, 5];
+const knownVersions: readonly unknown[] = [1, 2, 3, 4, 5, 6, 7];
 
 /**
  * A published recipe file read back: the recipe, `unknown_version` for a version this host does
- * not know, else `invalid`. Version 1, 2, 4 and 5 decode as every host reads them; version 3 is
- * read only here.
+ * not know, else `invalid`. Version 1, 2, 4, 5, 6 and 7 decode as every host reads them; version 3
+ * is read only here.
  */
 export const decodeSignInRecipe = (text: string): SignInRecipe | "invalid" | "unknown_version" => {
   const shared = publishedAutofillRecipe(new Map([[autofillRecipePath, text]]));
@@ -113,8 +112,12 @@ export interface RecordedSignInStep {
   readonly methods?: AutofillStep["methods"];
   /** The secrets an earlier screen took that this one asks for again with a second factor. */
   readonly refills?: SignInRecipeStep["refills"];
+  /** The covering notice's own control the host clicked on this screen. */
+  readonly dismiss?: string | undefined;
   /** The page the step ran on, origin and path only. */
   readonly page: string;
+  /** The segments of `page`'s path written as `*`, which any one segment matches. */
+  readonly anySegments?: readonly number[] | undefined;
 }
 
 /**
@@ -140,6 +143,7 @@ export const signInRecipe = (
 const inStepOrder = (step: SignInRecipeStep): SignInRecipeStep => ({
   ...(step.origin === undefined ? {} : { origin: step.origin }),
   page: step.page,
+  ...(step.anySegments === undefined ? {} : { anySegments: step.anySegments }),
   ...(step.approval === undefined ? {} : { approval: step.approval }),
   ...(step.popup === undefined ? {} : { popup: step.popup }),
   ...(step.rejectedMarkers === undefined ? {} : { rejectedMarkers: step.rejectedMarkers }),
@@ -161,10 +165,11 @@ const inStepOrder = (step: SignInRecipeStep): SignInRecipeStep => ({
   ...(step.submitKey === undefined ? {} : { submitKey: step.submitKey }),
   ...(step.submittedBy === undefined ? {} : { submittedBy: step.submittedBy }),
   ...(step.methods === undefined ? {} : { methods: step.methods }),
+  ...(step.dismiss === undefined ? {} : { dismiss: step.dismiss }),
 });
 
 /**
- * A recipe as `auth-fill.json` holds it: `version`, then version 4's or 5's `workspace`, then each
+ * A recipe as `auth-fill.json` holds it: `version`, then version 4's to 7's `workspace`, then each
  * screen in `recipeStep`'s key order (a workspace screen's `origin` first), indented two spaces,
  * with no final newline. The same recipe is the same bytes from any
  * host that writes it this way.
@@ -173,7 +178,11 @@ export const signInRecipeText = (recipe: SignInRecipe) =>
   JSON.stringify(
     {
       version: recipe.version,
-      ...((recipe.version !== 4 && recipe.version !== 5) || recipe.workspace === undefined
+      ...((recipe.version !== 4 &&
+        recipe.version !== 5 &&
+        recipe.version !== 6 &&
+        recipe.version !== 7) ||
+      recipe.workspace === undefined
         ? {}
         : { workspace: { parent: recipe.workspace.parent } }),
       steps: recipe.steps.map(inStepOrder),
@@ -187,466 +196,6 @@ export const signInRecipeText = (recipe: SignInRecipe) =>
     2,
   );
 
-export const isIdentifier = (slot: AutofillSlot): slot is IdentifierKind =>
-  slot === "username" || slot === "email" || slot === "phone" || slot === "account_number";
-/** Whether a field's slot is a secret's: the password, a code or an extra secret. */
-export const isSecret = (slot: AutofillSlot): slot is SecretSlot => !isIdentifier(slot);
-/** The secrets that prove the login: a sign-in verifies only once a request carried one. */
-export const provesLogin = (slot: AutofillSlot) => slot === "password" || slot === "code";
-/**
- * A date of birth, ZIP, recovery code or private answer: the site checks it, but the host does not
- * track it as sent. A dropdown sends an option's own value, never the text the host chose.
- */
-export const isExtraSecret = (slot: AutofillSlot): slot is ExtraSecretSlot =>
-  slot === "date_of_birth" ||
-  slot === "zip" ||
-  slot === "recovery_code" ||
-  slot === "private_answer";
-
-const oneCharacter = (value: string | undefined) =>
-  value !== undefined && Array.from(value).length === 1;
-
-/**
- * The value a step's field went out with as the host keeps it: a code typed one character per
- * box, the step's code fields that each hold one character, is one code, their values joined in
- * field order. So what the host watches go out, records and rules out after a refusal is the code
- * the site gets, never one of its characters. A longer code field keeps its own value.
- */
-export const keptValue = (
-  step: { readonly fields: readonly { readonly slot: AutofillSlot }[] },
-  values: readonly string[],
-  index: number,
-) => {
-  const value = values[index];
-  if (step.fields[index]?.slot !== "code" || !oneCharacter(value)) return value;
-  return step.fields
-    .flatMap((field, at) => (field.slot === "code" && oneCharacter(values[at]) ? [values[at]] : []))
-    .join("");
-};
-
-/**
- * A request the page sent while a sign-in was open, as the host heard it: `navigation` for the
- * primary page's own document request, `popup` for one a popup sent, `http` for anything else
- * (a fetch, an XHR). Its body stays in the host's memory, is only matched and is never logged:
- * `null` with `bodyUnseen` when the browser could not give it or it ran past the host's cap.
- */
-export interface SignInRequest {
-  readonly url: string;
-  readonly method: string;
-  readonly body: string | null;
-  readonly bodyUnseen?: true | undefined;
-  readonly channel: "navigation" | "popup" | "http";
-  /** A document request's frame. */
-  readonly frame?: "main" | "sub" | undefined;
-  readonly resourceType: string;
-  /** The browser's id for the tab that sent it, when the host knows it. */
-  readonly ownerTargetId?: string | undefined;
-}
-
-/**
- * Of each run of consecutive one-character values among `values`, every stretch exactly as long as
- * a code split across boxes (`lengths`), joined in order: what such a code is once its boxes go out
- * as separate values. A one-character value beside the boxes, such as a checkbox's `1`, stays out of
- * the code.
- */
-const oneCharacterRuns = (values: readonly unknown[], lengths: readonly number[]): string[] => {
-  const runs: string[] = [];
-  let run: string[] = [];
-  const end = () => {
-    for (const length of lengths)
-      for (let start = 0; start + length <= run.length; start++)
-        runs.push(run.slice(start, start + length).join(""));
-    run = [];
-  };
-  for (const value of values) {
-    const text = typeof value === "number" && Number.isInteger(value) ? String(value) : value;
-    if (typeof text === "string" && oneCharacter(text)) run.push(text);
-    else end();
-  }
-  end();
-  return runs;
-};
-
-/** The one-character runs (`oneCharacterRuns`) of a JSON value's arrays and objects, at any depth. */
-const jsonRuns = (value: unknown, lengths: readonly number[]): string[] => {
-  if (typeof value !== "object" || value === null) return [];
-  const values = Array.isArray(value) ? (value as unknown[]) : Object.values(value);
-  return [
-    ...oneCharacterRuns(values, lengths),
-    ...values.flatMap((item) => jsonRuns(item, lengths)),
-  ];
-};
-
-/**
- * The texts a request carries a code split across one-character boxes in when it sends each box as
- * a value of its own, as a form that posts each box as its own field does: each stretch of
- * consecutive one-character values as long as a pending code (`lengths`), joined in order, of the
- * URL's query, of a form-encoded body and of a JSON body's arrays and objects. A code sent whole is
- * in the request's own text already. Held in memory only, like the request's body, and never
- * logged.
- */
-const splitCodeTexts = (
-  request: Pick<SignInRequest, "url" | "body">,
-  lengths: readonly number[],
-): string[] => {
-  if (lengths.length === 0) return [];
-  const params = (search: string) => [...new URLSearchParams(search).values()];
-  const query = URL.parse(request.url)?.search ?? "";
-  const body = request.body ?? "";
-  const parsed = Either.try(() => JSON.parse(body) as unknown);
-  const fromBody = Either.isRight(parsed)
-    ? jsonRuns(parsed.right, lengths)
-    : oneCharacterRuns(params(body), lengths);
-  return [...new Set([...oneCharacterRuns(params(query), lengths), ...fromBody])];
-};
-
-/** The lengths, in characters, of the pending codes long enough to have been typed one per box. */
-const pendingCodeLengths = (record: SignInRecord) => [
-  ...new Set(
-    [...record.pending]
-      .filter(([slot]) => slot === "code")
-      .map(([, value]) => Array.from(value).length)
-      .filter((length) => length > 1),
-  ),
-];
-
-/** Whether `texts` carry every expected value; the host's matching of registered values. */
-export type SecretMatcher = (
-  expected: readonly string[],
-  texts: readonly string[],
-) => Effect.Effect<boolean>;
-
-/** The latest fill's watch for its form going out; see `armStep`. */
-interface SignInWatch {
-  readonly endpoints: readonly { readonly endpoint: string; readonly method: string }[];
-  readonly armedAt: number;
-  /** The inspected popup's tab, in memory only, never a recipe field. */
-  readonly popupTargetId?: string | undefined;
-  /**
-   * The origins a script's own sign-in request may go to besides the site's registrable domain:
-   * the judged form actions' origins and the configured sign-in origins.
-   */
-  readonly scriptOrigins: readonly string[];
-  /** The site the host judged the step's controls against. */
-  readonly siteOrigin: string;
-}
-
-/** An open sign-in: its steps so far and what of it the host saw sent. */
-export interface SignInRecord {
-  /** Each screen as the host ran it, value-free: what a run replays. */
-  readonly steps: RecordedSignInStep[];
-  /**
-   * The latest fill's watch: the form endpoints and methods the host judged for the step, and how
-   * many requests the host had heard when it armed it, just before the fill. Only a request heard
-   * after that can carry the step's values, whoever clicked.
-   */
-  watch: SignInWatch | undefined;
-  /** Values filled but not yet seen sent, by slot, held in memory only and never logged. */
-  readonly pending: Map<AutofillSlot, string>;
-  /** Slots a request the host heard carried; a verified sign-in needs an identifier and a proof. */
-  readonly submittedSlots: Set<AutofillSlot>;
-  /** Set once a screen's host click ran or its fill's answer was lost: it may have sent a value. */
-  mayHaveSent?: true;
-  /**
-   * Each origin a script's own sign-in request carried every pending value to, when it is off the
-   * site and not a judged form action's or a configured sign-in origin, with the slots its
-   * requests carried, one screen's after another: never counted as sent, only named, so the
-   * caller learns which sign-in origin to trust. Each key is an exact origin; nothing here holds a
-   * value.
-   */
-  untrustedOrigins?: Map<string, Set<AutofillSlot>>;
-  /**
-   * Set once a request the host read for a screen carried a pending password or code, to any
-   * origin, the site included, whether or not it counted as sent. Until then no password or code
-   * has gone anywhere, as on a check before the password screen.
-   */
-  proofCarried?: true;
-}
-
-export const openSignInRecord = (): SignInRecord => ({
-  steps: [],
-  watch: undefined,
-  pending: new Map(),
-  submittedSlots: new Set(),
-});
-
-/** Where a form submits, as the host compares it: origin and path. */
-const formEndpoint = (url: string) => {
-  const parsed = URL.parse(url);
-  return parsed === null ? undefined : `${parsed.origin}${parsed.pathname}`;
-};
-
-/**
- * The page's own document request to an endpoint the host judged, with the form's method (a POST,
- * or a main-frame navigation for a GET form), heard after the watch was armed, with a body the
- * host read.
- */
-const sentAsJudged = (watch: SignInWatch, sentAt: number, request: SignInRequest) => {
-  const endpoint = formEndpoint(request.url);
-  const method = request.method.toLowerCase();
-  return (
-    sentAt > watch.armedAt &&
-    ((request.channel === "navigation" && watch.popupTargetId === undefined) ||
-      (request.channel === "popup" &&
-        watch.popupTargetId !== undefined &&
-        request.ownerTargetId === watch.popupTargetId)) &&
-    request.resourceType === "document" &&
-    request.bodyUnseen !== true &&
-    (method === "post" || request.frame !== "sub") &&
-    watch.endpoints.some(
-      (candidate) => candidate.endpoint === endpoint && candidate.method === method,
-    )
-  );
-};
-
-/**
- * A script's own request (a fetch or XHR, as most single-page logins send): a non-GET heard after
- * the watch was armed, with a body the host read. Returns its address, else undefined.
- */
-const scriptRequest = (watch: SignInWatch, sentAt: number, request: SignInRequest) => {
-  const sent =
-    sentAt > watch.armedAt &&
-    request.channel === "http" &&
-    (watch.popupTargetId === undefined || request.ownerTargetId === watch.popupTargetId) &&
-    (request.resourceType === "fetch" || request.resourceType === "xhr") &&
-    request.method.toUpperCase() !== "GET" &&
-    request.bodyUnseen !== true;
-  return sent ? (URL.parse(request.url) ?? undefined) : undefined;
-};
-
-/**
- * Where a script's sign-in request may carry the login: a host on the site's registrable domain, a
- * judged form action's origin or a configured sign-in origin. Only a request that carries every
- * pending value counts (`noteFormSubmit`), which rules out a forged or empty request.
- */
-const trustedScriptDestination = (watch: SignInWatch, url: URL) =>
-  watch.scriptOrigins.includes(url.origin) || sameSite(watch.siteOrigin, url);
-
-/** Values a form request carried are sent; after a missed host click, the minter sent them. */
-const markSent = (record: SignInRecord, carried: readonly AutofillSlot[]) => {
-  for (const slot of carried) {
-    record.pending.delete(slot);
-    record.submittedSlots.add(slot);
-  }
-  const last = record.steps.at(-1);
-  if (carried.length > 0 && last?.submittedBy === undefined && last?.submit !== undefined)
-    record.steps[record.steps.length - 1] = { ...last, submittedBy: "minter" };
-};
-
-/**
- * One rule for every submit, the host's click or the minter's own after a missed one: a filled
- * value counts as sent only when the host hears the page's request carry it. Each value it carries
- * moves to `submittedSlots`; one it does not stays unsent, so a reload, a remount or a form that
- * emptied never counts. A script's request to an origin that is neither the site nor one of its
- * sign-in origins counts nothing. When it carries every pending value, or every one that origin's
- * earlier requests have not carried, its origin goes to `untrustedOrigins` with every pending
- * slot. Returns the secret slots it carried.
- */
-export const noteFormSubmit = (
-  record: SignInRecord | undefined,
-  sentAt: number,
-  request: SignInRequest,
-  carries: SecretMatcher,
-): Effect.Effect<readonly SecretSlot[]> =>
-  Effect.gen(function* () {
-    const watch = record?.watch;
-    if (record === undefined || watch === undefined) return [];
-    const texts = [
-      request.url,
-      request.body ?? "",
-      ...splitCodeTexts(request, pendingCodeLengths(record)),
-    ];
-    const carried: AutofillSlot[] = [];
-    const script = scriptRequest(watch, sentAt, request);
-    const judged = sentAsJudged(watch, sentAt, request);
-    if (judged) {
-      for (const [slot, value] of record.pending)
-        if (yield* carries([value], texts)) carried.push(slot);
-    } else if (script !== undefined && trustedScriptDestination(watch, script)) {
-      if (yield* carries([...record.pending.values()], texts))
-        carried.push(...record.pending.keys());
-    } else if (script !== undefined && script.origin !== "null" && record.pending.size > 0) {
-      // An origin already named needs only the pending values its requests have not carried
-      // yet, as an identifier-first sign-in sends each screen's value alone; a new one, all.
-      const known = record.untrustedOrigins?.get(script.origin);
-      const remaining = [...record.pending].filter(([slot]) => known?.has(slot) !== true);
-      if (remaining.length > 0 && (yield* carries(remaining.map(([, value]) => value), texts))) {
-        const origins = (record.untrustedOrigins ??= new Map());
-        origins.set(script.origin, new Set([...(known ?? []), ...record.pending.keys()]));
-      }
-    }
-    // Whether the password or a code went anywhere, counted or not; what counts is unchanged.
-    if (record.proofCarried !== true && (judged || script !== undefined))
-      for (const [slot, value] of record.pending)
-        if (provesLogin(slot) && (yield* carries([value], texts))) {
-          record.proofCarried = true;
-          break;
-        }
-    markSent(record, carried);
-    return carried.filter(isSecret);
-  });
-
-/**
- * Of `origins`, the ones a sign-in names to its caller. An origin is named while a value it heard,
- * as the record's `untrustedOrigins` holds it, does not count as sent yet, or while the caller
- * trusted it (`trusted`, whether it received the password or a code) and no sign-in verified
- * through it. Among those, when any received the password or a code, only those: an origin that
- * heard the identifier alone, such as an analytics script's, signs nobody in. None is named when
- * every value each heard already counts, and a check then fails as it always did.
- */
-export const keepNamedOrigins = (
-  origins: readonly string[],
-  record: SignInRecord | undefined,
-  trusted: ReadonlyMap<string, boolean> = new Map(),
-): readonly string[] => {
-  const heard = (origin: string) => [...(record?.untrustedOrigins?.get(origin) ?? [])];
-  const named = origins.filter(
-    (origin) =>
-      trusted.has(origin) ||
-      heard(origin).some((slot) => record?.submittedSlots.has(slot) !== true),
-  );
-  const proving = named.filter(
-    (origin) => trusted.get(origin) === true || heard(origin).some(provesLogin),
-  );
-  return proving.length > 0 ? proving : named;
-};
-
-/** The origins in `untrustedOrigins` a sign-in names to its caller (`keepNamedOrigins`). */
-export const namedUntrustedOrigins = (record: SignInRecord): readonly string[] =>
-  keepNamedOrigins([...(record.untrustedOrigins?.keys() ?? [])], record);
-
-/**
- * Trusts `origin` for the open sign-in, once the caller confirmed it: the slots its requests
- * carried (`untrustedOrigins`) count as sent, as if the request rule had credited them, and the
- * watch takes it as a sign-in origin for any request still to come. Nothing is typed or sent
- * again. Returns the secret slots it credited.
- */
-export const trustOrigin = (record: SignInRecord, origin: string): readonly SecretSlot[] => {
-  const slots = [...(record.untrustedOrigins?.get(origin) ?? [])];
-  record.untrustedOrigins?.delete(origin);
-  if (record.untrustedOrigins?.size === 0) delete record.untrustedOrigins;
-  const watch = record.watch;
-  if (watch !== undefined && !watch.scriptOrigins.includes(origin))
-    record.watch = { ...watch, scriptOrigins: [...watch.scriptOrigins, origin] };
-  markSent(record, slots);
-  return slots.filter(isSecret);
-};
-
-/**
- * Arms the watch for a fill about to run, with the form endpoints the host judged for its step,
- * and holds the step's values as pending, a code typed into one-character boxes as one code
- * (`keptValue`): the request its submit sends may be heard before the fill returns.
- */
-export const armStep = (
-  record: SignInRecord,
-  step: AutofillStep,
-  inspection: Pick<AutofillInspection, "page" | "targets" | "popupTargetId" | "siteOrigin">,
-  values: readonly string[],
-  armedAt: number,
-  authenticationOrigins: readonly string[],
-) => {
-  const { fields, submit } = inspection.targets;
-  const endpoints = [...fields, ...(submit === null ? [] : [submit])].flatMap((target) => {
-    const endpoint = target.actions[0] === undefined ? undefined : formEndpoint(target.actions[0]);
-    return endpoint === undefined ? [] : [{ endpoint, method: target.methods[0] ?? "get" }];
-  });
-  record.watch = {
-    endpoints,
-    armedAt,
-    ...(inspection.popupTargetId === undefined ? {} : { popupTargetId: inspection.popupTargetId }),
-    scriptOrigins: [
-      ...new Set([
-        ...endpoints.flatMap(({ endpoint }) => URL.parse(endpoint)?.origin ?? []),
-        ...authenticationOrigins,
-      ]),
-    ],
-    siteOrigin: inspection.siteOrigin,
-  };
-  step.fields.forEach((field, index) => {
-    if (!isExtraSecret(field.slot))
-      record.pending.set(field.slot, keptValue(step, values, index) ?? "");
-  });
-  // A date of birth records the control the host found for it, never its value.
-  const control = (index: number) => {
-    const found = inspection.targets.fields[index]?.control;
-    return found === undefined || found === "other" ? undefined : found;
-  };
-  record.steps.push({
-    ...(step.popup === undefined ? {} : { popup: step.popup }),
-    ...(step.rejectedMarkers === undefined ? {} : { rejectedMarkers: step.rejectedMarkers }),
-    fields: step.fields.map((field, index) =>
-      field.slot === "date_of_birth" ? { ...field, control: control(index) } : field,
-    ),
-    ...(step.submit === undefined ? {} : { submit: step.submit }),
-    ...(step.submitKey === undefined ? {} : { submitKey: step.submitKey }),
-    ...(step.methods === undefined ? {} : { methods: step.methods }),
-    page: inspection.page,
-  });
-};
-
-/**
- * Records what a fill did once it returns: a field it did not fill is not pending, a step that
- * reached nothing leaves the recipe, and a step the host clicked records it. Whether any value
- * reached the site is the request rule's call alone (`noteFormSubmit`). Returns whether anything
- * reached the page.
- */
-export const recordStep = (
-  record: SignInRecord,
-  step: AutofillStep,
-  report: AutofillStepReport,
-) => {
-  const filled = step.fields.map(
-    (_, index) =>
-      report.outcome === "uncertain" ||
-      (report.outcome === "filled" && report.fields[index]?.status === "filled"),
-  );
-  step.fields.forEach((field, index) => {
-    if (!filled[index] && !record.submittedSlots.has(field.slot)) record.pending.delete(field.slot);
-  });
-  const reached = filled.includes(true);
-  const submit = report.outcome === "filled" ? report.submit : report.outcome;
-  const last = record.steps.at(-1);
-  if (!reached && submit !== "clicked" && submit !== "uncertain") record.steps.pop();
-  else if (submit === "clicked" && last)
-    record.steps[record.steps.length - 1] = { ...last, submittedBy: "host" };
-  return reached || submit === "clicked" || submit === "uncertain";
-};
-
-/**
- * Checks each request the host hears against the open sign-in (`current`), in the order heard,
- * and tells `credited` the secret slots each one carried. `sequence` is how many it heard so far,
- * which arms a step's watch; `settled` waits until every request heard so far was checked.
- */
-export const makeSentTracker = (
-  current: () => SignInRecord | undefined,
-  carries: SecretMatcher,
-  credited: (slots: readonly SecretSlot[]) => void = () => {},
-) => {
-  let sequence = 0;
-  let checkedThrough: Deferred.Deferred<void> | undefined;
-  const heard = (request: SignInRequest) => {
-    const sentAt = ++sequence;
-    const previous = checkedThrough;
-    const checked = Deferred.unsafeMake<void>(FiberId.none);
-    checkedThrough = checked;
-    Effect.runFork(
-      (previous === undefined ? Effect.void : Deferred.await(previous)).pipe(
-        Effect.zipRight(noteFormSubmit(current(), sentAt, request, carries)),
-        Effect.tap((slots) => Effect.sync(() => credited(slots))),
-        Effect.catchAllCause(() => Effect.void),
-        Effect.ensuring(Deferred.succeed(checked, undefined)),
-      ),
-    );
-  };
-  return {
-    heard,
-    sequence: () => sequence,
-    settled: Effect.suspend(() =>
-      checkedThrough === undefined ? Effect.void : Deferred.await(checkedThrough),
-    ),
-  };
-};
-
 /** The browser a sign-in runs on, as the recorder uses it. */
 export interface SignInBrowser<E> {
   /** Finds the step's controls and judges where they submit, before anything is typed. */
@@ -655,6 +204,14 @@ export interface SignInBrowser<E> {
   readonly fill: (input: {
     readonly step: AutofillStep;
     readonly values: readonly string[];
+    readonly inspection: AutofillInspection;
+  }) => Effect.Effect<AutofillStepReport>;
+  /**
+   * Clicks again the submit of a screen whose fill reported `blocked`, typing nothing, after the
+   * step's `dismiss` when it names one. A browser without it has the screen filled again.
+   */
+  readonly resubmit?: (input: {
+    readonly step: AutofillStep;
     readonly inspection: AutofillInspection;
   }) => Effect.Effect<AutofillStepReport>;
   /**
@@ -669,8 +226,6 @@ export interface SignInBrowser<E> {
     challengeScreens: AutofillScreens,
     openOrigin?: string,
   ) => Effect.Effect<AutofillSignedInCheck, E>;
-  /** Hears each request the page sends until the returned function stops it. */
-  readonly onRequest: (listener: (request: SignInRequest) => void) => () => void;
   /** The configured sign-in origins off the site. */
   readonly authenticationOrigins: readonly string[];
 }
@@ -690,44 +245,4 @@ export interface SignInLogin<E> {
     held: WebsiteCredentials,
     triesLeft?: number,
   ) => Effect.Effect<WebsiteCredentials, E>;
-}
-
-/** Why the host could not get a value: the owner's answer went unanswered, failed or ran out. */
-export class Unanswered {
-  constructor(
-    readonly cause: unknown,
-    /** The field whose corrections ran out, for `field_corrections_exhausted`. */
-    readonly field?: string,
-  ) {}
-}
-
-/** A value for a field, with the slot it fills. */
-export interface SignInValue {
-  readonly slot: AutofillSlot;
-  readonly value: string;
-}
-
-/** A private answer's question as the host inspected it, never a recipe value. */
-export interface PrivateQuestion {
-  readonly questionText?: string | undefined;
-  readonly questionUnread?: true | undefined;
-  readonly label: string | null;
-}
-
-/** Where a sign-in's values besides the login come from, and how each is masked. */
-export interface SignInValueHooks<E> {
-  /** Asks the owner, for an identifier, date of birth or ZIP the login does not hold. */
-  readonly ask: InputAsker;
-  /** Masks a value everywhere before any screen can send it. */
-  readonly register: (slot: AutofillSlot, value: string) => Effect.Effect<void, E>;
-  /** A sign-in code; `again` when the site rejected the last one. */
-  readonly code: (need: {
-    readonly again?: "rejected";
-  }) => Effect.Effect<SignInValue | Unanswered, E>;
-  /** One of the login's recovery codes. */
-  readonly recoveryCode: Effect.Effect<SignInValue | Unanswered, E>;
-  /** The answer to the security question the screen shows now. */
-  readonly privateAnswer: (
-    question: PrivateQuestion | undefined,
-  ) => Effect.Effect<SignInValue | Unanswered, E>;
 }

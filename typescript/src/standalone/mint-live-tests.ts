@@ -65,6 +65,7 @@ export const localLiveTests = (state: MintState): LiveTestHost => {
     // Every case runs on the build's own browser, so a signed-in read's cases keep its session.
     signedInBatches: true,
     caseTimeoutMs,
+    bindBatches: context.bindLiveTests,
     schemas: (entrypoint) =>
       Effect.gen(function* () {
         const result = yield* runLocalOperation({

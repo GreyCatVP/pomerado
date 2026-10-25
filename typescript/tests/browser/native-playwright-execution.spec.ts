@@ -1,7 +1,6 @@
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { Worker } from "node:worker_threads";
 import { test, expect } from "@playwright/test";
 import { chromium } from "playwright";
 import { Effect } from "effect";
@@ -12,7 +11,6 @@ import type {
 } from "../../src/execution/playwright-execute.js";
 import { makeKernelCompatibility } from "../../src/runtime/kernel-compatibility.js";
 import { inspectAutofillStep } from "../../src/destinations/autofill-step.js";
-import type { SignInRequest } from "../../src/destinations/sign-in-recipe.js";
 import { fillAutofillStep } from "../../src/destinations/autofill-fill.js";
 import invoiceHeading from "../../authoring/examples/native-page.js";
 import { detailNavigation } from "../../authoring/examples/navigation.js";
@@ -1086,86 +1084,4 @@ export default defineOperation({ input: Schema.Struct({}), output: Schema.Struct
     await effectOf(run("pureFiles", { dispatchAtFirstCall: true, callsBrowser: true })),
   ).toBe("not_sent");
   expect(await effectOf(run("pureFiles", { callsBrowser: true }))).toBe("not_sent");
-});
-
-test("reports each request the context sends, with its body up to the cap, only while a listener hears", async () => {
-  test.setTimeout(60_000);
-  const server = createServer((request, response) => {
-    request.resume();
-    request.on("end", () => {
-      response.setHeader("Content-Type", "text/html");
-      response.end(
-        request.url === "/"
-          ? '<form method="post" action="/session"><input name="user" value="ada"><button>Go</button></form>'
-          : "<p>ok</p>",
-      );
-    });
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("No fixture address");
-  const site = `http://127.0.0.1:${address.port}`;
-  // Each request the browser worker reported to this process, by path, whether or not anyone heard
-  // it: once the last listener stops, the worker reports nothing more.
-  const crossed: string[] = [];
-  const ownEmit = Object.hasOwn(Worker.prototype, "emit");
-  const emit = Worker.prototype.emit;
-  Worker.prototype.emit = function (this: Worker, event: string | symbol, ...args: unknown[]) {
-    const message: unknown = args[0];
-    if (
-      event === "message" &&
-      typeof message === "object" &&
-      message !== null &&
-      Reflect.get(message, "kind") === "request"
-    )
-      crossed.push(new URL(String(Reflect.get(Reflect.get(message, "request"), "url"))).pathname);
-    return emit.call(this, event, ...args);
-  };
-  try {
-    await native(async (executor) => {
-      const heard: SignInRequest[] = [];
-      const run = (code: string) => Effect.runPromise(executor.executeResponse(code, 30));
-      // Before anyone listens, the page's own load is not reported.
-      await run(`await page.goto('${site}/'); return true;`);
-      const stop = executor.onRequest((request) => heard.push(request));
-      await run(
-        `await Promise.all([page.waitForURL('**/session'), page.click('button')]);
-await page.evaluate(async () => {
-  await fetch('/small', { method: 'POST', body: 'code=482913' });
-  await fetch('/large', { method: 'POST', body: 'x'.repeat(70000) });
-});
-return true;`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      stop();
-      await run(`await page.evaluate(() => fetch('/after', { method: 'POST', body: 'late' })); return true;`);
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      const own = heard.filter((request) =>
-        ["/", "/session", "/small", "/large", "/after"].includes(new URL(request.url).pathname),
-      );
-      expect(
-        own.map((request) => [
-          new URL(request.url).pathname,
-          request.method,
-          request.channel,
-          request.resourceType,
-          request.body,
-          request.bodyUnseen,
-        ]),
-      ).toEqual([
-        ["/session", "POST", "navigation", "document", "user=ada", undefined],
-        ["/small", "POST", "http", "fetch", "code=482913", undefined],
-        ["/large", "POST", "http", "fetch", null, true],
-      ]);
-      expect(own[0]).toMatchObject({ frame: "main", ownerTargetId: executor.targetId });
-      expect(crossed.filter((path) => ["/", "/after"].includes(path))).toEqual([]);
-      expect(crossed).toContain("/session");
-    });
-  } finally {
-    if (ownEmit) Worker.prototype.emit = emit;
-    else Reflect.deleteProperty(Worker.prototype, "emit");
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
 });

@@ -14,6 +14,8 @@ import {
 import type {
   AgentInputRequest,
   ExecutionEvidence,
+  MintDependencies,
+  MintEntryNavigation,
   MintTurn,
   PublicationDecision,
   PublicationRequest,
@@ -567,6 +569,61 @@ it.each([
   },
 );
 
+// A review request over Guardian's model input limit fails the same way when resubmitted, so it
+// ends the attempt at once instead of offering resubmissions until the outage budget runs out.
+it.each([
+  {
+    kind: "execution review",
+    exampleFirst: false,
+    call: (turn: MintTurn) => turn.actions.execute({ ...execution, purpose: "explore" }),
+    failure: new MintFailure({
+      code: "ReviewUnavailable",
+      reviewFailure: "InputTooLarge",
+      reviewPhase: "review_computation",
+      reviewDispatch: "not_sent",
+    }),
+  },
+  {
+    kind: "publication review",
+    exampleFirst: true,
+    call: (turn: MintTurn) => turn.actions.finish(publication),
+    failure: new MintFailure({
+      code: "ReviewUnavailable",
+      reviewFailure: "InputTooLarge",
+      reviewPhase: "review_computation",
+    }),
+  },
+])(
+  "ends the attempt on a $kind over the model's input limit, without offering a retry",
+  async ({ exampleFirst, call, failure }) => {
+    let calls = 0;
+    const failing = () =>
+      Effect.suspend(() => {
+        calls++;
+        return Effect.fail(failure);
+      });
+    const f = await fixture(
+      (turn) =>
+        Effect.gen(function* () {
+          if (exampleFirst) yield* turn.actions.execute(execution);
+          const ended: unknown = JSON.parse(yield* call(turn));
+          expect(ended).toMatchObject({
+            status: "review_unavailable",
+            reviewFailure: "InputTooLarge",
+          });
+          expect(ended).not.toHaveProperty("retryable");
+          expect(turn.isComplete()).toBe(true);
+        }),
+      exampleFirst ? { publish: failing } : { reviewAndExecute: failing },
+    );
+    expect(await f.run()).toMatchObject({
+      build: "incomplete",
+      hostFailure: "review_unavailable",
+    });
+    expect(calls).toBe(1);
+  },
+);
+
 // An older checkpoint still carries the retired retention counter; a takeover restores it.
 it("decodes an older harness checkpoint that still carries its retention counter", () => {
   const checkpoint = {
@@ -801,26 +858,28 @@ it("marks the decision ledger partial after a takeover from a checkpoint without
   expect(ledgers).toEqual([{ partial: true, denials: [], testFailures: [] }]);
 });
 
+const hostCheckRefusal = new MintFailure({
+  code: "PublicationUnavailable",
+  reason: "autofill_recipe_not_verified",
+});
 /**
- * The reply to a takeover's host_refused report after its predecessor's publication was refused by
- * a host check, from the predecessor's checkpoint as `edit` leaves it.
+ * The reply to a takeover's host_refused report after its predecessor finished once per publish
+ * decision in `decisions`, in order, from the predecessor's checkpoint as `edit` leaves it.
  */
-const hostRefusedAfterTakeover = async (edit: (checkpoint: Record<string, unknown>) => void) => {
+const hostRefusedAfterTakeover = async (
+  edit: (checkpoint: Record<string, unknown>) => void,
+  decisions: readonly MintFailure[] = [hostCheckRefusal],
+) => {
   let capture: (() => MintHarnessSnapshot) | undefined;
+  let published = 0;
   const first = await fixture(
     (turn) =>
       Effect.gen(function* () {
         yield* turn.actions.execute(execution);
-        yield* turn.actions.finish(publication);
+        for (const _ of decisions) yield* turn.actions.finish(publication);
       }),
     {
-      publish: () =>
-        Effect.fail(
-          new MintFailure({
-            code: "PublicationUnavailable",
-            reason: "autofill_recipe_not_verified",
-          }),
-        ),
+      publish: () => Effect.fail(decisions[published++] ?? hostCheckRefusal),
       agentRecovery: {
         bindHarness: (bound) =>
           Effect.sync(() => {
@@ -870,25 +929,55 @@ it.each([
   expect(await hostRefusedAfterTakeover(edit)).toEqual([expect.objectContaining({ status })]);
 });
 
+// A host refusal a later finish_build got past to Guardian's review stays cleared after a takeover,
+// so the takeover refuses host_refused as the build that cleared it did.
+it("keeps a host refusal a later finish_build got past cleared across a takeover", async () => {
+  const kept: Record<string, unknown>[] = [];
+  const replies = await hostRefusedAfterTakeover(
+    (checkpoint) => {
+      kept.push({ ...checkpoint });
+    },
+    [
+      new MintFailure({ code: "PublicationUnavailable", reason: "variants_unsupported" }),
+      new MintFailure({
+        code: "ReviewDenied",
+        review: {
+          outcome: "deny",
+          reason: "source_correction",
+          reviewId: "review_correction",
+          rationale: "Read the total from the invoice table.",
+          findings: [],
+        },
+      }),
+    ],
+  );
+  expect(kept[0]).not.toHaveProperty("hostRefused");
+  expect(kept[0]).toHaveProperty("hostRefusalPassed", true);
+  expect(replies).toEqual([
+    expect.objectContaining({ status: "blocked_refused", reason: "host_refusal_passed" }),
+  ]);
+});
+
 /**
  * The reply to a takeover's site_declined report after its predecessor sent a sign-in that nothing
  * confirmed, from the predecessor's checkpoint as `edit` leaves it.
  */
 const declinedAfterUnconfirmedSignIn = async (
   edit: (checkpoint: Record<string, unknown>) => void,
+  signIn: MintDependencies["reviewAndExecute"] = () =>
+    Effect.succeed({
+      executionId: "sign_in_screen",
+      status: "completed" as const,
+      effect: "possible" as const,
+      resultRef: "screen_result",
+      observations: { step: { outcome: "filled", submit: "clicked" } },
+    }),
 ) => {
   let capture: (() => MintHarnessSnapshot) | undefined;
   const first = await fixture(
     (turn) => turn.actions.execute({ ...execution, purpose: "authenticate", target: "liveBrowser" }),
     {
-      reviewAndExecute: () =>
-        Effect.succeed({
-          executionId: "sign_in_screen",
-          status: "completed" as const,
-          effect: "possible" as const,
-          resultRef: "screen_result",
-          observations: { step: { outcome: "filled", submit: "clicked" } },
-        }),
+      reviewAndExecute: signIn,
       agentRecovery: {
         bindHarness: (bound) =>
           Effect.sync(() => {
@@ -939,6 +1028,38 @@ it.each([
   "keeps an unconfirmed sign-in across a takeover from $checkpoint checkpoint",
   async ({ edit, status }) => {
     expect(await declinedAfterUnconfirmedSignIn(edit)).toEqual([
+      expect.objectContaining({ status }),
+    ]);
+  },
+);
+
+// Guardian's final refusal of a predecessor's sign-in still stands alone after a takeover; a
+// checkpoint from an older worker, which kept no such record, leaves the report as it was.
+it.each([
+  { checkpoint: "this worker's", edit: () => undefined, status: "sign_in_unavailable" },
+  {
+    checkpoint: "an older worker's",
+    edit: (checkpoint: Record<string, unknown>) => {
+      delete checkpoint["signInRefusalOnly"];
+    },
+    status: "blocked",
+  },
+])(
+  "keeps a refused sign-in across a takeover from $checkpoint checkpoint",
+  async ({ edit, status }) => {
+    const refused = () =>
+      Effect.fail(
+        new MintFailure({
+          code: "ReviewDenied",
+          review: {
+            outcome: "deny",
+            reviewId: "review_sign_in",
+            rationale: "This sign-in may not run.",
+            refusal: "final",
+          },
+        }),
+      );
+    expect(await declinedAfterUnconfirmedSignIn(edit, refused)).toEqual([
       expect.objectContaining({ status }),
     ]);
   },
@@ -1031,6 +1152,35 @@ it("lets report_blocked end blocked once a review outage outlasts its budget", a
     },
   );
   expect((await takeover.run()).blocked).toEqual({ reason: "site_lacks_capability" });
+});
+
+// A blocked explanation whose review request is over Guardian's model input limit would fail the
+// same way when resubmitted, so report_blocked ends blocked with the reason alone, as past the
+// outage budget.
+it("lets report_blocked end blocked when its review is over the model's input limit", async () => {
+  let reviews = 0;
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        const reportBlocked = turn.actions.reportBlocked;
+        if (reportBlocked === undefined) throw new Error("Missing report_blocked");
+        expect(JSON.parse(yield* reportBlocked(blockedReport))).toMatchObject({
+          status: "blocked",
+          explanationShown: false,
+        });
+      }),
+    {
+      reviewQuestion: () =>
+        Effect.suspend(() => {
+          reviews++;
+          return Effect.fail(
+            new MintFailure({ code: "ReviewUnavailable", reviewFailure: "InputTooLarge" }),
+          );
+        }),
+    },
+  );
+  expect((await f.run()).blocked).toEqual({ reason: "site_lacks_capability" });
+  expect(reviews).toBe(1);
 });
 
 // Another review's outage is not the blocked explanation's: resubmit that call first.
@@ -1770,6 +1920,28 @@ it("sends a refused-outcome review back to revise once, and ends the attempt at 
   expect(reviews).toBe(3);
 });
 
+// The second refused outcome ended the attempt with no typed ending and no diagnostic naming
+// why, so a host read the build as a missing publication, though its write had applied.
+it("names the ending of an attempt a second refused outcome ends, and the review that did", async () => {
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        const question = textQuestion("Which account type?");
+        yield* turn.actions.requestInput(question);
+        yield* turn.actions.requestInput(question);
+        expect(turn.isComplete()).toBe(true);
+      }),
+    { reviewQuestion: invalidOutcome },
+  );
+  const outcome = await f.run();
+  expect(outcome).toMatchObject({ build: "incomplete", stopReason: "host_unavailable" });
+  // The host ended it, not an outage: nothing requeues it as one.
+  expect(outcome).not.toHaveProperty("hostFailure");
+  expect(phaseDiagnostics(outcome, "review")).toEqual([
+    { phase: "review", reason: "review_unavailable", code: "InvalidOutcome", review: "question" },
+  ]);
+});
+
 // A refused outcome started the review outage clock, so report_blocked was refused until the
 // agent resubmitted the same request.
 it("lets report_blocked through after a refused-outcome review, which starts no outage", async () => {
@@ -1851,7 +2023,10 @@ it("ends a taken-over attempt at its first refused outcome when its checkpoint a
       agentRecovery: { initial: { agent: freshAgent, harness }, save: () => Effect.void },
     },
   );
-  expect((await takeover.run()).build).toBe("incomplete");
+  expect(await takeover.run()).toMatchObject({
+    build: "incomplete",
+    stopReason: "host_unavailable",
+  });
 });
 
 /** The parsed diagnostics a phase recorded. */
@@ -1889,7 +2064,7 @@ it("records a refused-outcome publication review as a revision, then as ended at
     },
   );
   const outcome = await f.run();
-  expect(outcome.build).toBe("incomplete");
+  expect(outcome).toMatchObject({ build: "incomplete", stopReason: "host_unavailable" });
   expect(outcome).not.toHaveProperty("hostFailure");
   expect(recorded).toEqual([
     expect.objectContaining({
@@ -1902,6 +2077,9 @@ it("records a refused-outcome publication review as a revision, then as ended at
   expect(phaseDiagnostics(outcome, "publication")).toEqual([
     expect.objectContaining({ code: "InvalidOutcome" }),
     expect.objectContaining({ code: "InvalidOutcome" }),
+  ]);
+  expect(phaseDiagnostics(outcome, "review")).toEqual([
+    expect.objectContaining({ reason: "review_unavailable", review: "publication" }),
   ]);
 });
 
@@ -5743,6 +5921,67 @@ it.each(["read_back", "fallback"] as const)(
   },
 );
 
+// A confirmation the host marks as leaving steps of the session's recorded write path unentered,
+// such as a saved draft's notice before the quote the path ends with, keeps the session open: its
+// receipt names the steps left and the next act step runs. The step that leaves none closes it.
+// Fails when the first confirmation closes the session, as every one did before write paths.
+it("keeps a write session open past a confirmation its recorded path has steps after", async () => {
+  const receipts: unknown[] = [];
+  let steps = 0;
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        const act = { ...execution, purpose: "act", target: "liveBrowser" };
+        receipts.push(JSON.parse(yield* turn.actions.execute(act)));
+        receipts.push(
+          JSON.parse(yield* turn.actions.execute({ ...act, entrypoint: "src/quote.ts" })),
+        );
+        expect(
+          yield* Effect.either(turn.actions.execute({ ...act, entrypoint: "src/after.ts" })),
+        ).toMatchObject({ _tag: "Left", left: { code: "AlreadyExecuted" } });
+        yield* turn.actions.finish({ ...publication, executionId: "act_2" });
+      }),
+    {
+      reviewAndExecute: () =>
+        Effect.sync((): ExecutionEvidence => {
+          steps++;
+          return steps === 1
+            ? {
+                executionId: "act_1",
+                status: "completed",
+                effect: "verified",
+                confirmation: "message",
+                writePathRemaining: ["get-quote"],
+                resultRef: "result_draft",
+                observations: "Draft saved",
+              }
+            : {
+                executionId: "act_2",
+                status: "completed",
+                effect: "verified",
+                confirmation: "message",
+                resultRef: "result_quote",
+                observations: "Quote ready",
+              };
+        }),
+      publish: () => Effect.succeed({ publicationRef: "published", diagnostics: [] }),
+    },
+  );
+  expect(await f.run({ ...request, effect: "write" })).toMatchObject({ build: "published" });
+  expect(steps).toBe(2);
+  expect(receipts[0]).toMatchObject({
+    confirmation: "message",
+    writePath: {
+      remaining: ["get-quote"],
+      instruction: expect.stringContaining(
+        "This step's confirmation does not end the write session",
+      ) as unknown,
+    },
+  });
+  expect(receipts[1]).toMatchObject({ confirmation: "message" });
+  expect(receipts[1]).not.toHaveProperty("writePath");
+});
+
 // The fallback is for a read-back that cannot run, such as once the execution host is lost. It
 // fails when the withheld step does not keep the attempt open for publication.
 it("publishes a withheld write confirmation through the fallback after the execution host is lost", async () => {
@@ -6166,6 +6405,35 @@ describe("host entry page notice", () => {
       requestedUrl: entry,
       instruction: expect.any(String) as unknown,
     });
+  });
+  // A host may explain a replaced browser in its own words, such as a replacement that kept its
+  // session, and change that explanation on the same page. The minter hears each change once.
+  it("shows the notice again when only the host's own instruction changed", async () => {
+    const hostInstruction = "The host kept the previous browser's session for this one.";
+    let current: Extract<MintEntryNavigation, { readonly state: "replaced" }> = {
+      state: "replaced",
+      reason: "recovery",
+      page: "https://site.invalid/home",
+    };
+    const receipts: string[] = [];
+    const f = await fixture(
+      (turn) =>
+        Effect.gen(function* () {
+          receipts.push(yield* turn.actions.execute({ ...execution, purpose: "explore" }));
+          current = { ...current, instruction: hostInstruction };
+          receipts.push(yield* turn.actions.execute({ ...execution, purpose: "explore" }));
+          receipts.push(yield* turn.actions.execute({ ...execution, purpose: "explore" }));
+        }),
+      { entryNavigation: () => current },
+    );
+    await f.run();
+    const [unchanged, explained, repeated] = receipts.map((receipt) => modelInput(receipt));
+    expect(unchanged).not.toHaveProperty("hostEntryNavigation");
+    expect(explained?.hostEntryNavigation).toMatchObject({
+      state: "replaced",
+      instruction: hostInstruction,
+    });
+    expect(repeated).not.toHaveProperty("hostEntryNavigation");
   });
   it("adds no notice when the host supplies none", async () => {
     let input = "";

@@ -5,6 +5,7 @@ import {
   expectedConfirmDigest,
   makeRunDialogDecision,
   type DialogEvent,
+  type ObservedConfirm,
 } from "../../src/browser/dialogs/expected.js";
 import { noIncidents, type DialogIncident } from "../../src/runtime/incidents.js";
 
@@ -160,4 +161,108 @@ it("records nothing locally and decides the same as a recording store", async ()
     Effect.runPromise(Effect.forEach(shown, (dialog) => decide(dialog, facts)));
   expect(await decided(silent)).toEqual(await decided(recording.decide));
   expect(recording.incidents).toHaveLength(4);
+});
+
+const judged = (
+  verdict: (confirm: ObservedConfirm) => Effect.Effect<"accept" | "ask", unknown>,
+  options: { readonly readOnly?: boolean; readonly ask?: boolean } = {},
+) => {
+  const incidents: DialogIncident[] = [];
+  const asked: DialogType[] = [];
+  const seen: ObservedConfirm[] = [];
+  const decide = makeRunDialogDecision({
+    readOnly: options.readOnly ?? false,
+    expectedConfirms: [recorded],
+    input: { documentId: "DOC-2002" },
+    ...(options.ask === false
+      ? {}
+      : {
+          askCaller: (shown: DialogEvent) =>
+            Effect.sync((): DialogChoice => {
+              asked.push(shown.type);
+              return { choice: "dismiss" };
+            }),
+        }),
+    judgeConfirm: (_shown: DialogEvent, confirm: ObservedConfirm) =>
+      Effect.suspend(() => {
+        seen.push(confirm);
+        return verdict(confirm);
+      }),
+    incidents: {
+      record: (incident) =>
+        Effect.sync(() => {
+          incidents.push(incident);
+        }),
+    },
+  });
+  return { decide, incidents, asked, seen };
+};
+const novel = { message: "Permanently submit DOC-2002?", pageUrl: "https://controlled.test/page" };
+
+it("accepts a write's new confirm the host judges, with this run's values slotted, before asking", async () => {
+  const run = judged(() => Effect.succeed("accept"));
+  expect(await Effect.runPromise(run.decide(event("confirm"), novel))).toEqual({
+    choice: "accept",
+  });
+  expect(run.asked).toEqual([]);
+  expect(run.seen).toEqual([
+    {
+      message: "Permanently submit DOC-2002?",
+      origin: "https://controlled.test",
+      step: "action_1",
+      template: ["Permanently submit ", ["input/documentId"], "?"],
+    },
+  ]);
+  expect(run.incidents).toEqual([
+    {
+      source: "host",
+      kind: "dialog",
+      reason: "dialog_judged_confirm_accepted",
+      hostBug: false,
+      severity: "info",
+      subCause: "confirm_accept",
+    },
+  ]);
+});
+
+it("asks the caller when the host's judgment asks, fails or dies", async () => {
+  for (const verdict of [
+    () => Effect.succeed("ask" as const),
+    () => Effect.fail(new Error("judge unavailable")),
+    () => Effect.die(new Error("judge broke")),
+    () => Effect.succeed("yes" as unknown as "accept" | "ask"),
+  ]) {
+    const run = judged(verdict);
+    expect(await Effect.runPromise(run.decide(event("confirm"), novel))).toEqual({
+      choice: "dismiss",
+    });
+    expect(run.asked).toEqual(["confirm"]);
+    expect(run.seen).toHaveLength(1);
+    expect(run.incidents).toEqual([]);
+  }
+});
+
+it("never judges a recorded confirm, a read's confirm, another dialog or a confirm with no known step", async () => {
+  const run = judged(() => Effect.succeed("accept"));
+  await Effect.runPromise(run.decide(event("confirm"), facts));
+  await Effect.runPromise(run.decide(event("alert"), novel));
+  expect(await Effect.runPromise(run.decide(event("confirm", null), novel))).toEqual({
+    choice: "dismiss",
+  });
+  await Effect.runPromise(
+    run.decide(event("confirm"), { ...novel, pageUrl: "http://controlled.test/page" }),
+  );
+  expect(run.asked).toEqual(["confirm", "confirm"]);
+  const read = judged(() => Effect.succeed("accept"), { readOnly: true });
+  await Effect.runPromise(read.decide(event("confirm"), novel));
+  expect([...run.seen, ...read.seen]).toEqual([]);
+});
+
+it("defaults a write's new confirm the host's judgment asks about when nobody can be asked", async () => {
+  const run = judged(() => Effect.succeed("ask"), { ask: false });
+  expect(await Effect.runPromise(run.decide(event("confirm"), novel))).toEqual({
+    choice: "dismiss",
+  });
+  expect(run.seen).toHaveLength(1);
+  expect(run.incidents.map((incident) => incident.subCause)).toEqual(["confirm_dismiss"]);
 });

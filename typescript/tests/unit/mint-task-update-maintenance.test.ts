@@ -383,3 +383,57 @@ it("asks the host who can confirm once per update", async () => {
   expect(asked).toBe(1);
   expect(host.reviews[0]?.update).toMatchObject({ maintenance: { confirmer: "owner" } });
 });
+
+// A change nobody can confirm may still leave out a part of its request it can't meet, and the
+// field it added for that part goes with it: the registered contract never had the field. Fails
+// while the host refuses removing that field as `owner_unavailable`, which leaves the build an
+// added field it must keep returning, or ending blocked.
+it("lets a repair nobody can confirm remove the output field it added, and nothing registered", async () => {
+  const host = updateHost();
+  const label = {
+    setting: "output",
+    field: "notes[].label",
+    change: "add",
+    text: "Each note's label as the notes page shows it, or null when the note has none.",
+  };
+  const results: Record<string, unknown>[] = [];
+  const f = await fixture(
+    (turn) =>
+      Effect.gen(function* () {
+        for (const update of [
+          { summary: label.text, changes: [label], confirmedBy: [], recommend: "update" },
+          {
+            summary: "Leave out the label this build added; the rest of the request is published.",
+            changes: [
+              {
+                setting: "output",
+                field: "notes[].label",
+                change: "remove",
+                text: "Notes come back without the label this build added.",
+                reason: "Added only for the part of the request this build leaves out.",
+              },
+            ],
+            confirmedBy: [],
+            recommend: "update",
+          },
+          { ...dropColor, confirmedBy: [] },
+        ])
+          results.push(JSON.parse(yield* turn.actions.updateTask!(update)));
+      }),
+    { ...host.dependencies, taskUpdateConfirmer: () => Effect.succeed("none") },
+  );
+  await f.run();
+  expect(results).toMatchObject([
+    { status: "updated", task: { revision: 1 } },
+    { status: "updated", task: { revision: 2 } },
+    { status: "update_refused", reason: "owner_unavailable" },
+  ]);
+  // Guardian reviewed the removal knowing nobody can confirm, and the host applied it.
+  expect(host.reviews[1]?.update).toMatchObject({
+    changes: [{ field: "notes[].label", change: "remove" }],
+    maintenance: { confirmer: "none" },
+  });
+  expect(host.applied).toHaveLength(2);
+  // The refusal of a registered field points at leaving that part of the request out.
+  expect(String(results[2]?.["instruction"])).toContain("publish the rest");
+});

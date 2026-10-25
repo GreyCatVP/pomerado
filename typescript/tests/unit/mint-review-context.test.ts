@@ -1,6 +1,6 @@
 import { DateTime, Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { ReviewFailure } from "../../src/guardian/review.js";
+import { ReviewFailure, type ReviewedLiveTestBatch } from "../../src/guardian/review.js";
 import { failureDetail } from "../../src/runtime/failure-detail.js";
 import {
   allowedEffectsFor,
@@ -321,6 +321,29 @@ describe("mintReviewContext", () => {
     expect((await context(withWrites, live("act"))).writes).toStrictEqual(tracked);
     expect(await context(withWrites)).not.toHaveProperty("writes");
     expect(await context(host, live("act"))).not.toHaveProperty("writes");
+  });
+
+  it("gives an execution review the judged live test batches, and a question review none", async () => {
+    const batches: readonly ReviewedLiveTestBatch[] = [
+      {
+        batchId: "review_batch",
+        entrypoint: "operation/src/tool.mjs",
+        sourceDigest: "digest_1",
+        sourceUnchanged: true,
+        cases: [
+          { id: "cold-1", verdict: "pass", start: "cold" },
+          { id: "warm-1", verdict: "fail", start: "warm" },
+        ],
+      },
+    ];
+    const { host } = fakeHost();
+    const withBatches: MintReviewHost = { ...host, liveTests: () => Effect.succeed(batches) };
+    expect((await context(withBatches, live("example"))).liveTests).toStrictEqual(batches);
+    expect(await context(withBatches)).not.toHaveProperty("liveTests");
+    expect(await context(host, live("example"))).not.toHaveProperty("liveTests");
+    // Bound with none on record, as after a takeover: the review is told so.
+    const noneYet: MintReviewHost = { ...host, liveTests: () => Effect.succeed([]) };
+    expect((await context(noneYet, live("example"))).liveTests).toStrictEqual([]);
   });
 });
 

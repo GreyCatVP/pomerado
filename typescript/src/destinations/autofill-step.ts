@@ -108,6 +108,8 @@ export interface AutofillStepRequest {
   /** A two-factor method choice: every method offered, and `submit` the one picked. */
   readonly methods?:
     readonly { readonly method: SignInMethodChoice; readonly selector: string }[] | undefined;
+  /** The own close, reject or accept control of a notice that covers the screen (`AutofillStep`). */
+  readonly dismiss?: string | undefined;
 }
 
 /**
@@ -126,6 +128,14 @@ export interface AutofillStep<Slot extends FillSlot = AutofillSlot> {
   /** A two-factor method choice: every method offered, and `submit` the one picked. */
   readonly methods?:
     readonly { readonly method: SignInMethodChoice; readonly selector: string }[] | undefined;
+  /**
+   * The own close, reject or accept control of a cookie, consent or similar notice that covers the screen,
+   * which the host clicks before it types, when the page shows it, and again before it clicks the
+   * submit once more when the notice caught that click. Never a submit or a control of the
+   * sign-in's own form (`dismiss_refused`), unless it sits in a notice that covers one of the step's
+   * controls: the host then cancels that click's submission, so it submits nothing.
+   */
+  readonly dismiss?: string | undefined;
 }
 
 /** Whether the host submits the step itself: it clicks its submit or presses its submit key. */
@@ -150,7 +160,14 @@ const Target = Schema.Struct({
   /** Its form's `method` attribute, or a control's `formmethod` attribute, says GET. */
   explicitGet: Schema.optional(Schema.Boolean),
   documentOrigin: Schema.String,
+  /** Its form's own action first, when it is in a form, then its link and each `formaction`. */
   actions: Schema.Array(Schema.String),
+  /**
+   * Its form's own action, the first of `actions`, is a script that does nothing (`javascript:`,
+   * `javascript:void(0)`, `javascript:;`): the page's own code does whatever sending the form does.
+   * A step call that finds it changed judges the controls again.
+   */
+  scriptAction: Schema.optional(Schema.Boolean),
   methods: Schema.Array(Schema.String),
   /**
    * The method its form submits by with it: a submit button's own `formmethod` when it has one,
@@ -170,6 +187,77 @@ export const Targets = Schema.Struct({
 });
 
 const Text = Schema.NullOr(Schema.String);
+/** The tags a covering element reports as its own: any other is `other`. */
+const coveringTags = [
+  "a",
+  "article",
+  "aside",
+  "button",
+  "dialog",
+  "div",
+  "figure",
+  "footer",
+  "form",
+  "header",
+  "iframe",
+  "img",
+  "label",
+  "li",
+  "main",
+  "nav",
+  "p",
+  "section",
+  "span",
+  "svg",
+  "table",
+  "ul",
+] as const;
+/** The ARIA roles a covering element reports as its own: any other is none. */
+const coveringRoles = [
+  "alert",
+  "alertdialog",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "dialog",
+  "document",
+  "form",
+  "generic",
+  "group",
+  "main",
+  "navigation",
+  "none",
+  "note",
+  "presentation",
+  "region",
+  "status",
+  "toolbar",
+  "tooltip",
+] as const;
+/**
+ * The element that sat over a submit and caught the host's click, by its tag and ARIA role, each
+ * one of a fixed list: never its text, id, label or class names, which page code may write from
+ * what the host typed.
+ */
+export const CoveringElement = Schema.Struct({
+  tag: Schema.Literal(...coveringTags, "other"),
+  role: Schema.NullOr(Schema.Literal(...coveringRoles)),
+});
+/** What page code read of a covering element: its tag and role attribute, as the page has them. */
+export const ReadCoveringElement = Schema.Struct({ tag: Schema.String, role: Text });
+const isCoveringTag = Schema.is(Schema.Literal(...coveringTags));
+const isCoveringRole = Schema.is(Schema.Literal(...coveringRoles));
+/** A covering element as the host reports it: a tag or role off its list is none of the page's. */
+export const coveringElement = (
+  read: typeof ReadCoveringElement.Type,
+): typeof CoveringElement.Type => {
+  const tag = read.tag.toLowerCase();
+  const role = read.role?.trim().toLowerCase();
+  return {
+    tag: isCoveringTag(tag) ? tag : "other",
+    role: role !== undefined && isCoveringRole(role) ? role : null,
+  };
+};
 /** A control as Guardian judges it: its markup's own words, never a value. */
 const Described = Schema.Struct({
   tag: Schema.String,
@@ -193,9 +281,11 @@ const Described = Schema.Struct({
    */
   questionUnread: Schema.optional(Schema.Literal(true)),
   /**
-   * A code field that is one of the screen's one-character boxes (an input whose `maxlength` is 1),
-   * when the screen shows two or more: its place among them (`box`, from 1) and how many it shows
-   * (`of`). Inspection-only, never a recipe value; see `codeBoxesRefusal`.
+   * A code field that is one of the screen's one-character boxes (an input whose `maxlength` is 1,
+   * or one with no `maxlength` that the page's script limits, among like inputs in one parent
+   * element or each alone in its own wrapper element in one parent), when the screen shows two or
+   * more: its place among them (`box`, from 1) and how many it shows (`of`). Inspection-only, never
+   * a recipe value; see `codeBoxesRefusal`.
    */
   codeBox: Schema.optional(Schema.Struct({ box: Schema.Number, of: Schema.Number })),
 });
@@ -247,9 +337,10 @@ export type AutofillRefusal = {
     | "typing_unavailable"
     | "popup_missing"
     | "popup_ambiguous"
-    | "code_boxes_incomplete";
+    | "code_boxes_incomplete"
+    | "dismiss_refused";
   /** The field (by its index in the step) or the submit control the refusal is about. */
-  readonly target?: number | "submit" | "popup";
+  readonly target?: number | "submit" | "popup" | "dismiss";
   /**
    * `code_boxes_incomplete`: how many one-character code boxes the screen shows, and the place of
    * each box the step's code fields named, in the step's order. Counts only, never a value.
@@ -332,8 +423,14 @@ export interface AutofillInspection {
   };
 }
 
-/** Kernel's fill vocabulary: a field after the first failed one is never attempted. */
-export type AutofillFieldStatus = "filled" | "failed" | "not_attempted";
+/**
+ * Kernel's fill vocabulary: a field after the first failed one is never attempted. `changed`: a
+ * phone field the host typed into kept other digits than the number's once the page reformatted
+ * it, as under a country picker set to another country (`InsertionOptions.phone`), so the host
+ * typed nothing after it and never clicked the submit. A keyboard that does not read back never
+ * reports it.
+ */
+export type AutofillFieldStatus = "filled" | "failed" | "not_attempted" | "changed";
 
 /**
  * What one host fill did, with no value in it. `filled` typed the fields in order and says what
@@ -351,7 +448,13 @@ export type AutofillStepReport =
         readonly status: AutofillFieldStatus;
       }[];
       /**
-       * `clicked`: the host clicked the submit, or pressed the step's submit key in its last field.
+       * `clicked`: the host clicked the submit, or pressed the step's submit key in its last field,
+       * counting a click or press that ran out of time while the next page loaded once a request
+       * for the page's main frame went out, as a form's submission sends.
+       * `failed`: the click or press threw before any such request went out.
+       * `blocked`: another element sat over the submit and caught the host's click (`blockedBy`),
+       * so the click never reached the submit and nothing was sent; the fields still hold what
+       * was typed.
        * `refused`: after the fill the host refused a control where it then sat or submitted.
        * `stayed_disabled`: the submit stayed disabled after the fields were filled, through the
        * host's wait for the page to enable it, so the host never clicked it.
@@ -363,6 +466,7 @@ export type AutofillStepReport =
        */
       readonly submit:
         | "clicked"
+        | "blocked"
         | "failed"
         | "not_attempted"
         | "refused"
@@ -374,6 +478,8 @@ export type AutofillStepReport =
        * after the page's own handlers ran on the click, so what the step filled may have gone out.
        */
       readonly clicked?: true;
+      /** What caught a `blocked` click, by its markup's own names, never its text or a value. */
+      readonly blockedBy?: typeof CoveringElement.Type;
       /** The primary page after the submit settled, byte-exact like every URL. */
       readonly url: string;
       /** Host diagnostics only: why a field or the submit was refused once something was typed. */
@@ -483,7 +589,10 @@ export const notingHostTrust = (
  * field for a part of a payment card may also sit in a frame on one of `paymentFrameOrigins`,
  * exactly; no other field ever counts one as trusted. A sign-in step's controls may also sit and
  * submit on an address the host's own `trustSignInUrl` trusts, within core's floor for it (see
- * `inspectAutofillStep`); a card-fill step's never do.
+ * `inspectAutofillStep`); a card-fill step's never do. A sign-in step's control whose form's own
+ * action is a script that does nothing (`scriptAction`) is judged by its frame, document and other
+ * destinations: navigating to such an action sends nothing, and the page's code, which can read the
+ * field anyway, does the sending. A card-fill step's never is, nor any other script action.
  */
 export const untrustedTarget = (
   targets: typeof Targets.Type,
@@ -498,6 +607,7 @@ export const untrustedTarget = (
   named?: ReadonlySet<string>,
 ) => {
   const predicate = signInUrlTrust(trust, step);
+  const signIn = !step.fields.some((field) => isCardSlot(field.slot));
   const trusted = (url: string, card: boolean) =>
     trustedUrl(trust.siteOrigin, trust.authenticationOrigins, url) ||
     (card && onPaymentFrameOrigin(url, trust.paymentFrameOrigins ?? [])) ||
@@ -505,7 +615,11 @@ export const untrustedTarget = (
   const untrustedPart = (target: Target, action: string, card = false) => {
     if (!trusted(target.ownerUrl ?? "", card)) return "frame";
     if (!trusted(target.documentOrigin, card)) return "document_origin";
-    return target.actions.every((url) => trusted(url, card)) ? undefined : action;
+    // A sign-in form's own action that is a script doing nothing sends nothing itself; its other
+    // destinations still count.
+    const script = signIn && target.scriptAction === true && target.actions[0] === "javascript:";
+    const destinations = script ? target.actions.slice(1) : target.actions;
+    return destinations.every((url) => trusted(url, card)) ? undefined : action;
   };
   /**
    * A card field's own checks: every frame above its own is on the site or on its own frame's
@@ -560,7 +674,9 @@ export const untrustedTarget = (
  * any value is typed. The contract is Kernel's vault fill, with our own
  * vault and our own fill: the minter found the fields, and this trusted controller authorizes the
  * destination. A credential goes only into a field whose frame, form actions and submit's link
- * destination are on the site's registrable domain or a configured sign-in origin. A form that
+ * destination are on the site's registrable domain or a configured sign-in origin; a sign-in
+ * form's own action that is a script doing nothing, which sends nothing itself, is judged by where
+ * the field sits and the form's other destinations. A form that
  * submits by GET is allowed when it is clearly the login form, which Guardian judges; its values
  * land in a URL that stays byte-exact. Once the host typed into the page
  * (`judgedBeforeTyping` given), a refusal names only the origins `namedAfterTyping` allows.

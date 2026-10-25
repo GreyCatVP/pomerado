@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { Request } from "playwright";
-import { Effect, Exit, Scope } from "effect";
+import { Effect } from "effect";
 import { localSignInLogin, makeSignInBrowser } from "../../src/standalone/authentication.js";
 import { makeInputAsker } from "../../src/inputs/callback.js";
 import { makeRunSecrets } from "../../src/inputs/secrets.js";
@@ -9,38 +8,14 @@ import {
   type AutofillSignedIn,
 } from "../../src/destinations/autofill-step.js";
 import type { CredentialKeyboard } from "../../src/destinations/credential-keyboard.js";
-import type { SignInRequest } from "../../src/destinations/sign-in-recipe.js";
 import type { SignInStep } from "../../src/mint/contracts.js";
 import { makeSignInRecorder } from "../../src/mint/sign-in-recorder.js";
 import type { InputAsker } from "../../src/runtime/input-request.js";
 import { signInForRun } from "../../src/runtime/sign-in-replay.js";
-import { askingValueHooks } from "../../src/runtime/sign-in-values.js";
 import { expectNotCarried, hostKeyboard, hostPage } from "./autofill-host-page.js";
 
-// The local host's sign-in on a page: its recorder fills each screen with the build's login,
-// asks for each private answer, and records what a request the page sent carried.
-
-const scopes: Scope.CloseableScope[] = [];
-test.afterEach(async () => {
-  for (const scope of scopes.splice(0)) await Effect.runPromise(Scope.close(scope, Exit.void));
-});
-
-/** Each request `page` sends, as the executor reports it, until the returned function stops it. */
-const pageRequests = (page: Page) => (listener: (request: SignInRequest) => void) => {
-  const heard = (request: Request) => {
-    const document = request.isNavigationRequest();
-    listener({
-      url: request.url(),
-      method: request.method(),
-      body: request.postData(),
-      channel: document ? "navigation" : "http",
-      ...(document ? { frame: request.frame() === page.mainFrame() ? "main" : "sub" } : {}),
-      resourceType: request.resourceType(),
-    });
-  };
-  page.on("request", heard);
-  return () => page.off("request", heard);
-};
+// The local host's sign-in on a page: its recorder fills each screen with the build's login, and
+// asks for each private answer.
 
 /** The login the build gives when a screen first needs it: one credential question's answer. */
 const login = { username: "owner@bank.example.test", password: "synthetic-password" };
@@ -62,7 +37,6 @@ const localSignIn = async (
     keyboard: keyboard ?? (await hostKeyboard(page)).keyboard,
     siteOrigin: site,
     authenticationOrigins: [],
-    onRequest: pageRequests(page),
     typing: { typed: false },
   });
   const owner: InputAsker = (request, bounds) =>
@@ -71,21 +45,15 @@ const localSignIn = async (
       : ask(request, bounds);
   const host = new URL(site).hostname;
   const held = localSignInLogin({ ask: owner, register: secrets.register, siteOrigin: site });
-  const scope = Effect.runSync(Scope.make());
-  scopes.push(scope);
-  const recorder = Effect.runSync(
-    Scope.extend(
-      makeSignInRecorder<Error>({
-        browser: signIn,
-        login: held,
-        values: askingValueHooks({ ask, register: secrets.register, site: host, siteOrigin: site }),
-        review: () => Effect.void,
-        site: host,
-        carries: secrets.carries,
-      }),
-      scope,
-    ),
-  );
+  const recorder = makeSignInRecorder({
+    browser: signIn,
+    login: held,
+    ask,
+    secrets,
+    review: () => Effect.void,
+    site: host,
+    signedOutPages: () => [],
+  });
   // The build's login is given before these screens, as an identifier screen would ask for it.
   await Effect.runPromise(held.values);
   return {
@@ -190,7 +158,10 @@ test("reads adjacent questions again while the private-answer label stays unchan
   await Effect.runPromise(auth.fill(step));
   await page.locator("#question").evaluate((element) => { element.textContent = "First school's name?"; });
   await Effect.runPromise(auth.fill(step));
-  expect(prompts).toEqual([`First pet's name? (${site})`, `First school's name? (${site})`]);
+  expect(prompts).toEqual([
+    "bank.example.test asks this security question: First pet's name?",
+    "bank.example.test asks this security question: First school's name?",
+  ]);
   expectNotCarried(browser.calls, "synthetic-private-answer");
 });
 
@@ -342,8 +313,8 @@ test("a recorded code field's id tells it from a redeem box with the same label 
 });
 
 // The prompt holds at most 2,000 characters, so a long question is cut to leave room for the
-// site's origin, and the owner is still asked.
-test("asks a question too long for the prompt with the site's origin, cut to fit", async ({ page }) => {
+// site's name before it, and the owner is still asked.
+test("asks a question too long for the prompt after the site's name, cut to fit", async ({ page }) => {
   const site = "https://bank.example.test";
   const question = `${"Which of these did you pick ".repeat(80).trim()}?`.slice(-1982);
   await page.route(`${site}/login`, (route) => route.fulfill({ contentType: "text/html", body:
@@ -357,8 +328,12 @@ test("asks a question too long for the prompt with the site's origin, cut to fit
   await Effect.runPromise(auth.fill({ fields: [{ selector: "#answer", slot: "private_answer", questionSelector: "#question" }] }));
   expect(prompts).toHaveLength(1);
   expect(prompts[0]?.length).toBeLessThanOrEqual(2000);
-  expect(prompts[0]?.startsWith(question.slice(0, 1900))).toBe(true);
-  expect(prompts[0]?.endsWith(`… (${site})`)).toBe(true);
+  expect(
+    prompts[0]?.startsWith(
+      `bank.example.test asks this security question: ${question.slice(0, 1900)}`,
+    ),
+  ).toBe(true);
+  expect(prompts[0]?.endsWith("…")).toBe(true);
   expect(await page.locator("#answer").inputValue()).toBe("synthetic-private-answer");
 });
 
@@ -376,7 +351,7 @@ test("says in the prompt that a recorded question could not be read", async ({ p
   })));
   await Effect.runPromise(auth.fill({ fields: [{ selector: "#answer", slot: "private_answer", questionSelector: ".question" }] }));
   expect(prompts).toEqual([
-    `Enter your security answer for ${site}. The question it answers could not be read from the page. The answer field reads "Security answer".`,
+    'Enter your bank.example.test security answer. The question it answers could not be read from the page. The answer field reads "Security answer".',
   ]);
 });
 
@@ -525,7 +500,6 @@ test("a run's replay asks the private answer on every run, from the question its
           keyboard,
           siteOrigin: site,
           authenticationOrigins: [],
-          onRequest: pageRequests(page),
           typing: { typed: false },
         }),
         login: localSignInLogin({ ask, register: secrets.register, siteOrigin: site }),
@@ -568,7 +542,6 @@ test("the local rejection marker check reads only whether a marker shows, on the
     keyboard: (await hostKeyboard(page)).keyboard,
     siteOrigin: site,
     authenticationOrigins: [],
-    onRequest: pageRequests(page),
     typing: { typed: false },
   });
   const shows = (selector: string, screen = `${site}/login`, popup?: { opener: "primary"; origin: string }) =>

@@ -1,42 +1,83 @@
 import { Schema } from "effect";
 import { formControlsCode } from "../browser/form-controls.js";
-import type { AutofillPopup, DateOfBirthFormat } from "./autofill-contracts.js";
+import { maximumCodeBoxes, type AutofillPopup, type DateOfBirthFormat } from "./autofill-contracts.js";
 import { elementReadMs, locateCode, questionTextCode } from "./autofill-locate-code.js";
 import { clipCode, controlNamingCode } from "./control-naming-code.js";
 import { pageCode, primaryPageCode } from "../runtime/host-execute.js";
 import { hostOnSiteSource } from "../runtime/same-site.js";
 import { submissionGuardCode } from "./autofill-submission-guard.js";
+import { holdsFocusCode } from "./field-focus-code.js";
 import { pageControlsCode } from "./page-controls.js";
 
 /**
  * Page code: where each code field sits among its screen's one-character boxes, as
- * `Described.codeBox` says, else null. A box is a visible, enabled, editable text input whose
- * `maxlength` is 1; the screen is the field's form, or its document or shadow root outside one. A
- * field that is no box, or a screen with fewer than two, has none. Attributes only, never a value.
+ * `Described.codeBox` says, else null. A box is a visible, enabled, editable text input that takes
+ * one character:
+ * - by its `maxlength` of 1, among the like boxes of its screen, the field's form, or its document
+ *   or shadow root outside one;
+ * - or, with no `maxlength` limit, by the page's own script, as many one-time-code widgets limit
+ *   their boxes, when the step names two or more code fields: among the visible, enabled, editable
+ *   text inputs that are children of its parent element, when those are two to
+ *   `maximumCodeBoxes`, all of its type and none with a `maxlength` limit. A field that is the only
+ *   such input in its parent counts one level up instead, among its parent and the parent's
+ *   siblings, when each of them holds one such input as its only element. Elements that show no
+ *   box, such as a hidden input, a style element or a message not shown, count at neither level.
+ *   When the step's boxes found so disagree on how many there are, or two take one place, as boxes
+ *   split between two containers do, none of them is a box.
+ * A field that is no box, or a screen with fewer than two, has none. Attributes only, never a value.
  */
 const codeBoxesCode = `const codeBoxes = [];
+const codeFields = codeSlots.filter(Boolean).length;
 for (const [index, field] of fields.entries()) {
   if (!codeSlots[index]) {
     codeBoxes.push(null);
     continue;
   }
-  const codeBox = await field.locator.evaluate((element) => {
+  const codeBox = await field.locator.evaluate((element, [codeFields, mostBoxes]) => {
     const textTypes = ["", "text", "tel", "number", "password", "search"];
-    const box = (control) => {
-      if (control.tagName !== "INPUT" || control.maxLength !== 1) return false;
+    const shown = (node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && node.checkVisibility({ visibilityProperty: true });
+    };
+    const shownChildren = (node) => Array.from(node.children).filter(shown);
+    const editable = (control) => {
+      if (control.tagName !== "INPUT") return false;
       if (!textTypes.includes((control.getAttribute("type") ?? "").toLowerCase())) return false;
       if (control.disabled || control.readOnly) return false;
-      const rect = control.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && control.checkVisibility({ visibilityProperty: true });
+      return shown(control);
     };
-    if (!box(element)) return null;
-    const screen = element.form ?? element.getRootNode();
-    const boxes = Array.from(screen.querySelectorAll("input")).filter(box);
-    const at = boxes.indexOf(element);
-    return boxes.length < 2 || at < 0 ? null : { box: at + 1, of: boxes.length };
-  }, undefined, { timeout: ${elementReadMs} }).catch(() => null);
+    const place = (boxes, limit) => {
+      const at = boxes.indexOf(element);
+      return boxes.length < 2 || at < 0 ? null : { box: at + 1, of: boxes.length, limit };
+    };
+    if (!editable(element)) return null;
+    if (element.maxLength === 1) {
+      const screen = element.form ?? element.getRootNode();
+      return place(Array.from(screen.querySelectorAll("input")).filter((control) => editable(control) && control.maxLength === 1), "maxlength");
+    }
+    if (element.maxLength >= 0 || codeFields < 2 || element.parentNode === null) return null;
+    let boxes = Array.from(element.parentNode.children).filter(editable);
+    const wrapper = element.parentElement;
+    if (boxes.length === 1 && wrapper?.parentNode) {
+      boxes = shownChildren(wrapper.parentNode).map((child) => {
+        const held = shownChildren(child);
+        return held.length === 1 ? held[0] : null;
+      });
+      if (!boxes.every((control) => control !== null && editable(control))) return null;
+    }
+    if (boxes.length > mostBoxes || boxes.some((control) => control.maxLength >= 0 || control.type !== element.type))
+      return null;
+    return place(boxes, "script");
+  }, [codeFields, ${maximumCodeBoxes}], { timeout: ${elementReadMs} }).catch(() => null);
   codeBoxes.push(codeBox);
-}`;
+}
+const scriptBoxes = codeBoxes.filter((codeBox) => codeBox?.limit === "script");
+const scriptAgree =
+  new Set(scriptBoxes.map(({ box }) => box)).size === scriptBoxes.length &&
+  new Set(scriptBoxes.map(({ of }) => of)).size <= 1;
+for (const [index, codeBox] of codeBoxes.entries())
+  codeBoxes[index] =
+    codeBox === null || (codeBox.limit === "script" && !scriptAgree) ? null : { box: codeBox.box, of: codeBox.of };`;
 
 /**
  * Page code: the step's controls and visible native and ARIA actions, for the host and Guardian.
@@ -76,10 +117,12 @@ return {
  * One call of a step's fill, after its inspection. None carries a value but a date's: the host
  * types every other value itself over its own DevTools socket, into the field `focus` left focused. `check` names the field the host typed just before, which must now hold
  * something, so typing that went to another element never leads to a click.
- * - `focus`: empties the field when it holds something and focuses it, then reads that it holds
- *   the focus.
+ * - `focus`: empties the field when it holds something and focuses it, then reads that the field
+ *   itself holds the focus, inside a shadow root too (`holdsFocusCode`), and names the tag of the
+ *   element that holds it otherwise.
  * - `date`: fills a date of birth with the authoring library's `fillDate`, which needs the page's
  *   own options, so this call's code holds the date (`iso`).
+ * - `dismiss`: clicks a covering notice's own control (`dismissCode`).
  * - `submit`: first reads whether the page sent what was typed itself (`pageSentCode`). Otherwise
  *   it guards the submission as it fires (`submissionGuardCode`, under the host's
  *   `guardKey` and armed for `guardCall`, with every form action and link destination as the
@@ -93,6 +136,17 @@ return {
  *   enable it.
  */
 export type AutofillFillCall =
+  | {
+      /**
+       * Clicks the step's `dismiss`, a covering notice's own close, reject or accept control, when it shows
+       * (`dismissCode`): never one of the step's controls, one that holds or shares a form with
+       * them, one that submits a form, or a link to another page. A control of a notice that
+       * covers one of the step's controls may share their form or submit one: its click's
+       * submission is cancelled.
+       */
+      readonly kind: "dismiss";
+      readonly selector: string;
+    }
   | {
       readonly kind: "focus";
       readonly index: number;
@@ -122,6 +176,12 @@ export type AutofillFillCall =
       readonly submitGet: boolean;
       /** Whether each field's own form was judged to submit by GET. */
       readonly fieldGet: readonly boolean[];
+      /**
+       * A sign-in step's submit: its guard lets a submission to a script that does nothing
+       * (`javascript:`, `javascript:void(0)`, `javascript:;`) fire by GET, since navigating there
+       * puts no entry in an address and runs nothing.
+       */
+      readonly scriptSubmit?: true;
       /** Only look: a call that finds the step's fields clicks nothing and answers `none`. */
       readonly look?: true;
       /**
@@ -145,7 +205,9 @@ const alertsBeforeMs = 500;
  * under `judged`, or the page lost it, does nothing, keeps every control as found under `observed` and
  * hands them back, for the host to judge again by inspection's rule (page code may move a form off
  * the site once values are typed, so each call finds and judges every control again). Otherwise
- * checks the field the host just typed, then runs the call. A field that check cannot read counts
+ * checks that each field in `check` still holds something (the one the host just typed, or every
+ * field it typed before a submit it clicks again), then runs the call; the first that holds nothing
+ * fails the check, with its index. A field that check cannot read counts
  * as empty, except in the submit call of a step with fields and no submit (`readsOnly`), which only
  * reads the page: there a read that fails, as when the page takes the field away while the call
  * reads it, fails the call, a look the host takes again, and is never a typed field left empty.
@@ -155,7 +217,7 @@ const alertsBeforeMs = 500;
 const fillCallCode = (
   call: AutofillFillCall,
   judgedId: string | undefined,
-  check: number | null,
+  check: readonly number[],
   typedAt: string,
 ) => `const judgment = await kept(${JSON.stringify(judgedId ?? null)});
 const judged = judgment?.targets ?? null;
@@ -172,6 +234,7 @@ const same = (found, expected, editable = true) =>
     : found.ownerUrl === expected.ownerUrl &&
       JSON.stringify(found.ancestors ?? []) === JSON.stringify(expected.ancestors ?? []) &&
       (found.explicitGet ?? false) === (expected.explicitGet ?? false) &&
+      (found.scriptAction ?? false) === (expected.scriptAction ?? false) &&
       found.documentOrigin === expected.documentOrigin &&
       (!editable || found.editable === expected.editable) &&
       found.control === expected.control &&
@@ -192,9 +255,8 @@ if (
 // submit call compares against it with no address in its code.
 const typedAt = ${JSON.stringify(typedAt)};
 const readsOnly = ${JSON.stringify(call.kind === "submit")} && fields.length > 0 && submit === null;
-${call.kind === "submit" ? pageSentCode : "await keep(typedAt, primary.url());"}
-const check = ${JSON.stringify(check)};
-if (check !== null) {
+${call.kind === "submit" ? pageSentCode : call.kind === "dismiss" ? "" : "await keep(typedAt, primary.url());"}
+for (const check of ${JSON.stringify(check)}) {
   // Its length only, never its value.
   const holding = fields[check].locator.evaluate(
     (element) => typeof element.value === "string" && element.value.length > 0,
@@ -204,7 +266,7 @@ if (check !== null) {
   const holds = await (readsOnly ? holding : holding.catch(() => false));
   if (!holds) {
     ${call.kind === "submit" ? "if (await allEmptied()) return { pageSent: true, url: primary.url() };" : ""}
-    return { checked: false, url: primary.url() };
+    return { checked: false, field: check, url: primary.url() };
   }
 }
 ${call.kind === "submit" && call.look !== true ? codeBoxesHoldCode(call.codeBoxes ?? []) : ""}
@@ -280,7 +342,277 @@ const allEmptied = async () => {
   return true;
 };`;
 
+/**
+ * Page code: the element at the centre of `element`, a submit whose click failed, when it is
+ * neither the submit, inside it nor around it: the outermost element over the submit that holds it,
+ * as a notice holds its own buttons, by its tag and role attribute, each cut short, never anything
+ * else of it (`coveringElement` keeps those on its lists). Null when the submit has no box or
+ * nothing else sits over it.
+ */
+const coveringCode = `(element) => {
+  const box = element.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) return null;
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  const root = element.getRootNode();
+  let hit = (typeof root.elementFromPoint === "function" ? root : element.ownerDocument).elementFromPoint(x, y);
+  while (hit?.shadowRoot) {
+    const inner = hit.shadowRoot.elementFromPoint(x, y);
+    if (inner === null || inner === hit) break;
+    hit = inner;
+  }
+  if (hit === null || hit === element || element.contains(hit) || hit.contains(element)) return null;
+  let cover = hit;
+  const page = [element.ownerDocument.body, element.ownerDocument.documentElement];
+  while (cover.parentElement !== null && !page.includes(cover.parentElement) && !cover.parentElement.contains(element))
+    cover = cover.parentElement;
+  return { tag: String(cover.tagName).slice(0, 40), role: cover.getAttribute("role")?.slice(0, 40) ?? null };
+}`;
+
+/**
+ * Page code: the covering notice that holds `element`, else null. For each of the step's controls
+ * (`own`) with a box, scrolled into view when its centre lies outside it and `scroll` says so
+ * (else skipped), the element at that
+ * centre when it is neither the control, inside it nor around it, and the outermost element over
+ * the control that holds it, as `coveringCode` reads a notice that caught a click. That element is
+ * the covering notice when it holds `element` and none of the step's controls. Open shadow roots
+ * count as part of their host.
+ */
+const noticeCoverCode = `(element, own, scroll) => {
+  const parentOf = (node) => (node.parentNode instanceof ShadowRoot ? node.parentNode.host : node.parentNode);
+  const holds = (outer, inner) => {
+    for (let node = inner; node !== null; node = parentOf(node)) if (node === outer) return true;
+    return false;
+  };
+  const page = [element.ownerDocument.body, element.ownerDocument.documentElement];
+  for (const control of own) {
+    const view = control.ownerDocument.defaultView;
+    const centre = () => {
+      const box = control.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) return null;
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      return x >= 0 && y >= 0 && x < view.innerWidth && y < view.innerHeight ? { x, y } : undefined;
+    };
+    let at = centre();
+    if (at === undefined && scroll) {
+      control.scrollIntoView({ block: "nearest", inline: "nearest" });
+      at = centre();
+    }
+    if (at === null || at === undefined) continue;
+    const root = control.getRootNode();
+    let hit = (typeof root.elementFromPoint === "function" ? root : control.ownerDocument).elementFromPoint(at.x, at.y);
+    while (hit?.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(at.x, at.y);
+      if (inner === null || inner === hit) break;
+      hit = inner;
+    }
+    if (hit === null || holds(control, hit) || holds(hit, control)) continue;
+    let cover = hit;
+    for (let up = parentOf(cover); up instanceof Element && !page.includes(up) && !holds(up, control); up = parentOf(cover))
+      cover = up;
+    if (holds(cover, element) && !own.some((other) => holds(cover, other))) return cover;
+  }
+  return null;
+}`;
+
+/**
+ * Page code for a `dismiss` call: finds the selector's one visible match across the primary tab's
+ * frames (`locate`); none, or several, is `not_shown` or `ambiguous`, and nothing is clicked. A
+ * match is refused (`part`) when it is one of the step's controls in its frame, holds one or sits in
+ * one (`sign_in_control`), sits in the form of one (`sign_in_form`), or is, sits in or holds a
+ * control that submits a form (`submits_form`) or a link to another page than this one
+ * (`opens_page`), open shadow roots included: a notice's own close, reject or accept control is
+ * none of these. Otherwise it is clicked, and the call waits a moment
+ * for it to go, as a notice that fades does. Attributes only, never a value.
+ *
+ * One that sits in the sign-in's form, or would submit a form, is still clicked when it sits in a
+ * notice that covers one of the step's controls (`noticeCoverCode`) and every control a click of it
+ * may reach that submits a form sits in that notice too: some pages wrap the whole page in one form, notice
+ * included, and give the notice a button with no type. First the step's fields are emptied
+ * (`emptied`), so nothing typed sits in the form while the page's own code runs, and the host
+ * types them again; a field it cannot empty keeps the notice unclicked (`failed`). For that click
+ * alone, capture listeners on its window cancel the default action of every click that reaches the
+ * notice and every submit event, so the page's own handler runs and neither the click nor the
+ * handler's own requestSubmit submits a form; the host removes them once the tasks the click
+ * queued ran. What the page's own code sends regardless, by a form's submit(), fetch or XHR, or
+ * once the listeners are off, holds nothing typed, as the fields are empty until the host types
+ * them again. When the page's own code starts a navigation in the meantime, such as a reload or
+ * that submit(), the call waits for the new document, and the next call finds the step's controls
+ * again before anything is typed.
+ */
+const dismissCode = (selector: string) => `const notice = await locate(${JSON.stringify(selector)});
+if ("error" in notice)
+  return { dismiss: notice.error === "not_found" ? "not_shown" : "ambiguous", url: primary.url() };
+const noticeFrame = notice.handle ? await notice.handle.ownerFrame() : null;
+const own = [];
+for (const control of submit === null ? fields : [...fields, submit]) {
+  const handle = await control.locator.elementHandle({ timeout: ${elementReadMs} }).catch(() => null);
+  if (handle !== null && noticeFrame !== null && (await handle.ownerFrame()) === noticeFrame) own.push(handle);
+}
+const verdict = await notice.locator.evaluate((element, own) => {
+  // Open shadow roots count as part of their host: a host holds what its root holds.
+  const parentOf = (node) => (node.parentNode instanceof ShadowRoot ? node.parentNode.host : node.parentNode);
+  const holds = (outer, inner) => {
+    for (let node = inner; node !== null; node = parentOf(node)) if (node === outer) return true;
+    return false;
+  };
+  const ancestry = (node) => {
+    const chain = [];
+    for (let at = node; at instanceof Element; at = parentOf(at)) chain.push(at);
+    return chain;
+  };
+  const within = (root) => {
+    const found = [];
+    const walk = (scope) => {
+      for (const child of scope.children) {
+        found.push(child);
+        if (child.shadowRoot !== null) walk(child.shadowRoot);
+        walk(child);
+      }
+    };
+    if (root.shadowRoot !== null) walk(root.shadowRoot);
+    walk(root);
+    return found;
+  };
+  const formOf = (control) =>
+    "form" in control && control.form instanceof HTMLFormElement
+      ? control.form
+      : (ancestry(control).find((node) => node instanceof HTMLFormElement) ?? null);
+  if (own.some((control) => holds(control, element) || holds(element, control)))
+    return { part: "sign_in_control", cancel: null };
+  // The covering notice that holds it, read only for a control in the sign-in's form or one that
+  // submits a form, which may then be clicked with its submission cancelled.
+  let cover;
+  const covering = () => (cover === undefined ? (cover = (${noticeCoverCode})(element, own, true)) : cover);
+  const form = formOf(element);
+  const inSignInForm = form !== null && own.some((control) => formOf(control) === form);
+  if (inSignInForm && covering() === null) return { part: "sign_in_form", cancel: null };
+  // What a click of it may reach: the element, what holds it and what it holds, since a click at
+  // its centre lands on whatever it holds there, and the control a label among them clicks.
+  const held = [...ancestry(element), ...within(element)];
+  const reached = [
+    ...held,
+    ...held.flatMap((node) => (node instanceof HTMLLabelElement && node.control !== null ? [node.control] : [])),
+  ];
+  if (own.some((control) => reached.includes(control))) return { part: "sign_in_control", cancel: null };
+  const submits = (node) =>
+    ((node instanceof HTMLButtonElement && node.type === "submit") ||
+      (node instanceof HTMLInputElement && ["submit", "image"].includes(node.type))) &&
+    formOf(node) !== null;
+  const submitting = reached.filter(submits);
+  if (submitting.length > 0 && (covering() === null || !submitting.every((node) => holds(cover, node))))
+    return { part: "submits_form", cancel: null };
+  const here = new URL(element.ownerDocument.URL);
+  here.hash = "";
+  const opens = (node) => {
+    if (!node.matches("a[href], area[href]")) return false;
+    const to = new URL(node.href, element.ownerDocument.baseURI);
+    to.hash = "";
+    return to.protocol !== "javascript:" && to.href !== here.href;
+  };
+  if (reached.some(opens)) return { part: "opens_page", cancel: null };
+  return {
+    part: null,
+    cancel: inSignInForm ? "sign_in_form" : submitting.length > 0 ? "submits_form" : null,
+  };
+}, own, { timeout: ${elementReadMs} });
+if (verdict.part !== null) return { dismiss: "refused", part: verdict.part, url: primary.url() };
+// A click whose submission is cancelled: the listeners go on the notice's window just before the
+// click and come off right after it, and note whether the page's own code started a navigation.
+let disarm = null;
+if (verdict.cancel !== null) {
+  const arming = notice.handle === null
+    ? null
+    : await notice.handle
+        .evaluateHandle((element, own) => {
+          // Read as the check read it, which scrolled each control into view already.
+          const cover = (${noticeCoverCode})(element, own, false);
+          if (cover === null) return null;
+          const scope = element.ownerDocument.defaultView;
+          let navigated = false;
+          const cancel = (event) => {
+            if (event.composedPath().includes(cover)) event.preventDefault();
+          };
+          // A form the page's own handler submits with requestSubmit sends nothing either. One it
+          // submits with submit() fires no submit event and goes out, with the fields emptied.
+          const cancelSubmit = (event) => event.preventDefault();
+          const note = (event) => {
+            if (!event.destination.sameDocument) navigated = true;
+          };
+          scope.addEventListener("click", cancel, true);
+          scope.addEventListener("submit", cancelSubmit, true);
+          scope.navigation?.addEventListener("navigate", note);
+          let armed = true;
+          const off = () => {
+            if (armed) {
+              scope.removeEventListener("click", cancel, true);
+              scope.removeEventListener("submit", cancelSubmit, true);
+              scope.navigation?.removeEventListener("navigate", note);
+              armed = false;
+            }
+            return navigated;
+          };
+          // Never left on, whatever becomes of the host's own call to take it off.
+          setTimeout(off, 10000);
+          return off;
+        }, own)
+        .catch(() => null);
+  const armed = arming === null ? false : await arming.evaluate((off) => typeof off === "function").catch(() => false);
+  if (!armed) {
+    await arming?.dispose().catch(() => undefined);
+    return { dismiss: "refused", part: verdict.cancel, url: primary.url() };
+  }
+  disarm = arming;
+}
+// When the notice's document began loading, which tells it from the document a navigation loads.
+const documentOf = (frame) => frame.evaluate(() => performance.timeOrigin).catch(() => undefined);
+const noticeDocument = disarm === null ? undefined : await documentOf(noticeFrame);
+let navigated = false;
+let emptied = false;
+try {
+  // Before such a click the step's fields are emptied, so nothing typed is in the form while the
+  // page's own code runs, and the host types them again. One it cannot empty, or read, keeps the
+  // notice unclicked.
+  if (disarm !== null)
+    for (const { locator } of fields) {
+      const holding = () =>
+        locator
+          .evaluate((element) => typeof element.value === "string" && element.value.length > 0, undefined, { timeout: ${elementReadMs} })
+          .catch(() => null);
+      const holds = await holding();
+      if (holds === false) continue;
+      if (holds === true) await locator.fill("", { timeout: 5000 }).catch(() => undefined);
+      if ((await holding()) !== false) return { dismiss: "failed", ...(emptied ? { emptied } : {}), url: primary.url() };
+      emptied = true;
+    }
+  await notice.locator.click({ timeout: 5000 });
+} catch {
+  return { dismiss: "failed", ...(emptied ? { emptied } : {}), url: primary.url() };
+} finally {
+  // A document that left took the listener with it, and its navigation started.
+  // Off once the tasks the click queued ran, such as a navigation the page's own code planned.
+  if (disarm !== null) {
+    navigated = await disarm
+      .evaluate((off) => new Promise((resolve) => setTimeout(() => resolve(off()), 0)))
+      .catch(() => true);
+    await disarm.dispose().catch(() => undefined);
+  }
+}
+if (navigated && noticeFrame !== null) {
+  // The new document, once it replaced the notice's: a same-document navigation is none.
+  for (const until = Date.now() + 5000; Date.now() < until; ) {
+    const now = await documentOf(noticeFrame);
+    if (now !== undefined && now !== noticeDocument) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await noticeFrame.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => undefined);
+}
+await notice.locator.waitFor({ state: "hidden", timeout: 2000 }).catch(() => undefined);
+return { dismiss: "clicked", ...(emptied ? { emptied } : {}), url: primary.url() };`;
+
 const fillCallBody = (call: AutofillFillCall) => {
+  if (call.kind === "dismiss") return dismissCode(call.selector);
   if (call.kind === "focus")
     return `const field = fields[${call.index}].locator;
 const fieldLocated = located.fields[${call.index}];
@@ -291,10 +623,15 @@ try {
     await field.fill("", { timeout: 5000 });
   await field.focus({ timeout: 5000 });
   // Keep this original-node binding in Patchright's isolated world, inaccessible to page code.
-  // The tag of the element that holds the focus instead, if another does.
+  // The tag of the element that holds the focus instead, if another does: the deepest one, read
+  // through open shadow roots; a closed root shows only its host.
   const activeTag = await field.evaluate((element, [key, questionRequired]) => {
-    const active = element.ownerDocument.activeElement;
-    if (active !== element) return active === null ? "none" : active.tagName.toLowerCase();
+    const holdsFocus = ${holdsFocusCode};
+    if (!holdsFocus(element)) {
+      let active = element.ownerDocument.activeElement;
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+      return active === null ? "none" : active.tagName.toLowerCase();
+    }
     const binding = { document: element.ownerDocument, frame: element.ownerDocument.defaultView, questionRequired };
     Object.defineProperty(element, key, { value: binding, configurable: true });
     // Transfer the guard through this frame's isolated world; no value is involved.
@@ -358,6 +695,7 @@ for (const [index, field] of fields.entries()) {
     submitInForm: ${JSON.stringify(call.submitInForm)},
     submitGet: ${JSON.stringify(call.submitGet)},
     fieldGet: fieldGet[index] === true,
+    scriptSubmit: ${JSON.stringify(call.scriptSubmit === true)},
   });
   if (guarding) guarded.push(handle);
 }
@@ -388,15 +726,53 @@ const alertsBefore = ${
 const navigated = primary
   .waitForEvent("framenavigated", { predicate: (frame) => frame === primary.mainFrame(), timeout: ${call.settleMs} })
   .then(() => true, () => false);
+// Whether a request for a navigation of the main frame went out from the click on, as a form's
+// submission sends, and whether such a navigation committed since.
+let requested = false;
+let committed = false;
+const noteRequest = (request) => {
+  try {
+    if (request.isNavigationRequest() && request.frame() === primary.mainFrame()) requested = true;
+  } catch {}
+};
+const noteCommit = (frame) => {
+  if (frame === primary.mainFrame()) committed = true;
+};
+primary.on("request", noteRequest);
+primary.on("framenavigated", noteCommit);
+let late = false;
 try {
   // A submit key goes to the last field, which stands as the submit and submits its own form.
   if (submitKey === null) await submit.locator.click({ timeout: 5000 });
   else await submit.locator.press(submitKey, { timeout: 5000 });
-} catch {
-  return { submit: "failed", url: primary.url() };
+} catch (error) {
+  // Playwright's click waits, inside its own timeout, for the navigation it started to commit, which
+  // a slow chain of redirects can outlast. One whose request for the main frame went out reached
+  // the page, whatever the site answered: the host goes on as after any click, never to click again.
+  if (requested) late = true;
+  else {
+    // Playwright names an element that intercepts pointer events when another sits over the
+    // submit, and never dispatches the click then: blocked, by the element at the submit's centre.
+    const intercepted =
+      submitKey === null && error instanceof Error && error.message.includes("intercepts pointer events");
+    const blockedBy = intercepted
+      ? await submit.locator.evaluate(${coveringCode}, undefined, { timeout: ${elementReadMs} }).catch(() => null)
+      : null;
+    return blockedBy === null ? { submit: "failed", url: primary.url() } : { submit: "blocked", blockedBy, url: primary.url() };
+  }
+} finally {
+  primary.off("request", noteRequest);
+  primary.off("framenavigated", noteCommit);
 }
+// Such a click's navigation gets the settle wait from here to commit, as a click's own gets.
+const lateCommit = !late
+  ? false
+  : committed ||
+    primary
+      .waitForEvent("framenavigated", { predicate: (frame) => frame === primary.mainFrame(), timeout: ${call.settleMs} })
+      .then(() => true, () => false);
 let submission = await refusedSubmission();
-if (submission === null && (await navigated))
+if (submission === null && ((await navigated) || (await lateCommit)))
   await primary.waitForLoadState("domcontentloaded", { timeout: ${call.settleMs} }).catch(() => undefined);
 submission ??= await refusedSubmission();
 if (submission !== null) return { submission, url: primary.url() };
@@ -489,6 +865,20 @@ const primary = matches[0];
 `;
 
 /**
+ * The question selector a step call reads for a field: a private answer's question, which every
+ * call reads and the fill checks has not changed before it types the answer, and, at inspection
+ * only, a code's instruction, which the host puts in the code question and never checks again,
+ * since a screen may count down its time in it.
+ */
+const questionRead = (
+  field: { readonly slot?: string | undefined; readonly questionSelector?: string | undefined },
+  inspection: boolean,
+) =>
+  field.slot === "private_answer" || (inspection && field.slot === "code")
+    ? (field.questionSelector ?? null)
+    : null;
+
+/**
  * One host call for a step: its inspection, or with `fill`, one call of its fill. What it finds,
  * the page keeps under `observed`; a fill call compares against what it kept under `judged`.
  */
@@ -509,7 +899,8 @@ export const autofillStepCode = (
     readonly popupTargetId?: string | undefined;
     readonly call: AutofillFillCall;
     readonly judged: string | undefined;
-    readonly check: number | null;
+    /** The fields the host typed that must still hold something before the call acts. */
+    readonly check: readonly number[];
     /** The fill's id for where the page was as each field was typed. */
     readonly typedAt: string;
   },
@@ -528,25 +919,36 @@ ${locateCode}
 ${fill === undefined ? "" : documentStartCode}
 const observed = ${JSON.stringify(observed)};
 const selectors = ${JSON.stringify(step.fields.map((field) => field.selector))};
-const questionSelectors = ${JSON.stringify(step.fields.map((field) => field.slot === "private_answer" ? field.questionSelector ?? null : null))};
+const questionSelectors = ${JSON.stringify(step.fields.map((field) => questionRead(field, fill === undefined)))};
 const codeSlots = ${JSON.stringify(step.fields.map((field) => field.slot === "code"))};
-const fields = [];
-for (let index = 0; index < selectors.length; index++) {
-  const found = await locate(selectors[index], questionSelectors[index]);
-  if ("error" in found)
-    return { ...found, target: index, url: primary.url()${fill?.call.kind === "submit" ? ", document: await documentStart()" : ""} };
-  fields.push(found);
-}
 const submitSelector = ${JSON.stringify(step.submit ?? null)};
 const submitKey = ${JSON.stringify(step.submitKey ?? null)};
+// Every control is found first, then read in one pass (readControls). A control that is not found
+// ends the call at once, after the no-wait read of the ones found before it (checkReads).
+const foundFields = [];
+for (let index = 0; index < selectors.length; index++) {
+  const foundField = await locate(selectors[index], questionSelectors[index]);
+  if ("error" in foundField) {
+    await checkReads(foundFields);
+    return { ...foundField, target: index, url: primary.url()${fill?.call.kind === "submit" ? ", document: await documentStart()" : ""} };
+  }
+  foundFields.push(foundField);
+}
+const foundSubmit =
+  (submitKey !== null && foundFields.length > 0) || submitSelector === null ? null : await locate(submitSelector);
+if (foundSubmit !== null && "error" in foundSubmit) {
+  await checkReads(foundFields);
+  return { ...foundSubmit, target: "submit", url: primary.url() };
+}
+const readFound = await readControls(foundSubmit === null ? foundFields : [...foundFields, foundSubmit]);
+const fields = readFound.slice(0, foundFields.length);
 ${keySubmitCode}
 const submit =
   submitKey !== null && fields.length > 0
     ? await keySubmit(fields[fields.length - 1])
-    : submitSelector === null
+    : foundSubmit === null
       ? null
-      : await locate(submitSelector);
-if (submit !== null && "error" in submit) return { ...submit, target: "submit", url: primary.url() };
+      : readFound[foundFields.length];
 // An inert submit takes no interaction at all, so nothing is typed for it. A disabled one may be
 // enabled once the fields hold input; the submit call never clicks it while it is disabled.
 if (submit !== null && submit.inert)

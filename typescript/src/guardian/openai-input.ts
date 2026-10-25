@@ -8,15 +8,21 @@ import { ownerNamedOrigins } from "./owner-named-origins.js";
 import { guardianModel } from "./model.js";
 import type { GuardianReasoningEffort } from "./model.js";
 import { guardianCompaction } from "./session.js";
+import { configurationUpdate } from "../models/cached-instructions.js";
 import { withReasoningContinuity } from "../models/reasoning-settings.js";
 import { reviewKindOf, reviewOutcomesOf } from "./review-layout.js";
+import { cutToLimit } from "./review-contracts.js";
+
+/** The most characters of the agent's note on a step that an execution review reads. */
+export const agentNoteLimit = 500;
 
 /** JSON.stringify leaves an undefined key out, so an empty list never reaches the model. */
 const absentWhenEmpty = <T>(list: readonly T[]) => (list.length === 0 ? undefined : list);
 
 /**
- * The per-review user message. Everything that differs between review kinds is here, never in
- * the instructions, tools or output format, so switching kinds keeps the conversation cached.
+ * The per-review user message. Everything that differs between review kinds is here, its policy
+ * included, never in the instructions, tools or output format, so switching kinds keeps the
+ * conversation cached.
  */
 export const guardianReviewInput = (
   turn: ReviewTurn,
@@ -36,7 +42,7 @@ export const guardianReviewInput = (
         ? {}
         : { unchangedSources: turn.sources.unchangedSources }),
     },
-    // The intent is in the instructions (trusted_request), the same for every review of a build.
+    // The intent is in the build's own instructions (trusted_request), the same for every review.
     trusted_authority: {
       allowedOrigins: turn.pending.allowedOrigins,
       // Derived from the screened origins, so no new text reaches the model.
@@ -110,6 +116,14 @@ export const guardianReviewInput = (
     submitted_call: {
       entrypoint: turn.pending.entrypoint,
       input: turn.pending.screenedInput,
+      // The agent's own words about the step: untrusted call data, like the input beside it.
+      ...(turn.pending.agentNote === undefined || reviewKindOf(turn.pending) !== "execution"
+        ? {}
+        : { agentNote: cutToLimit(turn.pending.agentNote, agentNoteLimit) }),
+      // The write path the step declares or revises: untrusted call data, like the note.
+      ...(turn.pending.writePath === undefined || reviewKindOf(turn.pending) !== "execution"
+        ? {}
+        : { writePath: turn.pending.writePath }),
       ...(turn.sources?.entrypoint === undefined
         ? {}
         : { entrypointSource: turn.sources.entrypoint }),
@@ -122,40 +136,48 @@ export const guardianReviewInput = (
   });
 
 /**
- * One review's model settings. `effort` is the host's pick for this review, medium when it
- * picks none. The request's reasoning effort can change the provider's hidden instructions,
- * so the first review at an effort other than the previous review's may read the session's
- * history without its cached prefix.
+ * One review's model settings, the same for every review. The request's reasoning effort can
+ * change the provider's hidden instructions, and with them the whole cached prefix, so it stays
+ * the same: a review at another effort says so with a configuration update in its input (see
+ * `guardianReviewState`). Only a session request that must leave its compaction to the provider
+ * carries the effort as its own instead (see `makeGuardianSession`). Every request caches
+ * implicitly after the instructions' own breakpoint, so each call reads the conversation the call
+ * before it wrote: the earlier reviews of a session, and a review's own earlier turns, with or
+ * without one. `promptCacheKey` is the host's key for the provider's cache accounting, the same
+ * on every request.
  */
-export const guardianReviewSettings = (
-  turn: ReviewTurn,
-  effort: GuardianReasoningEffort = guardianModel.modelSettings.reasoning.effort,
-) =>
+export const guardianReviewSettings = (session: boolean, promptCacheKey?: string) =>
   withReasoningContinuity({
     ...guardianModel.modelSettings,
     reasoning: {
       ...guardianModel.modelSettings.reasoning,
-      effort,
-      ...(turn.session ? { context: "all_turns" as const } : {}),
+      ...(session ? { context: "all_turns" as const } : {}),
     },
+    promptCacheOptions: { mode: "implicit" },
     parallelToolCalls: true,
-    ...(turn.session
-      ? {
-          providerData: guardianCompaction().samplingParams({
-            model: guardianModel.model,
-          }),
-        }
-      : {}),
+    providerData: {
+      ...(session ? guardianCompaction().samplingParams({ model: guardianModel.model }) : {}),
+      ...(promptCacheKey === undefined ? {} : { prompt_cache_key: promptCacheKey }),
+    },
   });
 
+/**
+ * The review's starting state. `effort`, when the review runs at another reasoning effort than
+ * the conversation does, adds a configuration update before the request.
+ */
 export const guardianReviewState = <TContext, TOutput extends AgentOutputType>(
   turn: ReviewTurn,
   input: string,
   agent: Agent<TContext, TOutput>,
   maxTurns = 12,
+  effort?: GuardianReasoningEffort,
 ) =>
   Effect.gen(function* () {
-    const continuedInput = turn.session ? yield* turn.session.input(input) : input;
+    const continuedInput: string | AgentInputItem[] = turn.session
+      ? yield* turn.session.input(input, false, effort)
+      : effort === undefined
+        ? input
+        : [configurationUpdate(effort), { role: "user", type: "message", content: input }];
     return new RunState(new RunContext<TContext>(), continuedInput, agent, maxTurns);
   });
 

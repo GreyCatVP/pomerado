@@ -16,7 +16,6 @@ import type { GuardianAction } from "../guardian/review-contracts.js";
 import type { MintReviewFeedback } from "../mint/input-feedback.js";
 import {
   hostAuthentication,
-  MintFailure,
   type AllowedExecution,
   type MintDependencies,
   type ExecutionEvidence,
@@ -48,20 +47,13 @@ import { makeRunFiles } from "../runtime/file-transfer.js";
 import { stepInput } from "../mint/step-checks.js";
 import { admitListCursor, sealListOutput } from "../runtime/list-cursor.js";
 import { mintListScope, refusedCursor } from "./list-cursors.js";
-import { readBackFirst } from "../mint/write-session.js";
+import { readBackFirst, sessionEnteredMarks, writePathRemaining } from "../mint/write-session.js";
 import { commitEvidenceOf, type CommitEvidence } from "../runtime/run-outcome.js";
 import { InputRequestFailure, type InputAsker } from "../runtime/input-request.js";
 import { siteDomain } from "../runtime/same-site.js";
 import { probeCallCode } from "../runtime/host-execute.js";
 import type { BrowserExecute } from "../runtime/browser-execution.js";
 import { trustedUrl } from "../runtime/sign-in-origins.js";
-import { failureDetail } from "../runtime/failure-detail.js";
-import type { SignInStepResult } from "../mint/sign-in-recorder.js";
-import {
-  signInOriginsToAsk,
-  trustSignInOriginsQuestion,
-  trustsSignInOrigins,
-} from "./sign-in-origin-question.js";
 import type { MintState } from "./mint-state.js";
 import {
   keptScriptAnswers,
@@ -138,68 +130,6 @@ const executeCommand = (
       }),
     );
   });
-/** The caller's answer to the trust question did not arrive, so nothing was trusted. */
-const trustQuestionFailure = (cause: unknown) =>
-  new MintFailure({
-    code: "Unavailable",
-    ...(cause instanceof InputRequestFailure && cause.code === "NoResponse"
-      ? { noResponse: { possibleCommit: false } }
-      : {}),
-    failureDetail: failureDetail("mint_host_dependency_failed", {
-      operation: "standalone.sign_in_origin",
-      phase: "sign_in_input",
-      error: cause,
-    }),
-  });
-
-/**
- * A signed-in check that found the login sent only to origins that are neither the site nor one
- * of its sign-in origins asks the caller once whether to trust them, when `signInOriginsToAsk`
- * allows. A yes trusts them for sign-in only, credits what the sign-in sent there and checks
- * again, typing nothing. They stay among the origins an unpublished build names until a sign-in
- * verifies. A no ends sign-in in the build. Anything else keeps the check's result, as does a
- * check that names two or more origins before a password or a code went anywhere, which marks
- * none of them asked.
- */
-const askToTrustSignInOrigins = (
-  state: MintState,
-  signIn: NonNullable<ExecutionRequest["signInStep"]>,
-  loginUrl: string | undefined,
-  checked: SignInStepResult,
-) =>
-  Effect.gen(function* () {
-    const { signInOrigins, recorder, context } = state;
-    const origins =
-      checked.untrustedSignInOrigins === undefined
-        ? undefined
-        : signInOriginsToAsk(checked.untrustedSignInOrigins, {
-            siteOrigin: context.siteOrigin,
-            trusted: signInOrigins.all(),
-            asked: signInOrigins.asked,
-            receivedProof: recorder.receivedProof(),
-          });
-    if (origins === undefined) return checked;
-    for (const origin of origins) signInOrigins.asked.add(origin);
-    // The site as the owner's questions name it: its host, without `www.`.
-    const site = new URL(context.siteOrigin).hostname.replace(/^www\./u, "");
-    const answers = yield* state
-      .mintAsk(trustSignInOriginsQuestion(site, origins))
-      .pipe(Effect.mapError(trustQuestionFailure));
-    if (!trustsSignInOrigins(answers))
-      return yield* new MintFailure({
-        code: "Unavailable",
-        authentication: {
-          phase: "credential_submit",
-          code: "CredentialTargetRefused",
-          afterSubmission: true,
-        },
-        spentSignIn: "sign_in_origin_untrusted",
-      });
-    signInOrigins.trusted.push(...origins);
-    recorder.trustOrigins(origins);
-    return yield* recorder.step(signIn, loginUrl, Effect.void);
-  });
-
 /**
  * A sign-in step: a screen the recorder fills, an approval, a rejected value or a signed-in check.
  * Each belongs to the sign-in under way, and after a verified sign-in the first one starts a new
@@ -219,25 +149,15 @@ const executeAuthentication = (
     yield* start.enter;
     start.signIn();
     if (!("signedIn" in signIn)) markers.signInStep();
-    const recorded = yield* recorder.step(
+    const step = yield* recorder.step(
       signIn,
       loginUrl,
       // The host fills the sign-in itself, after its own review of each screen.
       Effect.zipRight(markers.beforeTyping, beforeDispatch?.(hostAuthentication) ?? Effect.void),
     );
-    // The origins a check named stay named, by the build, until a sign-in verifies: the first
-    // check's before the caller answers, and the check after a yes's too.
-    const offSite = state.untrustedSignInOrigins;
-    for (const origin of recorded.untrustedSignInOrigins ?? []) offSite.add(origin);
-    const step =
-      "signedIn" in signIn
-        ? yield* askToTrustSignInOrigins(state, signIn, loginUrl, recorded)
-        : recorded;
-    for (const origin of step.untrustedSignInOrigins ?? []) offSite.add(origin);
     if ("fields" in signIn && step.report !== undefined) start.sent(step.report, signIn.fields);
     if (step.approved === true) start.approved();
     const authenticated = step.verified === true && start.verified();
-    if (authenticated) offSite.clear();
     const result =
       step.report === undefined
         ? step.result
@@ -386,11 +306,14 @@ interface ReceiptInput {
       readonly outcome: "allow" | "deny" | "escalate";
       readonly rationale: string;
       readonly action?: GuardianAction | undefined;
+      readonly advice?: string | undefined;
     };
   };
   readonly journal: Journal;
   /** A failed act step that may have committed its write: read back before writing again. */
   readonly writeSession?: { readonly verifyFirst: true; readonly notice: string };
+  /** An act step's marks of the session's recorded write path not yet settled. */
+  readonly writePathRemaining?: readonly string[];
   /** The step ran after the host sent a login no check verified; see `afterUnverifiedSignIn`. */
   readonly afterUnverifiedSignIn?: true;
 }
@@ -400,6 +323,7 @@ const reviewFeedback = ({ reviewId, decision }: ReceiptInput["reviewed"]): MintR
   outcome: decision.outcome,
   rationale: decision.rationale,
   ...(decision.action === undefined ? {} : { action: decision.action }),
+  ...(decision.advice === undefined ? {} : { advice: decision.advice }),
 });
 const failedReceipt = (
   receipt: ReceiptInput,
@@ -441,6 +365,9 @@ const failedReceipt = (
       ...(failureJournal.confirmation === undefined
         ? {}
         : { confirmation: failureJournal.confirmation }),
+      ...(receipt.writePathRemaining === undefined
+        ? {}
+        : { writePathRemaining: receipt.writePathRemaining }),
       observations: {
         message: secrets.redact(failure.message),
         ...(failure instanceof LocalOperationFailure
@@ -494,6 +421,9 @@ const completedReceipt = (receipt: ReceiptInput, result: LocalOperationOutput) =
       resultRef: `local:${id}`,
       effect: result.effect,
       ...(result.confirmation === undefined ? {} : { confirmation: result.confirmation }),
+      ...(receipt.writePathRemaining === undefined
+        ? {}
+        : { writePathRemaining: receipt.writePathRemaining }),
       observations: yield* projection.json({
         output: result.output,
         stdout: result.stdout,
@@ -570,6 +500,10 @@ const authoredExecution = (
           ...(mark === undefined ? {} : { input: mark }),
         },
         startsOnFreshPage: start.resets(execution),
+        ...(execution.agentNote === undefined ? {} : { agentNote: execution.agentNote }),
+        ...(execution.purpose !== "act" || execution.writePath === undefined
+          ? {}
+          : { writePath: execution.writePath }),
       },
       "not_sent",
     );
@@ -607,6 +541,8 @@ const authoredExecution = (
       writeSession.started = true;
       // Guardian allowed the step on this input, so the session runs it from here on.
       if (selected.mark === "intent_derived") writeSession.input = selected.input;
+      // Guardian allowed the path the step declared or revised, so the session runs it.
+      if (execution.writePath !== undefined) writeSession.path = execution.writePath;
     }
     const questions = scriptQuestions(state, execution.entrypoint, input, sourceMap);
     const { scriptAsk } = questions;
@@ -670,6 +606,7 @@ const authoredExecution = (
                 decideDialog: keepingAcceptedConfirms(
                   makeDialogDecider(mintAsk, secrets.redact),
                   accepted,
+                  input,
                 ),
                 ...(live
                   ? {
@@ -705,6 +642,12 @@ const authoredExecution = (
             yield* acceptedConfirmsKept({ write: true, accepted, screen: secrets.assertAbsent }),
           );
         if (act !== undefined) writeSession.steps.push({ executionId: id, ...act.marks });
+        // The marks of the session's recorded path not yet settled: until none is left, a
+        // confirmation does not close the session.
+        const pathLeft =
+          act === undefined
+            ? []
+            : writePathRemaining(writeSession.path, sessionEnteredMarks(writeSession.steps));
         if (execution.purpose === "example" && executed._tag === "Right")
           context.setInputSchema(executed.right.schemas.input);
         const receipt = {
@@ -717,6 +660,7 @@ const authoredExecution = (
           reviewed,
           journal,
           ...(act?.writeSession === undefined ? {} : { writeSession: act.writeSession }),
+          ...(pathLeft.length === 0 ? {} : { writePathRemaining: pathLeft }),
           ...(afterUnverifiedSignIn ? { afterUnverifiedSignIn: true as const } : {}),
         };
         const evidence = yield* executed._tag === "Left"

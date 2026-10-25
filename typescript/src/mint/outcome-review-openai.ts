@@ -3,6 +3,8 @@ import { Cause, Duration, Effect, Exit } from "effect";
 import { guardianCompaction, makeGuardianSession } from "../guardian/session.js";
 import { lunaModel } from "../models/models.js";
 import { withReasoningContinuity } from "../models/reasoning-settings.js";
+import { instructionsAsMessages, prewarmInstructions } from "../models/cached-instructions.js";
+import { modelUsageCounts } from "../models/model-usage.js";
 import { failureDetail } from "../runtime/failure-detail.js";
 import { MintFailure } from "./contracts.js";
 import type {
@@ -169,6 +171,39 @@ const turnFailure = (error: unknown, operation: string) =>
         failureDetail: failureDetail("mint_host_dependency_failed", { operation, error }),
       });
 
+/** The same instructions for every mint, so they end in a 12-hour cache breakpoint. */
+const cachedInstructions = [{ text: outcomeReviewerInstructions, breakpoint: "12h" as const }];
+
+/** The reviewer agent's model, settings and instructions, the same for every turn and the prewarm. */
+const reviewerAgent = (promptCacheKey: string | undefined) => ({
+  name: "Pomerado outcome reviewer",
+  model: lunaModel,
+  modelSettings: withReasoningContinuity({
+    store: false,
+    reasoning: { effort: "medium", context: "all_turns" },
+    // The instructions are cached for 12 hours, the conversation after them implicitly.
+    promptCacheOptions: { mode: "implicit" },
+    // One call at a time, so assessments of one write are numbered in order.
+    parallelToolCalls: false,
+    providerData: {
+      ...guardianCompaction().samplingParams({ model: lunaModel }),
+      ...(promptCacheKey === undefined ? {} : { prompt_cache_key: promptCacheKey }),
+    },
+  }),
+  instructions: outcomeReviewerInstructions,
+});
+
+/** Tools for the prewarm, which sends their definitions and never calls them. */
+const prewarmTools: OutcomeReviewTools = {
+  searchHistory: () => Effect.die(new Error("A prewarm calls no tool")),
+  readHistory: () => Effect.die(new Error("A prewarm calls no tool")),
+  listRecords: () => Effect.die(new Error("A prewarm calls no tool")),
+  readRecord: () => Effect.die(new Error("A prewarm calls no tool")),
+  readTask: () => Effect.die(new Error("A prewarm calls no tool")),
+  submitAssessment: () => Effect.die(new Error("A prewarm calls no tool")),
+  requestObservation: () => Effect.die(new Error("A prewarm calls no tool")),
+};
+
 /**
  * The core outcome reviewer: a GPT-6 Luna agent on its own continuing conversation, kept with
  * the same session building blocks as Guardian's (provider compaction, an interrupted turn
@@ -176,10 +211,42 @@ const turnFailure = (error: unknown, operation: string) =>
  */
 export const makeOpenAIOutcomeReviewer = (
   options: OutcomeReviewerModelOptions = {},
-): OutcomeReviewerModel => {
+): OutcomeReviewerModel & {
+  /**
+   * Prepares the provider's cache of the reviewer's instructions and tools for 12 hours, the same
+   * bytes every turn sends first, without generating output; see Guardian's `prewarm`.
+   */
+  readonly prewarm: () => Effect.Effect<ReturnType<typeof modelUsageCounts>, MintFailure>;
+} => {
   const maxTurns = options.maxTurns ?? 32;
   const timeout = Duration.decode(options.turnTimeout ?? "5 minutes");
   return {
+    prewarm: () =>
+      Effect.tryPromise({
+        try: async (signal) => {
+          const agent = new Agent({
+            ...reviewerAgent(options.promptCacheKey),
+            tools: reviewerTools(prewarmTools, () => signal),
+          });
+          const runner = new Runner({
+            ...(options.modelProvider === undefined
+              ? {}
+              : { modelProvider: options.modelProvider }),
+            tracingDisabled: true,
+            traceIncludeSensitiveData: false,
+          });
+          const usage = await prewarmInstructions(
+            runner.config.modelProvider,
+            1,
+            async (provider) => {
+              runner.config.modelProvider = instructionsAsMessages(provider, cachedInstructions);
+              return runner.run(agent, "Prewarm the cached instructions.", { signal, maxTurns: 1 });
+            },
+          );
+          return modelUsageCounts(usage);
+        },
+        catch: (error) => turnFailure(error, "outcomeReviewer.prewarm"),
+      }),
     turn: (turn) =>
       Effect.tryPromise({
         try: async (signal) => {
@@ -191,16 +258,7 @@ export const makeOpenAIOutcomeReviewer = (
             interruption: reviewerInterruption,
           });
           const agent = new Agent({
-            name: "Pomerado outcome reviewer",
-            model: lunaModel,
-            modelSettings: withReasoningContinuity({
-              store: false,
-              reasoning: { effort: "medium", context: "all_turns" },
-              // One call at a time, so assessments of one write are numbered in order.
-              parallelToolCalls: false,
-              providerData: guardianCompaction().samplingParams({ model: lunaModel }),
-            }),
-            instructions: outcomeReviewerInstructions,
+            ...reviewerAgent(options.promptCacheKey),
             tools: reviewerTools(turn.tools, () => signal),
           });
           const runner = new Runner({
@@ -213,7 +271,7 @@ export const makeOpenAIOutcomeReviewer = (
           const items = await Effect.runPromise(session.input(turn.input), { signal });
           const state = new RunState(new RunContext(), items, agent, maxTurns);
           runner.config.modelProvider = session.provider(
-            runner.config.modelProvider,
+            instructionsAsMessages(runner.config.modelProvider, cachedInstructions),
             () => state.history,
             () => signal,
           );

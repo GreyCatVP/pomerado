@@ -4,8 +4,11 @@ import {
   caseDigest,
   cursorPairOf,
   decodeCasesFile,
+  failingCasesRefusal,
+  failingLiveTestCases,
   judgeCase,
   liveTestsEvidence,
+  liveTestsEvidenceProblem,
   primaryListOf,
   signedInTestInputRefusal,
   testInputKey,
@@ -178,9 +181,10 @@ describe("judgeCase", () => {
 });
 
 describe("caseDigest", () => {
-  it("keeps a result when only the case's purpose is reworded", () => {
+  it("keeps a result when only the case's purpose is reworded or its noMatch mark changes", () => {
     const testCase = { id: "a", purpose: "One.", input: { query: "lamp" }, expect: "result" as const };
     expect(caseDigest({ ...testCase, purpose: "Another." })).toBe(caseDigest(testCase));
+    expect(caseDigest({ ...testCase, noMatch: true })).toBe(caseDigest(testCase));
     expect(caseDigest({ ...testCase, expect: "empty" })).not.toBe(caseDigest(testCase));
   });
 });
@@ -194,6 +198,22 @@ describe("decodeCasesFile", () => {
     const { purpose: _purpose, ...unexplained } = one;
     expect(Either.isLeft(decodeCasesFile(JSON.stringify({ cases: [unexplained] })))).toBe(true);
     expect(decodeCasesFile(undefined)).toEqual(Either.right({ cases: [] }));
+  });
+
+  it("keeps a case's noMatch mark, and refuses one that is not a boolean", () => {
+    const zero = {
+      id: "zero",
+      purpose: "A month with no reviews.",
+      input: { month: 2 },
+      expect: "result",
+      noMatch: true,
+    };
+    expect(decodeCasesFile(JSON.stringify({ cases: [zero] }))).toEqual(
+      Either.right({ cases: [zero] }),
+    );
+    expect(
+      Either.isLeft(decodeCasesFile(JSON.stringify({ cases: [{ ...zero, noMatch: "yes" }] }))),
+    ).toBe(true);
   });
 
   it("keeps what the agent chose not to test, with why", () => {
@@ -234,15 +254,20 @@ describe("the signed-in test input bound", () => {
   });
 
   it("allows up to the limit, then refuses only a new input", () => {
-    const first = testInputKey(combined);
-    const second = testInputKey({ query: "desk" });
-    expect(signedInTestInputRefusal([first], [{ query: "desk" }])).toBeUndefined();
-    // Both counted: a rerun of either is free, a third input is refused.
-    expect(signedInTestInputRefusal([first, second], [reordered, { query: "desk" }])).toBeUndefined();
-    expect(signedInTestInputRefusal([first, second], [{ query: "chair" }])).toBeDefined();
+    const counted = [combined, { query: "desk" }, { query: "chair" }].map(testInputKey);
+    expect(signedInTestInputRefusal(counted, [{ query: "lamp" }])).toBeUndefined();
+    // Four counted: a rerun of any is free, a fifth input is refused.
+    const full = [...counted, testInputKey({ query: "lamp" })];
+    expect(signedInTestInputRefusal(full, [reordered, { query: "desk" }])).toBeUndefined();
+    expect(signedInTestInputRefusal(full, [{ query: "sofa" }])).toBeDefined();
     // A batch that would add two inputs when one is left runs nothing.
-    expect(signedInTestInputRefusal([first], [{ query: "desk" }, { query: "chair" }])).toBeDefined();
-    expect(signedInTestInputRefusal([], [combined, { query: "desk" }, { query: "chair" }])).toBeDefined();
+    expect(signedInTestInputRefusal(counted, [{ query: "lamp" }, { query: "sofa" }])).toBeDefined();
+    expect(
+      signedInTestInputRefusal(
+        [],
+        [combined, { query: "desk" }, { query: "chair" }, { query: "lamp" }, { query: "sofa" }],
+      ),
+    ).toBeDefined();
   });
 });
 
@@ -286,6 +311,58 @@ describe("liveTestsEvidence", () => {
     expect(coverage).toContain("1 of those failures still counts.");
   });
 
+  // A count's zero case first expected empty and failed as a result; marked noMatch, it passes. Its
+  // lead needs the site's zero, never a page listing results, which a count that matched nothing
+  // cannot show.
+  it("asks a noMatch lead for the site's no-results state, never its results", () => {
+    const quiet = {
+      id: "quiet-month",
+      purpose: "A month the site lists no reviews for; its filtered list shows a total of 0.",
+      input: { month: 2, year: 2024 },
+      expect: "result" as const,
+    };
+    const failedEmpty = {
+      id: quiet.id,
+      caseDigest: caseDigest({ ...quiet, expect: "empty" }),
+      sourceDigest: "published",
+      verdict: "fail" as const,
+      got: "a result",
+      durationMs: 1,
+      input: quiet.input,
+      expect: "empty" as const,
+    };
+    const leadOf = (noMatch: boolean) => {
+      const testCase = noMatch ? { ...quiet, noMatch: true } : quiet;
+      const passing = {
+        id: quiet.id,
+        caseDigest: caseDigest(testCase),
+        sourceDigest: "published",
+        verdict: "pass" as const,
+        got: "a result",
+        durationMs: 1,
+      };
+      return liveTestsEvidence({
+        file: { cases: [testCase] },
+        versions: [
+          {
+            version: "playwright",
+            sourceDigest: "published",
+            records: new Map([[quiet.id, passing]]),
+            replaced: [failedEmpty],
+          },
+        ],
+      }).record.retired[0];
+    };
+    expect(leadOf(true)).toMatchObject({
+      changedExpectationBy: quiet.id,
+      clearedBy: { siteAnswer: "no_results" },
+    });
+    expect(leadOf(false)).toMatchObject({
+      changedExpectationBy: quiet.id,
+      clearedBy: { siteAnswer: "results" },
+    });
+  });
+
   // A host that read no input schema cannot mark a failure outsideSchema, so the record never
   // offers that way out.
   it("offers no schema bound as a way out when the host read no input schema", () => {
@@ -311,5 +388,59 @@ describe("liveTestsEvidence", () => {
         clearedBy: expect.objectContaining({ ways: ["changedExpectationBy", "excusedBy"] }),
       }),
     ]);
+  });
+});
+
+describe("failingLiveTestCases", () => {
+  const record = (statuses: Readonly<Record<string, Readonly<Record<string, string>>>>) => ({
+    versions: [
+      { version: "playwright" as const, entrypoint: "src/tool.mjs" },
+      { version: "http" as const, entrypoint: "src/tool-http.mjs" },
+    ],
+    cases: Object.entries(statuses).map(([id, results]) => ({
+      id,
+      results: Object.fromEntries(
+        Object.entries(results).map(([version, status]) => [version, { status }]),
+      ),
+    })),
+  });
+
+  it("names the published version's failing cases in the cases file's order, and nothing else", () => {
+    const both = record({
+      a: { playwright: "pass", http: "fail" },
+      b: { playwright: "fail", http: "pass" },
+      c: { playwright: "inconclusive", http: "fail" },
+      d: { playwright: "stale", http: "fail" },
+      e: { playwright: "not_run", http: "fail" },
+      f: { playwright: "fail", http: "fail" },
+    });
+    expect(failingLiveTestCases(both, "playwright")).toEqual({
+      version: "playwright",
+      entrypoint: "src/tool.mjs",
+      ids: ["b", "f"],
+    });
+    expect(failingLiveTestCases(both, "http")?.ids).toEqual(["a", "c", "d", "e", "f"]);
+  });
+
+  it("finds none when no counted case fails, the version is missing or the record is bare", () => {
+    expect(failingLiveTestCases(record({ a: { playwright: "pass" } }), "playwright")).toBeUndefined();
+    expect(
+      failingLiveTestCases(
+        { versions: [{ version: "playwright" }], cases: [{ id: "a", results: { http: { status: "fail" } } }] },
+        "http",
+      ),
+    ).toBeUndefined();
+    expect(failingLiveTestCases(liveTestsEvidenceProblem("unreadable").record, "playwright")).toBeUndefined();
+  });
+
+  it("names up to ten cases and counts the rest", () => {
+    const ids = Array.from({ length: 12 }, (_unused, index) => `case-${index + 1}`);
+    const text = failingCasesRefusal({ version: "playwright", entrypoint: "src/tool.mjs", ids });
+    expect(text).toContain(
+      "live test cases case-1, case-2, case-3, case-4, case-5, case-6, case-7, case-8, case-9, case-10 and 2 more on src/tool.mjs fail on this source,",
+    );
+    expect(failingCasesRefusal({ version: "playwright", ids: ["a", "b", "c"] })).toContain(
+      "live test cases a, b and c fail on this source,",
+    );
   });
 });

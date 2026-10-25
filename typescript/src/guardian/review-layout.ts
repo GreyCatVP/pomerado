@@ -70,8 +70,8 @@ export const outcomeAccepted = (pending: PendingExecution, raw: unknown): boolea
 
 /** The decision fields besides outcome and rationale that each kind uses. */
 const reviewFields: Record<ReviewKind, readonly string[]> = {
-  execution: ["action", "refusal", "refusalGround"],
-  recovery: [],
+  execution: ["action", "refusal", "refusalGround", "advice"],
+  recovery: ["advice"],
   question: [],
   update: [],
   publication: ["reason", "findings", "publicReason"],
@@ -109,6 +109,8 @@ export const guardianDecisionFormat: AgentOutputType = {
       refusalGround: {
         anyOf: [{ type: "null" }, { type: "string", enum: [...guardianRefusalGrounds] }],
       },
+      // An execution or recovery allow's optional note for the agent, which never blocks the step.
+      advice: { anyOf: [{ type: "null" }, { type: "string" }] },
       findings: {
         anyOf: [
           { type: "null" },
@@ -162,6 +164,7 @@ export const guardianDecisionFormat: AgentOutputType = {
       "action",
       "refusal",
       "refusalGround",
+      "advice",
     ],
     additionalProperties: false,
   },

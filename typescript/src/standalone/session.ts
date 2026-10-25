@@ -9,6 +9,12 @@ import type { PomeradoOptions } from "./contracts.js";
 import { error, mintError } from "./errors.js";
 export const makeSession = (options: PomeradoOptions) =>
   Effect.gen(function* () {
+    if (options.browser !== undefined && "cdp" in options.browser)
+      return yield* Effect.fail(
+        new Error(
+          "The local host doesn't attach over CDP: its runs close other tabs and reset site data in the browser. Use endpoint or a launched browser.",
+        ),
+      );
     const browser = yield* makePlaywrightExecutor(options.browser);
     const policy =
       options.policy ??

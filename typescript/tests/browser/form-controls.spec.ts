@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "playwright";
 import { formControlsCode } from "../../src/browser/form-controls.js";
+import { sameText } from "../../src/runtime/text.js";
 import { makeLocalKernel } from "../../src/testing/local-kernel.js";
 
 // The authoring library's date and dropdown helpers, run as a Kernel call body runs them (`page` in
@@ -486,6 +487,123 @@ test("chooseOption keeps a value of punctuation alone as it is, never blank", as
   expect(await submitted(page)).toEqual({ code: "b" });
 });
 
+// A list may write a name short, as St-Jean for Saint-Jean, and a short label can also stand for
+// a longer name it is not, as UK for Ukraine. A pick never takes a short label: it refuses, and
+// sameText confirms the read-back of a pick made another way.
+const towns = (labels: readonly string[]) => {
+  const options = labels.map((label, index) => `<option value="${index + 1}">${label}</option>`);
+  return `<form><label>Town<select name="town">
+<option value="">Choose</option>${options.join("")}</select></label></form>`;
+};
+
+test("chooseOption never takes a label that writes the wanted name short", async ({ page }) => {
+  await page.setContent(towns(["St-Jean", "St-Jean-de-Luz", "Ste-Marie", "UK"]));
+  for (const wanted of ["Saint Jean", "Sainte-Marie", "Ukraine"])
+    expect(
+      await call(page, `return await chooseOption(page.getByLabel("Town"), "${wanted}");`),
+      wanted,
+    ).toEqual({ error: "option_missing" });
+  expect(await submitted(page)).toEqual({ town: "" });
+  await page.setContent(`<form>${dropdown("Town", [["SJ", "St-Jean"], ["SM", "Ste-Marie"]])}</form>`);
+  expect(
+    await call(page, `return await chooseOption(page.getByLabel("Town"), "Saint Jean");`),
+  ).toEqual({ error: "option_missing" });
+  expect(await submitted(page)).toEqual({ Town: "" });
+});
+
+test("chooseOption refuses a town the list writes short, and the read-back of the right pick confirms it", async ({
+  page,
+}) => {
+  await page.setContent(towns(["St-Exemple-sur-Lac"]));
+  const town = 'page.getByLabel("Town")';
+  // Asked for the caller's spelling, the pick refuses loudly instead of choosing the short label.
+  expect(await call(page, `return await chooseOption(${town}, "Saint-Exemple-sur-Lac");`)).toEqual({
+    error: "option_missing",
+  });
+  expect(await submitted(page)).toEqual({ town: "" });
+  // Once the right option is chosen, its read-back agrees with both the caller's spelling and
+  // the label picked.
+  expect(await call(page, `return await chooseOption(${town}, "St-Exemple-sur-Lac");`)).toEqual({
+    result: { shape: "select", label: "St-Exemple-sur-Lac", value: "1" },
+  });
+  const shown = await page
+    .getByLabel("Town")
+    .evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.label ?? "");
+  expect(sameText(shown, "Saint-Exemple-sur-Lac")).toBe(true);
+  expect(sameText(shown, "St-Exemple-sur-Lac")).toBe(true);
+});
+
+test("chooseOption waits for a typeahead's results instead of taking a short label it showed before", async ({
+  page,
+}) => {
+  // Opening lists recent picks; the results for what was typed arrive 3 s later, as from a slow
+  // server.
+  await page.setContent(`<form><label for="country">Country</label>
+<input id="country" role="combobox" aria-expanded="false" aria-controls="country-list" autocomplete="off">
+<div role="listbox" id="country-list" hidden></div><input type="hidden" name="country"></form>
+<script>
+const input = document.getElementById("country");
+const list = document.getElementById("country-list");
+const hidden = document.querySelector("[name=country]");
+const show = (options) => {
+  list.innerHTML = options.map(([value, label]) => '<div role="option" data-value="' + value + '">' + label + '</div>').join("");
+};
+input.addEventListener("click", () => {
+  show([["UK", "UK"], ["US", "USA"]]);
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+});
+input.addEventListener("input", () => {
+  const query = input.value.toLowerCase();
+  setTimeout(() => show([["UA", "Ukraine"]].filter(([, label]) => label.toLowerCase().startsWith(query))), 3000);
+});
+list.addEventListener("click", (event) => {
+  const option = event.target.closest("[role=option]");
+  if (!option) return;
+  hidden.value = option.dataset.value;
+  input.value = option.textContent;
+  list.hidden = true;
+  input.setAttribute("aria-expanded", "false");
+});
+</script>`);
+  expect(
+    await call(page, `return await chooseOption(page.getByLabel("Country"), "Ukraine");`),
+  ).toEqual({ result: { shape: "combobox", label: "Ukraine", value: "UA" } });
+  expect(await submitted(page)).toEqual({ country: "UA" });
+});
+
+// A wanted code or title is never read as short for a longer label either.
+test("chooseOption never reads a wanted code or title as short for a longer label", async ({
+  page,
+}) => {
+  await page.setContent(`<form><label>Country<select name="country">
+<option value="">Choose</option><option value="US">United States</option><option value="UZ">Uzbekistan</option>
+<option value="AE">United Arab Emirates</option><option value="UA">Ukraine</option>
+</select></label><label>Title<select name="title">
+<option value="">Choose</option><option value="1">Mr</option><option value="2">Mrs</option>
+<option value="3">Miss</option><option value="4">Dr</option></select></label></form>`);
+  for (const [control, wanted] of [
+    ["Country", "USA"],
+    ["Country", "UAE"],
+    ["Title", "Ms"],
+  ] as const)
+    expect(
+      await call(page, `return await chooseOption(page.getByLabel("${control}"), "${wanted}");`),
+      wanted,
+    ).toEqual({ error: "option_missing" });
+  expect(await submitted(page)).toEqual({ country: "", title: "" });
+});
+
+// A date part never reads an option as short for its name: Jn would otherwise stand for June.
+test("fillDate never reads a month option as short for the month's name", async ({ page }) => {
+  await page.setContent(`<html lang="en-US"><body><form><label>Month<select name="month">
+<option value="">Choose</option><option>Jn</option><option>Jl</option></select></label></form></body></html>`);
+  expect(
+    await call(page, `return await fillDate(page.getByLabel("Month"), "1990-06-04", "MMMM");`),
+  ).toEqual({ error: "option_missing" });
+  expect(await submitted(page)).toEqual({ month: "" });
+});
+
 test("chooseOption and fillDate fail within about their timeout, never 30 s, when what they read vanishes", async ({
   page,
 }) => {
@@ -551,4 +669,16 @@ test("a failure names its reason, never the value", async ({ page }) => {
     await call(page, `return await chooseOption(page.getByLabel("Date of birth"), "July");`),
   ).toEqual({ error: "control_unsupported" });
   expect(await submitted(page)).toEqual({ dob: "", month: "7" });
+});
+
+test("a fill the page never takes names its reason, never the value Playwright's error would quote", async ({
+  page,
+}) => {
+  await page.setContent(`<form><label>Date of birth<input name="dob" readonly></label></form>`);
+  expect(
+    await call(
+      page,
+      `return await fillDate(page.getByLabel("Date of birth"), "1990-07-04", "MM/DD/YYYY", { timeout: 500 });`,
+    ),
+  ).toEqual({ error: "not_committed" });
 });

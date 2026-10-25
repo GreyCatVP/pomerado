@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect";
+import { Ajv } from "@modelcontextprotocol/server/validators/ajv";
+import { Effect, JSONSchema, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { publicationDelta, publicationRound } from "../../src/guardian/publication-delta.js";
 import {
@@ -28,6 +29,8 @@ import {
   type PublicationCandidate,
   type PublicationReview,
 } from "../../src/mint/publication-review.js";
+import { canonicalSchema } from "../../src/registry/schema-references.js";
+import { contractJsonSchema } from "../../src/runtime/operation.js";
 
 const limit = 96 * 1024;
 const Envelope = Schema.parseJson(
@@ -443,6 +446,125 @@ describe("the public definition", () => {
       ),
     );
     expect(publicDefinition(metadata, schemas)).not.toContain('"questions"');
+  });
+
+  /** Whether `value` is valid against `schema` read as Draft-07, as Ajv's classic engine reads it. */
+  const validDraft7 = (schema: unknown, value: unknown) =>
+    new Ajv({ strict: false, validateSchema: false, logger: false }).compile(
+      schema as Record<string, unknown>,
+    )(value);
+  /** A schema as a spec-strict Draft-07 validator reads it: every keyword beside `$ref` ignored. */
+  const draft7Reading = (schema: unknown): unknown => {
+    if (Array.isArray(schema)) return schema.map(draft7Reading);
+    if (typeof schema !== "object" || schema === null) return schema;
+    const node = Object.fromEntries(
+      Object.entries(schema).map(([key, value]) => [key, draft7Reading(value)]),
+    );
+    // A root keeps its definitions, which references resolve against.
+    if (typeof node["$ref"] !== "string") return node;
+    return node["$defs"] === undefined
+      ? { $ref: node["$ref"] }
+      : { $ref: node["$ref"], $defs: node["$defs"] };
+  };
+  const shown = (input: unknown, output: unknown = contractJsonSchema(Schema.Unknown)) =>
+    Schema.decodeUnknownSync(
+      Schema.parseJson(Schema.Struct({ inputSchema: Schema.Unknown, outputSchema: Schema.Unknown })),
+    )(publicDefinition(metadata, { input, output }));
+  const shownInput = (input: unknown) => shown(input).inputSchema;
+  /** Every string in a JSON value, its keys included. */
+  const stringsIn = (value: unknown): string[] =>
+    typeof value === "string"
+      ? [value]
+      : Array.isArray(value)
+        ? value.flatMap(stringsIn)
+        : typeof value === "object" && value !== null
+          ? Object.entries(value).flatMap(([key, child]) => [key, ...stringsIn(child)])
+          : [];
+
+  it("shows a bound on a named schema so a Draft-07 reading keeps it, and publishes the contract as Effect writes it", () => {
+    const input = Schema.Struct({ m: Schema.NonEmptyString.pipe(Schema.maxLength(5)) });
+    // A root that is a refined named schema has its bound beside a root reference.
+    const output = Schema.NonEmptyString.pipe(Schema.maxLength(5));
+    const definition = shown(contractJsonSchema(input), contractJsonSchema(output));
+    for (const schema of [definition.inputSchema, draft7Reading(definition.inputSchema)]) {
+      expect(validDraft7(schema, { m: "abcde" })).toBe(true);
+      expect(validDraft7(schema, { m: "abcdefgh" })).toBe(false);
+      expect(validDraft7(schema, { m: "" })).toBe(false);
+    }
+    for (const schema of [definition.outputSchema, draft7Reading(definition.outputSchema)]) {
+      expect(validDraft7(schema, "abcde")).toBe(true);
+      expect(validDraft7(schema, "abcdefgh")).toBe(false);
+      expect(validDraft7(schema, "")).toBe(false);
+    }
+    expect(contractJsonSchema(input)).toEqual({ ...JSONSchema.make(input) });
+    expect(contractJsonSchema(output)).toEqual({ ...JSONSchema.make(output) });
+  });
+
+  it("shows every string the published schema holds, in an allOf that is no list too", () => {
+    const published = {
+      $schema: "https://schemas.example.invalid/dialect",
+      $defs: { Code: { type: "string", pattern: "^[A-Z]+$" } },
+      type: "object",
+      properties: {
+        code: { $ref: "#/$defs/Code", maxLength: 4, allOf: "a value an annotation set" },
+        other: { $ref: "#/$defs/Code", minLength: 2, allOf: { note: "an object, not a list" } },
+        plain: { $ref: "#/$defs/Code", maxLength: 3, description: "a note on the field" },
+        listed: { $ref: "#/$defs/Code", maxLength: 3, allOf: [{ title: "a listed note" }] },
+      },
+    };
+    const definition = shown(published, published);
+    for (const view of [definition.inputSchema, definition.outputSchema])
+      expect(stringsIn(view)).toEqual(expect.arrayContaining(stringsIn(published)));
+    expect(definition.inputSchema).toMatchObject({
+      properties: { code: published.properties.code, other: published.properties.other },
+    });
+  });
+
+  it("shows every keyword and value the published schema holds", () => {
+    const published: Record<string, unknown> = {
+      ...contractJsonSchema(
+        Schema.Struct({
+          m: Schema.NonEmptyString.pipe(Schema.maxLength(5)),
+          n: Schema.Int.pipe(Schema.between(1, 9)),
+          note: Schema.NonEmptyString.annotations({ description: "a note" }),
+        }),
+      ),
+      $id: "https://schemas.example.invalid/input.json",
+      $defs: {
+        ...(contractJsonSchema(Schema.Struct({ m: Schema.NonEmptyString, n: Schema.Int }))[
+          "$defs"
+        ] as Record<string, unknown>),
+        Unused: { type: "string", const: { $ref: "#/$defs/Int", maxLength: 2 } },
+      },
+    };
+    const shown = shownInput(published);
+    expect(shown).toMatchObject({
+      $schema: "http://json-schema.org/draft-07/schema#",
+      $id: "https://schemas.example.invalid/input.json",
+      $defs: published["$defs"],
+    });
+    expect(canonicalSchema(shown as Record<string, unknown>)).toEqual(canonicalSchema(published));
+    expect(shownInput(shown)).toEqual(shown);
+  });
+
+  it("shows a bound inside a recursive schema so a Draft-07 reading keeps it", () => {
+    interface Folder {
+      readonly name: string;
+      readonly folders: readonly Folder[];
+    }
+    const Folder = Schema.Struct({
+      name: Schema.NonEmptyString.pipe(Schema.maxLength(5)),
+      folders: Schema.Array(Schema.suspend((): Schema.Schema<Folder> => Folder)),
+    }).annotations({ identifier: "Folder" });
+    const shown = shownInput(contractJsonSchema(Schema.Struct({ root: Folder })));
+    for (const schema of [shown, draft7Reading(shown)]) {
+      expect(validDraft7(schema, { root: { name: "a", folders: [{ name: "b", folders: [] }] } })).toBe(
+        true,
+      );
+      expect(
+        validDraft7(schema, { root: { name: "a", folders: [{ name: "abcdefgh", folders: [] }] } }),
+      ).toBe(false);
+    }
   });
 });
 

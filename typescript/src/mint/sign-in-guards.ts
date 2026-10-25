@@ -1,12 +1,14 @@
 // The identity guards a recorded sign-in passes: what a published selector, page or signed-in
-// marker never holds, because it replays for every login. The recorder applies them screen by
-// screen as it records, and the sign-in version check applies them to every part of a version.
+// marker never holds, because it replays for every login. The sign-in version check applies them
+// to every part of a version. The build's recorder screens each screen as it records with the
+// shared rules in `autofill-guards.ts`, which take `namesMaskedContact` from here, and its own
+// check for `[private]`.
 
 /**
  * Whether a text names one of an account's identity values (lowercased, as `values` holds them),
  * or the placeholder a screened page shows for one.
  */
-export const namesIdentity = (text: string, values: readonly string[]): boolean => {
+export const namesIdentityOrPrivateMask = (text: string, values: readonly string[]): boolean => {
   const lower = text.toLowerCase();
   return values.some((value) => lower.includes(value)) || lower.includes("[private]");
 };

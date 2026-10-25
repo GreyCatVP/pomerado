@@ -14,6 +14,7 @@ import type { ModelObserverFactory } from "../../src/models/model-observer.js";
 import { makeSourceInspector } from "../../src/guardian/source.js";
 import type { SourceProjection } from "../../src/guardian/source.js";
 import { makeRunSecrets } from "../../src/inputs/secrets.js";
+import { conversationOf } from "../support/guardian-requests.js";
 
 const native = { executionEnvironment: nativeExecutionEnvironment };
 
@@ -428,6 +429,44 @@ it("gives a restored conversation's next review the current entrypoint source, s
   });
 });
 
+it("tells a restored conversation the host's resume note once, before its next request", async () => {
+  const note = "The build was paused and resumed. Its browser is new; review as usual.";
+  const requests: ModelRequest[] = [];
+  provide([[message()], [message()], [message()]], requests);
+  let saved: typeof GuardianSessionSnapshot.Type | undefined;
+  const reviewer = makeOpenAIReviewer("Synthetic policy {{ tenant_policy_config }}", false, native);
+  const save = (snapshot: typeof GuardianSessionSnapshot.Type) =>
+    Effect.sync(() => {
+      saved = Schema.decodeUnknownSync(GuardianSessionSnapshot)(
+        JSON.parse(JSON.stringify(snapshot)),
+      );
+    });
+  const files = inspector({ [pending.entrypoint]: "export default 1" });
+  await Effect.runPromise(makeGuardian(reviewer, undefined, { save }).review(pending, files));
+  const resumed = makeGuardian(reviewer, undefined, {
+    initial: Schema.decodeUnknownSync(GuardianSessionSnapshot)(saved),
+    resumeNote: note,
+    save,
+  });
+  await Effect.runPromise(resumed.review({ ...pending, attemptId: "resumed" }, files));
+  await Effect.runPromise(resumed.review({ ...pending, attemptId: "resumed" }, files));
+
+  const notes = (request: ModelRequest | undefined) => {
+    const input = request?.input;
+    return (Array.isArray(input) ? input : []).flatMap((item, index) =>
+      "role" in item && item.role === "user" && item.content === note ? [index] : [],
+    );
+  };
+  expect(notes(requests[0])).toEqual([]);
+  // The note comes once, right before the resumed attempt's first request.
+  const firstResumed = requests[1]?.input;
+  expect(notes(requests[1])).toEqual([Array.isArray(firstResumed) ? firstResumed.length - 2 : -1]);
+  expect(inlinedEntrypoint(requests[1])?.source).toBe("export default 1");
+  // The conversation keeps it in place, and nothing adds it again.
+  expect(notes(requests[2])).toEqual(notes(requests[1]));
+  expect(JSON.stringify(saved?.history)).toContain(note);
+});
+
 it("masks a registered secret in the entrypoint source the request carries", async () => {
   const secret = "synthetic-registered-entrypoint-secret";
   const secrets = makeRunSecrets();
@@ -552,7 +591,7 @@ it("continues from provider compaction after takeover without replaying the olde
     initial: Schema.decodeUnknownSync(GuardianSessionSnapshot)(first.session?.snapshot()),
   });
   await Effect.runPromise(replacement.review({ ...pending, attemptId: "takeover" }, readCurrent));
-  expect(requests[3]?.input[0]).toMatchObject({
+  expect(conversationOf(requests[3])[0]).toMatchObject({
     type: "compaction",
     encrypted_content: "opaque-compacted-context",
   });
@@ -635,11 +674,11 @@ it("compacts a conversation at the threshold with the previous request plus a tr
   });
   // The review then continues from the compacted window, followed by the previous review's
   // output and the new request, without replaying what the window replaced.
-  expect(inputOf(continued)[0]).toMatchObject({ type: "compaction", id: "cmp_explicit" });
+  expect(conversationOf(continued)[0]).toMatchObject({ type: "compaction", id: "cmp_explicit" });
   expect(JSON.stringify(inputOf(continued))).toContain("opaque-first-review-reasoning");
   expect(JSON.stringify(inputOf(continued))).toContain("second-review-observation");
   expect(JSON.stringify(inputOf(continued))).not.toContain("first-review-observation");
-  expect(inputOf(afterRead)[0]).toMatchObject({ type: "compaction", id: "cmp_explicit" });
+  expect(conversationOf(afterRead)[0]).toMatchObject({ type: "compaction", id: "cmp_explicit" });
   expect(JSON.stringify(inputOf(afterRead))).not.toContain("first-review-observation");
   expect(guardian.session?.compactions()).toBe(1);
   expect(guardian.session?.snapshot().history[0]).toMatchObject({ type: "compaction" });

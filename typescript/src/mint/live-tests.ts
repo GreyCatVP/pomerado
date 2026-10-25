@@ -14,8 +14,9 @@ import { outputCheckMeaning, outputChecks, type OutputCheck } from "../runtime/o
  * them, and the agent sees every result. Each case run says whether it started warm or cold (see
  * `LiveTestStart`).
  * The publication review reads the record and judges the cases against what the tool claims. The
- * only rule here that holds publication back is `liveTestsShortfall`: a version whose cases
- * mostly fail on the source it publishes is not sent to review at all.
+ * rules here that hold publication back are `liveTestsShortfall`: a version whose cases mostly
+ * fail on the source it publishes is not sent to review at all; and, on a host that asks for it,
+ * `failingLiveTestCases`: no review starts while any of its counted cases fails there.
  *
  * The same cases run on both versions of a read: the Playwright version (`src/tool.mjs`) and the
  * HTTP version (`src/tool-http.mjs`). Each version keeps its own result for each case, so a batch
@@ -30,11 +31,11 @@ export const liveTestsEvidencePath = "publication/tests.json";
 export const maximumBatchCases = 50;
 /**
  * The most distinct inputs a signed-in read runs live tests on in one build or repair, beyond its
- * example: one combined case that sets every optional input the example left unset, and one more
- * for inputs that cannot be set with the others. Running a counted input again, after a fix or on
- * the HTTP version, is free. A read signed out has no such limit.
+ * example, chosen as the testing skill says: its combined case first, then the cases that cover the
+ * most, such as one made-up key for an input that takes a record's own key. Running a counted input
+ * again, after a fix or on the HTTP version, is free. A read signed out has no such limit.
  */
-export const signedInTestInputLimit = 2;
+export const signedInTestInputLimit = 4;
 
 /**
  * A test input's identity for the signed-in limit: its JSON with object keys sorted, so the same
@@ -63,7 +64,7 @@ export const signedInTestInputRefusal = (
   const added = uncountedTestInputs(counted, inputs).length;
   if (added === 0 || counted.length + added <= signedInTestInputLimit) return undefined;
   const left = Math.max(0, signedInTestInputLimit - counted.length);
-  return `A signed-in read runs live tests on at most ${signedInTestInputLimit} distinct inputs in a build or repair, beyond its example: one combined case that sets every optional input the example left unset, and one more only when those inputs cannot all be set together. It has run ${counted.length}, and this would add ${added}${left === 0 ? "" : `; ${left} more may run`}. Running an input it already ran again, after a fix or on src/tool-http.mjs, is free. Merge the inputs into the cases already run, or list the rest under notTested and in coverage. Nothing was executed.`;
+  return `A signed-in read runs live tests on at most ${signedInTestInputLimit} distinct inputs in a build or repair, beyond its example, as the testing skill says. It has run ${counted.length}, and this would add ${added}${left === 0 ? "" : `; ${left} more may run`}. Running an input it already ran again, after a fix or on src/tool-http.mjs, is free. Merge the inputs into the cases already run, or list the rest under notTested and in coverage. Nothing was executed.`;
 };
 
 /** Which version of a read a case ran on. */
@@ -94,6 +95,12 @@ export const LiveTestCase = Schema.Struct({
   expect: LiveTestExpectation,
   /** Run page 1, then the next page through the cursor page 1 returned. */
   next_page: Schema.optionalWith(Schema.Boolean, { exact: true }),
+  /**
+   * The case is the tool's no-match case although it expects a result: its input matches nothing,
+   * and the tool, a count or total, honestly answers it with 0. Like `purpose`, it describes the
+   * case, so it leaves the case's digest, and its result, unchanged.
+   */
+  noMatch: Schema.optionalWith(Schema.Boolean, { exact: true }),
 });
 export type LiveTestCase = typeof LiveTestCase.Type;
 
@@ -658,6 +665,7 @@ export interface LiveTestRecord {
   readonly purpose?: string;
   readonly expect?: LiveTestExpectation;
   readonly nextPage?: true;
+  readonly noMatch?: true;
   /** A failing result the minter replaced by changing the case; kept for the publication review. */
   readonly retired?: true;
   /** A retired failure whose case, unchanged, passed when run again on the same source. */
@@ -698,6 +706,7 @@ export const LiveTestRecord: Schema.Schema<LiveTestRecord> = Schema.Struct({
   purpose: Schema.optionalWith(Schema.String, { exact: true }),
   expect: Schema.optionalWith(LiveTestExpectation, { exact: true }),
   nextPage: Schema.optionalWith(Schema.Literal(true), { exact: true }),
+  noMatch: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   retired: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   flaky: Schema.optionalWith(Schema.Literal(true), { exact: true }),
   signedIn: Schema.optionalWith(Schema.Literal(true), { exact: true }),
@@ -736,6 +745,36 @@ export const caseStatus = (
   return record.verdict;
 };
 
+/**
+ * The cases in `file` a failure is pending on, for a host's reserved batch
+ * (`LiveTestHost.reservedCaseTimeoutMs`): each case whose input, expectation and next page are a
+ * failing result's of this version, its own latest or a retired one, as `excusedBy` matches a
+ * retired failure, and that has not passed since on `sourceDigest`, the version's current source.
+ * A case with such a failure on `sourceDigest` itself is left out until the source changes: a pass
+ * on the source it failed on is flaky, and excuses nothing.
+ */
+export const pendingFailureCases = (
+  file: LiveTestCasesFile,
+  records: ReadonlyMap<string, LiveTestRecord>,
+  replaced: readonly LiveTestRecord[],
+  sourceDigest: string,
+): readonly string[] => {
+  const failing = [...records.values(), ...replaced].filter((record) => record.verdict === "fail");
+  const failedHere = new Set(
+    failing.filter((record) => record.sourceDigest === sourceDigest).map((record) => record.caseDigest),
+  );
+  const failed = new Set(
+    failing.map((record) => record.caseDigest).filter((digest) => !failedHere.has(digest)),
+  );
+  return file.cases
+    .filter(
+      (testCase) =>
+        failed.has(caseDigest(testCase)) &&
+        caseStatus(testCase, records.get(testCase.id), sourceDigest) !== "pass",
+    )
+    .map((testCase) => testCase.id);
+};
+
 /** One case as the agent and the publication review read it. */
 export const caseView = (
   testCase: LiveTestCase,
@@ -748,6 +787,7 @@ export const caseView = (
     purpose: testCase.purpose,
     expect: testCase.expect,
     ...(testCase.next_page === true ? { next_page: true } : {}),
+    ...(testCase.noMatch === true ? { noMatch: true } : {}),
     status,
     ...(record === undefined
       ? {}
@@ -897,12 +937,23 @@ type ClearingWay = "changedExpectationBy" | "excusedBy" | "outsideSchema";
 
 /**
  * The site's own answer for the input that a `changedExpectationBy` lead needs a capture of, by
- * the lead's expectation: its results, its no-results state or its own controls refusing it.
+ * the lead's expectation: its results, its no-results state or its own controls refusing it. A
+ * lead marked `noMatch` expects a result, a count or total of zero, so it needs the site's
+ * no-results state.
  */
 type SiteAnswer = "results" | "no_results" | "refusal";
 
-const siteAnswerFor = (expectation: LiveTestExpectation): SiteAnswer =>
-  expectation === "result" ? "results" : expectation === "empty" ? "no_results" : "refusal";
+const siteAnswerFor = (lead: {
+  readonly expect: LiveTestExpectation;
+  readonly noMatch?: boolean;
+}): SiteAnswer =>
+  lead.expect === "result"
+    ? lead.noMatch === true
+      ? "no_results"
+      : "results"
+    : lead.expect === "empty"
+      ? "no_results"
+      : "refusal";
 
 /**
  * The response statuses that show a site refusing an input itself, for its shape or size. Never
@@ -927,7 +978,9 @@ const siteAnswerCapture: Readonly<Record<SiteAnswer, string>> = {
  */
 const clearedBy = (
   record: LiveTestRecord,
-  lead: { readonly id: string; readonly expect: LiveTestExpectation } | undefined,
+  lead:
+    | { readonly id: string; readonly expect: LiveTestExpectation; readonly noMatch?: boolean }
+    | undefined,
   schemaRead: boolean,
 ) => {
   const ways: ClearingWay[] = [
@@ -950,7 +1003,7 @@ const clearedBy = (
       ways,
       note: `No passing case of this input expects another answer. Clears by ${others}; or a passing case of this input whose new expectation a capture shows the site giving: its own results, its own no-results state or its own controls refusing it (changedExpectationBy).`,
     };
-  const siteAnswer = siteAnswerFor(lead.expect);
+  const siteAnswer = siteAnswerFor(lead);
   return {
     ways,
     siteAnswer,
@@ -989,6 +1042,7 @@ const retiredViews = (
             runs: runs(testCase.input, testCase.expect, testCase.next_page === true),
             input: canonical([testCase.input, testCase.next_page === true]),
             expect: testCase.expect,
+            noMatch: testCase.noMatch === true,
             record,
           },
         ]
@@ -1128,6 +1182,7 @@ export const liveTestsEvidence = (options: {
     purpose: testCase.purpose,
     expect: testCase.expect,
     ...(testCase.next_page === true ? { next_page: true } : {}),
+    ...(testCase.noMatch === true ? { noMatch: true } : {}),
     input: testCase.input,
     results: Object.fromEntries(
       versions.map((entry) => {
@@ -1136,6 +1191,7 @@ export const liveTestsEvidence = (options: {
           purpose: _purpose,
           expect: _expect,
           next_page: _nextPage,
+          noMatch: _noMatch,
           outputChecks: findings,
           ...view
         } = caseView(testCase, entry.records.get(testCase.id), entry.sourceDigest);
@@ -1220,11 +1276,11 @@ export const liveTestsEvidence = (options: {
       kind: "host_live_tests",
       note: nothing
         ? "Written by the host, never by the minter. The minter designed and ran no live test case, so beyond the example nothing was tested live."
-        : "Written by the host from its own runs, never by the minter. The same cases run on each version of the tool: playwright, the Kernel script, and http, the HTTP version, for each version that ships: a version that does not ship, such as an HTTP version the minter ruled out, is not listed. versions names each version's entrypoint, the source digest its results are judged against, and its counts. Each case's results hold its result on each version, from that version's own batches: one version's run never counts for the other. Each case ran in a fresh script process on a page reset to the site's origin, after one Guardian review of its batch; purpose is the minter's account of what the case establishes. A result's start says how its browser started: cold, first on a new browser with an empty profile, as a caller the site remembers nothing about meets it; warm, on a browser that kept the site data earlier steps left. versions counts each version's coldPasses, the cases that passed cold; a host with one browser runs no case cold. status is against that version's source being published: stale means the source or the case changed after the case ran, and not_run means no batch ran it on that version. outputChecks lists the host's output check findings on a case's output. notTested lists what the minter chose not to test, and why. retired lists, by version, cases the minter deleted, failures it replaced by changing the case, and failures that passed when the unchanged case ran again on the same source (flaky), with their last result. A retired failure stops counting when the host marks it outsideSchema or names its excusedBy. outsideSchema means that version's published input schema bounds a value the failure's input supplied, at path (a JSON pointer into the input) by keyword (the JSON Schema rule it breaks), so the tool no longer claims that input; a field the schema newly requires never marks it. excusedBy names a case that passes the same input on that version's published source after the source changed, with the same expectation or with a refusal the failure's own expectation accepts, such as InvalidInput for a case that expected error. changedExpectationBy names a case that passes the same input with another expectation on that version's published source, for a failure on any source; it excuses nothing by itself. clearedBy, on each retired failure that still counts, says what can clear it: ways, the ways open to it; siteAnswer, when it has a changedExpectationBy, the site's own answer for that input a capture must show (results, no_results or refusal), with refusalStatuses for a refusal; and a note.",
+        : "Written by the host from its own runs, never by the minter. The same cases run on each version of the tool: playwright, the Kernel script, and http, the HTTP version, for each version that ships: a version that does not ship, such as an HTTP version the minter ruled out, is not listed. versions names each version's entrypoint, the source digest its results are judged against, and its counts. Each case's results hold its result on each version, from that version's own batches: one version's run never counts for the other. Each case ran in a fresh script process on a page reset to the site's origin, after one Guardian review of its batch; purpose is the minter's account of what the case establishes. noMatch marks the case the minter gives as the tool's no-match case although it expects a result: its input matches nothing, and the tool, a count or total, answers it with 0. A result's start says how its browser started: cold, first on a new browser with an empty profile, as a caller the site remembers nothing about meets it; warm, on a browser that kept the site data earlier steps left. versions counts each version's coldPasses, the cases that passed cold; a host with one browser runs no case cold. status is against that version's source being published: stale means the source or the case changed after the case ran, and not_run means no batch ran it on that version. outputChecks lists the host's output check findings on a case's output. notTested lists what the minter chose not to test, and why. retired lists, by version, cases the minter deleted, failures it replaced by changing the case, and failures that passed when the unchanged case ran again on the same source (flaky), with their last result. A retired failure stops counting when the host marks it outsideSchema or names its excusedBy. outsideSchema means that version's published input schema bounds a value the failure's input supplied, at path (a JSON pointer into the input) by keyword (the JSON Schema rule it breaks), so the tool no longer claims that input; a field the schema newly requires never marks it. excusedBy names a case that passes the same input on that version's published source after the source changed, with the same expectation or with a refusal the failure's own expectation accepts, such as InvalidInput for a case that expected error. changedExpectationBy names a case that passes the same input with another expectation on that version's published source, for a failure on any source; it excuses nothing by itself. clearedBy, on each retired failure that still counts, says what can clear it: ways, the ways open to it; siteAnswer, when it has a changedExpectationBy, the site's own answer for that input a capture must show (results, no_results or refusal), with refusalStatuses for a refusal; and a note.",
       ...(signedIn
         ? {
             signedIn: true,
-            signedInNote: `This read signed in. It runs live tests on at most ${signedInTestInputLimit} distinct inputs beyond its example, each on the build's own signed-in browser, so none runs cold: a combined case that sets the optional inputs the example left unset, and one more only when those cannot be set together. Results list only cases run signed in; a case not_run, and notTested, is disclosure, not a gap.`,
+            signedInNote: `This read signed in. It runs live tests on at most ${signedInTestInputLimit} distinct inputs beyond its example, each on the build's own signed-in browser, so none runs cold. Results list only cases run signed in; a case not_run, and notTested, is disclosure, not a gap.`,
           }
         : {}),
       ...(outOfTime ? { outOfTime: true } : {}),
@@ -1295,6 +1351,64 @@ export const liveTestsShortfall = (
     counted,
     percent: Math.floor((passed * 100) / counted),
   };
+};
+
+/** The published version's counted cases that fail on its source. */
+export interface LiveTestsFailing {
+  readonly version: LiveTestVersion;
+  readonly entrypoint?: string;
+  /** The failing cases' ids, in the cases file's order. */
+  readonly ids: readonly string[];
+}
+
+/**
+ * The counted cases of the version `finish_build` publishes, `published`, that fail on its source,
+ * from the publication record; undefined when none does. They are the failing cases among those
+ * `liveTestsShortfall` counts: cases in `test/cases.json` as written now whose latest result on
+ * that version's published source is a fail. An inconclusive, stale or not_run case is not one,
+ * and neither is a retired case, which the review judges from the record's `retired`. Only the
+ * published version is read, as for the bar. On a host that sets
+ * `LiveTestHost.holdReviewOnFailingCases`, the harness starts no publication review while any
+ * such case remains, unless no case can run again.
+ */
+export const failingLiveTestCases = (
+  record: {
+    readonly versions: readonly { readonly version: LiveTestVersion; readonly entrypoint?: string }[];
+    readonly cases: readonly {
+      readonly id: string;
+      readonly results: Readonly<Record<string, { readonly status: string }>>;
+    }[];
+  },
+  published: LiveTestVersion,
+): LiveTestsFailing | undefined => {
+  const entry = record.versions.find((candidate) => candidate.version === published);
+  if (entry === undefined) return undefined;
+  const ids = record.cases
+    .filter((testCase) => testCase.results[published]?.status === "fail")
+    .map((testCase) => testCase.id);
+  if (ids.length === 0) return undefined;
+  return {
+    version: entry.version,
+    ...(entry.entrypoint === undefined ? {} : { entrypoint: entry.entrypoint }),
+    ids,
+  };
+};
+
+/** The most failing cases `failingCasesRefusal` names; it counts the rest. */
+export const maximumNamedFailingCases = 10;
+
+/** What the minter is told when `finish_build` names failing cases instead of starting review. */
+export const failingCasesRefusal = (failing: LiveTestsFailing): string => {
+  const named = failing.ids.slice(0, maximumNamedFailingCases);
+  const more = failing.ids.length - named.length;
+  const list =
+    more > 0
+      ? `${named.join(", ")} and ${more} more`
+      : named.length === 1
+        ? named.join("")
+        : `${named.slice(0, -1).join(", ")} and ${named.at(-1) ?? ""}`;
+  const one = failing.ids.length === 1;
+  return `Publication review not started: live test case${one ? "" : "s"} ${list}${failing.entrypoint === undefined ? "" : ` on ${failing.entrypoint}`} fail${one ? "s" : ""} on this source, and the review holds publication back on a failing case. Prefer fixing the code where a case fails; retire a case, by changing or deleting it in ${liveTestCasesPath}, only where the case itself is wrong. After a code fix, run every case again; then call finish_build.`;
 };
 
 /** The record when the host could not build it, so the publication review knows why it is bare. */

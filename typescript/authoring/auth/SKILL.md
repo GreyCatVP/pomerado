@@ -12,9 +12,10 @@ the first screen. If a step fails, inspect the site and correct the steps in thi
 
 A code the site sends as part of signing in, by text message, email or an authenticator app, is
 part of the sign-in: map its screen as a `signInStep` with a `code` field and let `authenticate`
-get the code. Never ask for it separately with `request_input`. A `request_input` secret question
-for a code is only for a later protected action after sign-in, when the site asks for another code
-to confirm it.
+get the code, which the host fills or asks the caller for. Never ask for it separately with
+`request_input`. A `request_input` secret question for a code is only for a later protected action
+after sign-in, when the site asks for another code to confirm it; `authenticate` is never started
+just for such a code.
 
 On a one-time-code screen, prefer one read that finds the code fields, the submit and any
 remember-this-device box with its checked state. Then send the code step at once. Codes expire in
@@ -59,7 +60,9 @@ query, fragment or path, since a host refuses such a link for a workspace site.
    member login from provider or employer login, registration and password reset by evidence.
    Read the chosen link's `href` before the click: it is usually the login route to record.
 3. Check that the page is on the site before one click that only opens the login page. A sign-in on
-   the site's own registrable domain needs no permission; another site's is checked by the host.
+   the site's own registrable domain, such as login.example.com for www.example.com, is the
+   site's own and needs no permission; only an origin on a different site needs host
+   configuration, which the host checks during `authenticate`.
 4. Read the first sign-in screen, the first step whose form signs in with a username, email,
    phone-number, account-number, password, code, date-of-birth, ZIP or recovery-code field,
    including an identifier-only first step. Its fields for the first `signInStep` come from a
@@ -69,7 +72,14 @@ query, fragment or path, since a host refuses such a link for a workspace site.
    submit, Next, Continue or send-code control during exploration: that is signing in, which only
    `authenticate` does (the one exception, after the host's own submit click failed, is below).
    Other controls on the page, such as a site search or a cookie banner, are not the sign-in.
-   After a failed sign-in, reopening the login route in an `explore` to read it again is fine.
+   Whenever a cookie or tracking consent banner shows on a sign-in screen, dismiss it as the core
+   skill says, and name the same control as that screen's `dismiss` in every `signInStep` for it: the
+   host clicks it before it types when it shows, and runs do the same on a fresh browser, where it
+   shows again. Never name a submit or a field as `dismiss`, and prefer not to name a link to
+   another page. The banner's own control counts even when it sits in the sign-in form or has no
+   type, as on a page wrapped in one form: it sends nothing typed, since the host empties the
+   step's fields and cancels that click's own submission.
+   Reopening the login route in an `explore` to read it again is fine, after a failed sign-in too.
    `references/auth-entry.ts` shows a bounded second probe that reads a login form's controls.
 
 When the entry offers mutually exclusive account or plan types, decide before clicking one: take
@@ -124,7 +134,7 @@ its text. The host rereads the question before privately filling the answer. No 
 you, Guardian, generated code or the recipe. One-time and recovery codes keep their own slots.
 
 Every selector a `signInStep` sends, in `fields`, `submit`, `methods`, `questionSelector`,
-`rejectedMarkers` and `signedIn`, is a Playwright selector string, not a locator call as probes and
+`dismiss`, `rejectedMarkers` and `signedIn`, is a Playwright selector string, not a locator call as probes and
 the examples write. Prefer a stable `#id`, `[name=...]` or `data-testid=` selector. A role selector
 writes its options as attributes:
 
@@ -155,10 +165,14 @@ attribute.
     into one-character boxes is one `code` field per box, every box from the first to the last, in
     order, as a split date is one field per part (below), even when the page moves the focus to
     the next box or takes a pasted code in the first. Count the boxes on the screen before you
-    send the step. The host asks once, types one character into each and submits only once each
-    box holds one. A step that names only some of the boxes, or names them out of order, comes
-    back refused as `code_boxes_incomplete`, typing nothing: its `codeBoxes` says how many boxes
-    the screen shows and which ones the step named; send the step again with all of them.
+    send the step. A step field never carries `codeBox` or any box number: the host reads each
+    box's place from the page, so send only `selector` and `slot` for each box. The host asks
+    once, types one character into each and submits only once each box holds one. A step that
+    names only some of the boxes, or names them out of order, comes back refused as
+    `code_boxes_incomplete`, typing nothing: its `codeBoxes` says how many boxes the screen shows
+    and which ones the step named; send the step again with all of them. When a code screen asks
+    the person to do something, such as call a number or approve in an app, prefer naming the
+    element with that instruction as the code field's `questionSelector`.
   - `slot: "date_of_birth"` for a date of birth, with `format`, how the field takes it, read from
     its placeholder, label, input mask or hint: `MM/DD/YYYY`, `DD/MM/YYYY`, `M/D/YYYY`,
     `D/M/YYYY`, `MM-DD-YYYY`, `DD-MM-YYYY`, `DD.MM.YYYY`, `YYYY-MM-DD`, `YYYY/MM/DD`, `MMDDYYYY`,
@@ -233,7 +247,9 @@ Guardian checks each step against the screen: that every field takes the kinds i
 submit is the right sign-in action, including a fieldless continuation or verification-method
 choice, and that a step without one advances by itself. The host checks that each control is unique
 and visible and that its frame, form actions and link destination are on the site or a configured
-sign-in origin. A refused step typed and sent nothing and spends no sign-in: fix it from the evidence.
+sign-in origin. A sign-in form whose own action is a script that does nothing (`javascript:`,
+`javascript:void(0)`, `javascript:;`) is the page's own submit, so the host judges it by where its
+fields sit. A refused step typed and sent nothing and spends no sign-in: fix it from the evidence.
 
 Sign-in pages are often slow, and the next screen can take a while to show. Wait for its field with
 a bounded readiness wait (such as `locator.waitFor` with a timeout of about 30 seconds) before you
@@ -248,6 +264,10 @@ Then read what the file lacks, such as a selector or form destination, with a re
 the host filled, not even to check it. If the host reports that its click of the submit failed after
 the fields filled, you may click that one submit yourself in an `explore`, and nothing else; the host
 counts a value as sent only once it sees the form go out carrying it, whoever clicked. If it reports `submit: refused`, never click it.
+If it reports `submit: blocked`, another element, such as a cookie banner (`blockedBy`), caught the
+click and nothing was sent: never click the submit yourself. Send the same `signInStep` again with
+the banner's own control, chosen as the core skill says, as `dismiss`; the host clicks it, then the
+submit, and types nothing again unless the dismiss emptied a field.
 If the site says a field was wrong, send `signInStep: { rejected: { slot: "password" } }`
 with the actual rejected slot at once. The host asks for corrections; never ask for substitute
 credentials yourself or send a rejected value again. A primary identifier or password rejection
@@ -319,9 +339,11 @@ signed-out flow cannot reach, corroborated by the live business example. Generic
 account chrome alone does not establish access to the caller's workflow. The signed-in marker you
 send is a separate check, of presence only (`auth.sign-in-check`): for it, a site-wide account menu
 or sign-out control is the right choice once `check_signed_in_marker` shows the signed-out page
-lacks it. Call `authenticate` with `signInStep: { signedIn: { selector } }`. When the landing page
+lacks it. <!-- pomerado:section auth.signed-in-page:start
+Call `authenticate` with `signInStep: { signedIn: { selector } }`. When the landing page
 shows no such marker, add `openPath`, the observed path of an account page that does, and the host
-opens it and checks there; never guess a protected route. The host checks that the submitted
+opens it and checks there; never guess a protected route.
+pomerado:section auth.signed-in-page:end --> The host checks that the submitted
 sign-in's recorded controls/form no longer show a password entry awaiting sign-in; unrelated
 password controls on the account page do not fail this check. It also checks that this sign-in
 submitted the login's identifier with its password, code or protected approval, then marks it
@@ -378,10 +400,12 @@ shows.
 - Never send a `urlPath` alone on a single-page app, or for a page the site also serves signed
   out; never the login page's path.
 - Test it with `check_signed_in_marker` and choose another until every check passes:
-  `signedOutSnapshot` absent (the host saved the page it saw before the sign-in sent anything, and
+  <!-- pomerado:section auth.marker-checks:start
+`signedOutSnapshot` absent (the host saved the page it saw before the sign-in sent anything, and
   your explores from before signing in count too), `signedInNow`, `freshLoad` (the host opens
   `openPath`, else `urlPath`, else the site's front page in a new tab) and `secondPage`. Your own
-  tab stays as it was. When it reports the signed-out page unchecked, as for a browser that
+  tab stays as it was.
+pomerado:section auth.marker-checks:end --> When it reports the signed-out page unchecked, as for a browser that
   started from a saved profile, compare the marker yourself against what a signed-out visitor
   sees.
 - The host repeats these checks when you send `signedIn`. It refuses a marker a signed-out page

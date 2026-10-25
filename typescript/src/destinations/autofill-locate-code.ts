@@ -94,13 +94,139 @@ export const questionTextCode = `(element) => {
 }`;
 
 /**
- * Page code: `locate` finds a selector's one visible match across the primary tab's frames. Where
- * it sits is read from the element itself, never from the frame the search started in: its own
- * frame (or the first one above it with a real URL) and its document's origin. It also reads every
- * form action and method it could submit with, its link destination, shape and words that label
- * it, never its value. Every URL leaves only as `where` reads it; the destinations as found stay
- * in the page (`destinations`), for the guard. For the host's evidence it says which frame matched
- * and how many it searched, or, with no one visible match, each frame that matched and how often.
+ * Page code: the shape of a form control element (`FormControlShape`), the function
+ * `formControlShape` in `formControlsCode` evaluates, word for word, so a step call reads it in the
+ * same evaluation as the control's other properties. A unit test keeps the two the same.
+ */
+const controlShapeCode = String.raw`(element) => {
+    const popup = element.getAttribute("aria-haspopup");
+    if (element instanceof HTMLSelectElement) return "select";
+    // A date picker's popup is a dialog or grid: the field still takes typing.
+    if (popup === "dialog" || popup === "grid") return element instanceof HTMLInputElement ? "text" : "other";
+    if (element.getAttribute("role") === "combobox" || popup === "listbox" || popup === "true" || popup === "menu")
+      return "combobox";
+    if (element instanceof HTMLInputElement && element.type === "date") return "date";
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable)
+      return "text";
+    return "other";
+  }`;
+
+/**
+ * Page code: whether an address is a script that does nothing, the only script action a sign-in
+ * form may have: `javascript:`, `javascript:;`, `javascript:void(0)` or `javascript:void 0`, with
+ * or without a closing semicolon, read as the browser runs it (the address as parsed, its body
+ * percent-decoded). The scheme may be in any case, and whitespace may stand only between the
+ * body's words and signs, where script reads it as whitespace: one inside `void` could split it into
+ * two statements, the second a call of the page's own function. `void` is lowercase, as script
+ * reads it; `Void(0)` calls a function of the page's. Any other body runs what it says, so it is
+ * judged as any action off the site; one that does not decode, too. The step call and the
+ * submission guard both judge by it.
+ */
+export const noOpScriptCode = String.raw`(address) => {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "javascript:") return false;
+  let body;
+  try {
+    body = decodeURIComponent(url.href.slice("javascript:".length));
+  } catch {
+    return false;
+  }
+  return /^\s*(?:void\s*\(\s*0\s*\)|void\s+0)?\s*;?\s*$/.test(body);
+}`;
+
+/**
+ * Page code: what a step call reads of one control it found (`readControls`): every form action
+ * and method it could submit with, its form's own action first, whether that action is a script
+ * that does nothing (`scriptAction`, `noOpScriptCode`), its link destination, whether it is
+ * disabled, inert or editable, whether it is empty, its shape and the words that label it, never
+ * its value.
+ */
+const controlReadCode = `(element) => {
+  const associated =
+    "form" in element && element.form instanceof HTMLFormElement ? element.form : element.closest("form");
+  // Read through the form's own getters: a control named "action", "method" or "elements"
+  // shadows the property of that name on the form itself.
+  const formProperty = (name) =>
+    Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, name).get.call(associated);
+  // The form's own action comes first.
+  const actions = associated ? [formProperty("action")] : [];
+  const methods = associated ? [formProperty("method")] : [];
+  // Whether the form's own action is a script that does nothing, which sends nothing by itself.
+  const scriptAction = associated !== null && (${noOpScriptCode})(actions[0]);
+  // Whether the form or a control in it says GET itself: a bare form reads as GET too, but a
+  // page that submits it with code sends nothing in an address.
+  let explicitGet = associated ? (associated.getAttribute("method") ?? "").trim().toLowerCase() === "get" : false;
+  // A link-style sign-in action may navigate instead of submitting its containing form.
+  const href = element instanceof HTMLAnchorElement ? element.getAttribute("href") : null;
+  if (href !== null) actions.push(new URL(href, document.baseURI).href);
+  for (const control of associated ? Array.from(formProperty("elements")) : [element]) {
+    const action = control.getAttribute("formaction");
+    if (action !== null) actions.push(new URL(action, document.baseURI).href);
+    const method = control.getAttribute("formmethod");
+    if (method !== null) methods.push(method.toLowerCase());
+    if (method !== null && method.trim().toLowerCase() === "get") explicitGet = true;
+  }
+  // The method a submission with it as the submitter goes by, as the browser reads it: a submit
+  // button's own formmethod, else its form's. Another control's, such as a "Forgot password"
+  // button's, says nothing of it.
+  const submitter =
+    (element instanceof HTMLButtonElement && element.type === "submit") ||
+    (element instanceof HTMLInputElement && ["submit", "image"].includes(element.type));
+  const submitMethod = associated
+    ? submitter && element.hasAttribute("formmethod")
+      ? element.formMethod
+      : formProperty("method")
+    : null;
+  // Disabled, which a page may undo once the fields hold input, and inert, which takes no
+  // interaction at all, as an inactive or background form does. Page code can redefine what
+  // these read, so the submit call reads whether the submit is disabled again through Playwright.
+  const disabled = element.matches(":disabled") || element.closest('[aria-disabled="true"]') !== null;
+  const inert = element.closest("[inert]") !== null;
+  const editable =
+    (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+    !disabled && !inert && !element.readOnly;
+  // Only whether it holds a value leaves the page, never the value.
+  const empty =
+    (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+    element.value === "";
+  ${controlNamingCode}
+  const naming = controlNaming(element);
+  return {
+    disabled,
+    inert,
+    shape: (${controlShapeCode})(element),
+    target: { documentOrigin: self.origin, actions, scriptAction, methods, explicitGet, submitMethod, editable, empty },
+    described: {
+      role: element.getAttribute("role"),
+      formMethod: methods.join(",") || null,
+      tag: element.tagName.toLowerCase(),
+      type: naming.type,
+      name: naming.name,
+      id: naming.id,
+      autocomplete: naming.autocomplete,
+      inputmode: element.getAttribute("inputmode"),
+      label: naming.label,
+      placeholder: naming.placeholder,
+      ariaLabel: naming.ariaLabel,
+      text: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? null : element.textContent,
+    },
+  };
+}`;
+
+/**
+ * Page code: `locate` finds a selector's one visible match across the primary tab's frames, and
+ * `readControls` reads every control a call found. Where each sits is read from the element itself,
+ * never from the frame the search started in: its own frame (or the first one above it with a real
+ * URL) and its document's origin. It also reads every form action and method it could submit with,
+ * its link destination, shape and words that label it, never its value (`controlReadCode`). Every
+ * URL leaves only as `where` reads it; the destinations as found stay in the page
+ * (`destinations`), for the guard. For the host's evidence it says which frame matched and how
+ * many it searched, or, with no one visible match, each frame that matched and how often.
  */
 const findCode = `${clipCode}
 // Questions are explicit observed locators, never inferred from names or routes.
@@ -147,96 +273,100 @@ const locate = async (selector, questionSelector) => {
   const ancestors = [];
   for (let up = owner ? owner.parentFrame() : null; up && up.parentFrame(); up = up.parentFrame())
     if (!["about:blank", "about:srcdoc"].includes(up.url())) ancestors.push(where(up.url(), false));
-  const found = await locator.evaluate((element) => {
-    const associated =
-      "form" in element && element.form instanceof HTMLFormElement ? element.form : element.closest("form");
-    // Read through the form's own getters: a control named "action", "method" or "elements"
-    // shadows the property of that name on the form itself.
-    const formProperty = (name) =>
-      Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, name).get.call(associated);
-    const actions = associated ? [formProperty("action")] : [];
-    const methods = associated ? [formProperty("method")] : [];
-    // Whether the form or a control in it says GET itself: a bare form reads as GET too, but a
-    // page that submits it with code sends nothing in an address.
-    let explicitGet = associated ? (associated.getAttribute("method") ?? "").trim().toLowerCase() === "get" : false;
-    // A link-style sign-in action may navigate instead of submitting its containing form.
-    const href = element instanceof HTMLAnchorElement ? element.getAttribute("href") : null;
-    if (href !== null) actions.push(new URL(href, document.baseURI).href);
-    for (const control of associated ? Array.from(formProperty("elements")) : [element]) {
-      const action = control.getAttribute("formaction");
-      if (action !== null) actions.push(new URL(action, document.baseURI).href);
-      const method = control.getAttribute("formmethod");
-      if (method !== null) methods.push(method.toLowerCase());
-      if (method !== null && method.trim().toLowerCase() === "get") explicitGet = true;
+  return { frame, locator, handle, owner, ancestors, questionSelector, frames: frames.length };
+};
+// The controls found in each frame, in the order found.
+const frameGroups = (founds) => {
+  const groups = new Map();
+  for (const found of founds) groups.set(found.frame, [...(groups.get(found.frame) ?? []), found]);
+  return [...groups.values()];
+};
+// One evaluation per frame reads every control found there, so a call sees them all as they were
+// at one moment: a page that changes several at once, as a form that locks or unlocks every field
+// does, never reads as half changed. The first control's locator runs it, so it waits for that
+// control as any read does, and the others go in as the handles found. When the page replaced one
+// of those since it was found, or loaded a new document, which no handle found before reaches,
+// each control there is read through its own locator, which finds it as the page now shows it. A
+// read that fails then fails the call. A wait for the first control that runs out ends the call
+// at once, as that control's own read would.
+const readControls = async (founds) => {
+  const read = { timeout: ${elementReadMs} };
+  const reads = new Map();
+  for (const group of frameGroups(founds)) {
+    const [first, ...others] = group;
+    let values = null;
+    try {
+      values = await first.locator.evaluate((element, others) => {
+        if (!others.every((other) => other.isConnected)) return null;
+        const readControl = ${controlReadCode};
+        return [element, ...others].map(readControl);
+      }, others.map((found) => found.handle), read);
+    } catch (error) {
+      if (error?.name === "TimeoutError") throw error;
     }
-    // The method a submission with it as the submitter goes by, as the browser reads it: a submit
-    // button's own formmethod, else its form's. Another control's, such as a "Forgot password"
-    // button's, says nothing of it.
-    const submitter =
-      (element instanceof HTMLButtonElement && element.type === "submit") ||
-      (element instanceof HTMLInputElement && ["submit", "image"].includes(element.type));
-    const submitMethod = associated
-      ? submitter && element.hasAttribute("formmethod")
-        ? element.formMethod
-        : formProperty("method")
-      : null;
-    // Disabled, which a page may undo once the fields hold input, and inert, which takes no
-    // interaction at all, as an inactive or background form does. Page code can redefine what
-    // these read, so the submit call reads whether the submit is disabled again through Playwright.
-    const disabled = element.matches(":disabled") || element.closest('[aria-disabled="true"]') !== null;
-    const inert = element.closest("[inert]") !== null;
-    const editable =
-      (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
-      !disabled && !inert && !element.readOnly;
-    // Only whether it holds a value leaves the page, never the value.
-    const empty =
-      (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
-      element.value === "";
-    ${controlNamingCode}
-    const naming = controlNaming(element);
-    return {
-      disabled,
-      inert,
-      target: { documentOrigin: self.origin, actions, methods, explicitGet, submitMethod, editable, empty },
-      described: {
-        role: element.getAttribute("role"),
-        formMethod: methods.join(",") || null,
-        tag: element.tagName.toLowerCase(),
-        type: naming.type,
-        name: naming.name,
-        id: naming.id,
-        autocomplete: naming.autocomplete,
-        inputmode: element.getAttribute("inputmode"),
-        label: naming.label,
-        placeholder: naming.placeholder,
-        ariaLabel: naming.ariaLabel,
-        text: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? null : element.textContent,
+    if (values === null) {
+      values = [];
+      for (const found of group) values.push(await found.locator.evaluate(${controlReadCode}, undefined, read));
+    }
+    group.forEach((found, index) => reads.set(found, values[index]));
+  }
+  const controls = [];
+  for (const found of founds) {
+    const { frame, locator, owner, ancestors, questionSelector, frames } = found;
+    const read = reads.get(found);
+    const described = Object.fromEntries(Object.entries(read.described).map(([key, value]) => [key, key === "tag" ? value : clip(value)]));
+    const question = await readQuestion(frame, questionSelector);
+    if (question !== undefined) described.questionText = question.text;
+    // A recorded question with no one visible match, or none the host reads, is said so.
+    else if (questionSelector != null) described.questionUnread = true;
+    const control =
+      (read.disabled || read.inert) && (read.shape === "select" || read.shape === "combobox") ? "other" : read.shape;
+    controls.push({
+      locator,
+      question,
+      inert: read.inert,
+      target: {
+        ...read.target,
+        ownerUrl: owner ? where(owner.url(), false) : null,
+        ancestors,
+        actions: read.target.actions.map((action) => where(action, true)),
+        control,
       },
-    };
-  }, undefined, read);
-  const described = Object.fromEntries(Object.entries(found.described).map(([key, value]) => [key, key === "tag" ? value : clip(value)]));
-  const question = await readQuestion(frame, questionSelector);
-  if (question !== undefined) described.questionText = question.text;
-  // A recorded question with no one visible match, or none the host reads, is said so.
-  else if (questionSelector != null) described.questionUnread = true;
-  const shape = await formControlShape(locator, read);
-  const control =
-    (found.disabled || found.inert) && (shape === "select" || shape === "combobox") ? "other" : shape;
-  return {
-    locator,
-    question,
-    inert: found.inert,
-    target: {
-      ...found.target,
-      ownerUrl: owner ? where(owner.url(), false) : null,
-      ancestors,
-      actions: found.target.actions.map((action) => where(action, true)),
-      control,
-    },
-    destinations: found.target.actions,
-    described,
-    located: { frameUrl: where(frame.url(), false), frames: frames.length },
+      destinations: read.target.actions,
+      described,
+      located: { frameUrl: where(frame.url(), false), frames },
+    });
+  }
+  return controls;
+};
+// The controls found before one the call could not find, read through the handles found with no
+// wait, as each was read when found: one the page took away, or whose document is gone, is
+// skipped, and a read that fails fails the call. A frame's controls are read in one evaluation,
+// which throws when one of them is in a document the frame no longer shows; each is then read
+// alone, so only the ones whose document is gone are skipped.
+const checkReads = async (founds) => {
+  const readFails = (element, others) => {
+    const readControl = ${controlReadCode};
+    for (const each of [element, ...others]) {
+      if (!each.isConnected) continue;
+      try {
+        readControl(each);
+      } catch {
+        return true;
+      }
+    }
+    return false;
   };
+  for (const group of frameGroups(founds)) {
+    const [first, ...others] = group;
+    let failed = await first.handle.evaluate(readFails, others.map((found) => found.handle)).catch(() => null);
+    if (failed === null)
+      for (const found of group) {
+        failed = await found.handle.evaluate(readFails, []).catch(() => false);
+        if (failed) break;
+      }
+    if (failed) throw new Error("A control the call found could not be read");
+  }
 };
 `;
 

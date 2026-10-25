@@ -26,6 +26,7 @@ import {
 import { EventUnavailable } from "../../src/runtime/errors.js";
 import { configureSiteIdentity } from "../../src/runtime/same-site.js";
 import { markedUpstreamPolicy, tenantPolicyCopies } from "../support/tenant-policy.js";
+import { conversationOf, instructionsOf } from "../support/guardian-requests.js";
 
 const makeSourceReader = (root: string) =>
   makeSourceInspector(
@@ -530,8 +531,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
   const reviewer = (upstreamPolicy: string) =>
     makeOpenAIReviewer(upstreamPolicy, false, { executionEnvironment: nativeExecutionEnvironment });
   const modelInput = (requests: readonly ModelRequest[]): unknown => {
-    const input = requests[0]?.input;
-    const [message] = Array.isArray(input) ? input : [];
+    const [message] = conversationOf(requests[0]);
     const content = message !== undefined && "content" in message ? message.content : undefined;
     if (typeof content !== "string") throw new Error("Guardian input is not one text message");
     return JSON.parse(content);
@@ -548,7 +548,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     await Effect.runPromise(
       makeGuardian(reviewer(markedUpstreamPolicy)).review(pending, readEntrypoint),
     );
-    const copies = requests.map((request) => tenantPolicyCopies(request.systemInstructions ?? ""));
+    const copies = requests.map((request) => tenantPolicyCopies(instructionsOf(request)));
     expect(copies).toEqual([1, 1]);
   });
 
@@ -588,10 +588,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     );
     const sentence =
       "The submit must be an observed control that submits the named fields or is necessary to this authorized sign-in,";
-    for (const policy of [
-      requests[0]?.systemInstructions ?? "",
-      guardianExecutionPolicy(otherHost),
-    ]) {
+    for (const policy of [instructionsOf(requests[0]), guardianExecutionPolicy(otherHost)]) {
       expect(policy).toContain(sentence);
       expect(policy).not.toContain("enabled control");
     }
@@ -611,7 +608,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     const sentence =
       "slot private_answer must be the answer field of a security question the screen shows, and its questionSelector, when present, that question's own text; never private_answer on any other field.";
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ])
@@ -632,7 +629,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     const rule =
       "into the fields the step names and clicks the step's submit, or presses its submitKey. The host fills a code, recovery_code or private_answer slot only after you allow the step, from a saved value or by asking the owner then. So allow such a step without an earlier code or answer. Judge it against the screen the file shows for it.";
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ])
@@ -656,11 +653,47 @@ describe("OpenAI reviewer policy and trusted authority", () => {
       "A host incident in a step result, such as an observation_gap, is a note about the host's recording, never by itself a reason to stop live probes or to tell the agent to report it. It leaves that execution possibly dispatched, and the rules here on possible writes still apply.",
     ];
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ])
       for (const sentence of sentences) expect(policy).toContain(sentence);
+  });
+
+  // A public site's own button can log each query it runs, with a generated name, for anyone
+  // viewing its data. Guardian allowed a read's browser steps that fire it, then denied its HTTP
+  // version as a write once the request body showed the record. The write rule now settles it.
+  // The query itself is the record's content, so the rule names what it may not hold instead of
+  // saying "none of the caller's data", which the off-site rule reads as the submitted input too.
+  it("tells Guardian a public site's own record of a view is not the caller's write", async () => {
+    const requests = readThenDecide({
+      outcome: "allow",
+      rationale: "Controlled source was read.",
+      action: "read",
+    });
+    await Effect.runPromise(
+      makeGuardian(reviewer(markedUpstreamPolicy)).review(pending, readEntrypoint),
+    );
+    const anchor =
+      "So is the same save sent the same way, a PUT or POST included, by a read's HTTP version before its query.";
+    const sentence =
+      "A record a public site creates for itself whenever anyone views or queries its data, such as a query log, saved-search id or view counter, that the site's own page fires for that read, needs no sign-in, and holds nothing of the caller's beyond the query or view itself (no personal details, account data or owner's answer), is not a write by the caller; judge the step as the read it serves.";
+    for (const policy of [
+      instructionsOf(requests[0]),
+      guardianExecutionPolicy(otherHost),
+      guardianExecutionPolicy(nativeExecutionEnvironment),
+    ]) {
+      // It sits in the paragraph that classifies writes, right after the search-state save rule.
+      const writeRule =
+        policy.split("\n").find((line) => line.startsWith("Classify actual website effects")) ??
+        "";
+      expect(writeRule).toContain(`${anchor} ${sentence} `);
+    }
+    // The action label agrees, beside its pointer to the signed-out session state.
+    const input = modelInput(requests) as { trusted_review: { policy: string } };
+    expect(input.trusted_review.policy).toContain(
+      "Changing a signed-out session's own state, as the execution policy lists it, is a read. So is a public site's own record of a view, as the execution policy says.",
+    );
   });
 
   // Guardian escalated example runs because it could not read an SDK helper the source imports,
@@ -677,7 +710,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     const sentence =
       "Use the exact listed path. The SDK a source imports from runtime/index.js or pomerado/runtime, such as defineOperation, CalendarDate and formControlsCode, is trusted host code: judge what the source does with it, and never escalate or deny only because an SDK file is unavailable to read_source.";
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ])
@@ -698,7 +731,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     const sentence =
       "When that write's step shows its commit request went through, with a 2xx or 3xx status and no error after it, reading the page as it stands is enough for the read-back, but it is never the only read-back allowed. Only a write the review found not_done may be done again.";
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ])
@@ -719,7 +752,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     const sentence =
       "Leaving an optional field empty or at the page's default is not inventing it. A safety default is not inventing a choice either: turning off a preselected option whose only effect is sharing the caller's data with another company, such as a partner comparison that opens or sends the search to another site, opting into tracking or analytics beyond what the site needs to work, or subscribing the caller to marketing communications, needs no caller input or answer. Keeping such an option on is what needs a reason: when the page evidence shows one on and the source submits without turning it off, deny and name it, unless trusted intent, an answer or submitted_call.input asks to keep it, or the site refuses to submit with it off. A safety default never covers an option that changes what the caller gets, such as which results come back, a seat, a room or a price, or who receives a message the caller asked to send.";
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ])
@@ -740,7 +773,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
     const sentence =
       "Accepting the terms a site requires to finish the requested action, such as a required \"I agree\" box at checkout or a notice that signing in accepts the site's terms, is part of that action and needs no other authority. Terms the action doesn't require, such as a partner's terms or a marketing consent, are not.";
     for (const policy of [
-      requests[0]?.systemInstructions ?? "",
+      instructionsOf(requests[0]),
       guardianExecutionPolicy(otherHost),
       guardianExecutionPolicy(nativeExecutionEnvironment),
     ]) {
@@ -861,7 +894,7 @@ describe("OpenAI reviewer policy and trusted authority", () => {
           addedPrivateSuffixes: ["apps.example.test"],
         },
       ]);
-      expect(requests[0]?.systemInstructions ?? "").toContain(
+      expect(instructionsOf(requests[0])).toContain(
         "except a host the list gives a registrable domain of its own",
       );
     } finally {

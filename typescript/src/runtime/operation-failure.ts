@@ -90,8 +90,10 @@ const offersNone = (detail: unknown) => {
 /**
  * The site refused a caller's value, such as a past date or an unknown airport code. It is the
  * caller's to correct, so the run fails as `InvalidInput`. Scripts throw it as
- * `errors.InvalidInput`, never for a page or control that changed. When the value is not among
- * the choices the page offers, the script names the input and lists them:
+ * `errors.InvalidInput`, never for a page or control that changed, except for a secret field no
+ * question may ask, such as a card number, that a step's first click showed without saving
+ * anything (`blockingRequiredFields` with `unaskable: true`). When the value is not among the
+ * choices the page offers, the script names the input and lists them:
  * `new errors.InvalidInput(message, { field: "size", available: ["One Size"] })`. The caller then
  * picks one of them, so nothing asks it for a replacement. A message that starts
  * "Caller input error:" marks an obvious refusal: the input alone breaks a rule of the task,

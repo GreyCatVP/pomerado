@@ -1,5 +1,5 @@
 import type { AutofillSignedInCheck } from "../destinations/autofill-step.js";
-import { sessionOnPage } from "./session-sign-in.js";
+import { placeOf, sessionOnPage } from "./session-sign-in.js";
 
 /** Whether a page is neither a recorded screen nor the entry: the session went past the sign-in. */
 export const leftSignInScreens = (
@@ -7,20 +7,16 @@ export const leftSignInScreens = (
   entryUrl: string,
   url: string | undefined,
 ) => {
-  const pageOf = (value: string | undefined) => {
-    const at = URL.parse(value ?? "");
-    return at === null ? undefined : `${at.origin}${at.pathname}`;
-  };
-  const here = pageOf(url);
-  return here !== undefined && !onScreens(here) && here !== pageOf(entryUrl);
+  const here = placeOf(url);
+  return here !== undefined && !onScreens(here) && here !== placeOf(entryUrl);
 };
 
 /** How long a page off the recorded screens must stay put before a sign-in reads it as its landing. */
 export const landingSettleMs = 1_500;
 /** The page's address when it is none of the recorded screens. */
 export const offScreens = (onScreens: (page: string) => boolean, url: string | undefined) => {
-  const at = URL.parse(url ?? "");
-  return at === null || onScreens(`${at.origin}${at.pathname}`) ? undefined : url;
+  const here = placeOf(url);
+  return here === undefined || onScreens(here) ? undefined : url;
 };
 /** A page off the recorded screens and since when it showed. */
 export type OffScreens = { readonly url: string; readonly since: number };

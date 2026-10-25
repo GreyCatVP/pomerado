@@ -270,3 +270,65 @@ describe("card questions in a script", () => {
     });
   });
 });
+
+describe("a site-field question", () => {
+  // A checkout that adds a required field once earlier answers are in, such as the engraving
+  // text after the caller chose an item that is engraved. Its label comes from the page.
+  const declared: ScriptQuestionDeclarations = { note, extra: { type: "site_field" } };
+  const label = "Engraving text";
+  const options = [
+    { value: "Initials", label: "Initials" },
+    { value: "Full name", label: "Full name" },
+  ];
+
+  it("asks a text field by the page's label, and a select by its label and options", () => {
+    const text = requestFor(declared, { extra: { label } });
+    expect(text.questions).toEqual([{ id: "extra", type: "text", prompt: label }]);
+    expect(asksAsDeclared(text, declared)).toBe(true);
+    const choice = requestFor(declared, { extra: { label: "Engraving", options } });
+    expect(choice.questions).toEqual([
+      {
+        id: "extra",
+        type: "choice",
+        prompt: "Engraving",
+        options: [
+          { id: "o1", label: "Initials" },
+          { id: "o2", label: "Full name" },
+        ],
+      },
+    ]);
+    expect(asksAsDeclared(choice, declared)).toBe(true);
+  });
+
+  it("refuses a site-field ask of another kind, own words, a bound or an over-long label", () => {
+    const text = requestFor(declared, { extra: { label } });
+    const [asked] = text.questions;
+    if (asked === undefined) throw new Error("No question asked");
+    const as = (question: Record<string, unknown>) =>
+      asksAsDeclared({ ...text, questions: [{ ...asked, ...question } as never] }, declared);
+    expect(as({ type: "secret", secretKind: "private_text" })).toBe(false);
+    expect(as({ type: "confirm" })).toBe(false);
+    expect(as({ type: "multi_choice", options: [{ id: "o1", label: "A" }], minSelections: 1, maxSelections: 1 })).toBe(false);
+    expect(as({ type: "credential", fields: "password", reason: "missing_credentials", allowSave: false, siteOrigin: "https://example.com" })).toBe(false);
+    expect(as({ maxLength: 10 })).toBe(false);
+    expect(as({ type: "choice", options: [{ id: "o1", label: "A" }], allowOther: true })).toBe(false);
+    expect(as({ type: "choice", options: [{ id: "o1", label: "A" }], allowNote: true })).toBe(false);
+    expect(as({ prompt: "l".repeat(256) })).toBe(true);
+    expect(as({ prompt: "l".repeat(257) })).toBe(false);
+  });
+
+  it("still refuses an ordinary undeclared ask, and an ordinary question asked by another prompt", () => {
+    const text = requestFor(declared, { extra: { label } });
+    expect(asksAsDeclared({ ...text, questions: [{ id: "other", type: "text", prompt: label }] }, declared)).toBe(false);
+    expect(asksAsDeclared({ ...text, questions: [{ id: "note", type: "text", prompt: label }] }, declared)).toBe(false);
+    expect(asksAsDeclared(text, { note })).toBe(false);
+  });
+
+  it("is read from a draft's literal declaration", () => {
+    const source = operation(
+      `{name:"order",input:Schema.Unknown,output:Schema.Unknown,questions:{extra:{type:"site_field"}}}`,
+    );
+    expect(draftQuestionDeclarations("src/tool.mjs", source)).toEqual({ extra: { type: "site_field" } });
+    expect(draftQuestionDeclarationFailure("src/tool.mjs", source)).toBeUndefined();
+  });
+});

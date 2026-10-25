@@ -39,71 +39,58 @@ Never write, sign or parse a cursor yourself, and never put page text, a secret 
 value into a position; row keys are hashed for you. A cursor's position is readable by whoever
 holds it, so it holds only the site's own link, token or scope and the numbers to reach the rows.
 
-## Read the page with `readList`
+## Read the page with the pager
 
-`readList(list, reader)` does the paging; you write only the site actions. It returns
-`{ rows, output }`: return `rows` as the list and spread `output` into the result. The reader has
-`keyOf`, `promoted` when the site marks rows sponsored (`(row) => row.sponsored`), and three
-functions, each one site action followed by a read of the first `count` rows,
-returning a segment: `{ rows, more, hasNext }`, plus `href`, `token`, `scope`, `totalResults` or
-`context` when the site gives them. With `promoted`, `readList` drops a sponsored copy of an item
-the rows it read show unpromoted, or an earlier page returned, and never counts it as a change.
+`readList(list, reader)` does the paging across calls, and the runtime's pager does the site
+actions: paste `paginationCode` after `waitCode`, and pass `readList` a
+`pagedListReader({ mechanism, execute, setup, start, row, keyOf, remainingMs })`. `setup` declares
+`const pager = listPager({ rows, key, fields, empty })`: the locator for every row, the row's key
+and values as `waitForRows` takes them, and the site's own empty message. `start` opens the list as
+the first call always does, such as running the search. `readList` returns `{ rows, output }`:
+return `rows` as the list and spread `output` into the result. `references/pager.ts` is the
+pattern.
 
-- `open(position, count)` reaches where this call starts. With no position it starts the list as
-  the first call always does, such as running the search. With a position, the host has already
-  started the run as it started the first call and signed in when the tool signs in; `open` then
-  follows the position to its segment.
-- `more(segment, count)` reads the open segment again for more of its rows, without navigating or
-  acting.
-- `next(segment, count)` moves on to the next segment: the next site page, the list API's next
-  response, or one more "Load more" click or scroll.
+The pager finds the list's page numbers, its Next (one control even when the site repeats it above
+and below the list), a "Load more" control or a scroll, and steps it. It judges each step by what
+changed: the rows' keys, new rows or the empty message, never a sleep. It reads the rows with
+`waitForRows`, and takes the site's total from its summary only when the page agrees with it. A
+later call starts the list again, then opens the site's own link to the cursor's page and checks
+that it shows that page (pass `sameList` to check the query too), else goes there by the page
+numbers, or replays the steps. Never edit a page number or offset into a URL yourself.
 
-A segment is one site page (`pages`, `next_link`), one API response (`api`), or the whole list as
-it stands after some steps (`append`, `scroll`) or on its one page (`offset`). `rows` start at the
-segment's first row; for `append` and `scroll` they are the whole list, so `count` counts it all.
-`more` says the segment shows rows past the ones read, and `hasNext` that another segment
-follows. Pass `remainingMs` so a call returns what it read before the run's time runs out.
+While building, return `await pager.detect()` after `start` to see the mechanism and controls it
+finds, and name that mechanism in `startList` and `pagedListReader`, which hands it to the pager,
+so a short list that shows no control still pages that way. Name a control in `listPager`
+(`next`, `loadMore`, `summary`, `controls`, `current`, `end` and the rest) only when the pager
+picks the wrong one, and replace one judgement with a hook (`step`, `hasNext`, `pageNumber`,
+`readTotal`, `echo`) only on a site it misreads. A pager failure names its reason:
+`pager_ambiguous` when two Next controls lead to different pages (name the list's own),
+`pager_stalled` when a step changed nothing twice while the page shows more rows,
+`pager_no_control`, `pager_step_timeout` or `pager_page_unreachable`. Within one call, `pager.find(match)` walks to the page that holds a wanted
+record and `pager.collect({ limit, until })` gathers rows each once, for a tool that needs one
+record or a bounded set rather than a page per call.
+
+Name `api` when the page fetches rows from its own list endpoint with an offset, page or cursor
+parameter, and write the reader's three functions yourself, as for a list the pager cannot step:
+`open(position, count)` reaches where the call starts, `more(segment, count)` reads more of the
+open segment without acting, and `next(segment, count)` moves to the next segment, each returning
+`{ rows, more, hasNext }` plus `href`, `token`, `scope`, `totalResults` or `context` when the site
+gives them. For `api`, `open` opens the results page, then calls the endpoint inside the page with
+the position's `token`, or, for a position with only a `page`, fetches the responses up to that
+page; keep the visible mechanism as the fallback when the endpoint refuses or changes.
+`references/pagination.ts` writes these functions by hand.
 
 `readList` asks for exactly the rows the window needs, so the call's `limit` and the site's page
 size need not match. With `limit` 20 and 30 rows per site page, call one returns site page one's
-rows 1 to 20; call two opens site page one again, skips to after row 20, returns rows 21 to 30,
-then site page two's rows 1 to 10, exactly 20; call three returns site page two's rows 11 to 30.
-With `limit` 50, one call spans two site pages, and a last page shorter than the window ends the
-list with `next_cursor` null. The next position names the segment that holds the last returned
-row and the offset after it there:
+rows 1 to 20; call two returns rows 21 to 30, then site page two's rows 1 to 10, exactly 20; call
+three returns site page two's rows 11 to 30. A last page shorter than the window ends the list with
+`next_cursor` null. Pass `remainingMs` so a call returns what it read before the run's time runs
+out.
 
-- `pages` and `next_link`: that site page's own link (`href`), as the browser showed it, its
-  number (`page`) and the offset. `open` opens the link and reads back that it still shows the
-  query, filters, sort and page; when it does not, it starts the list and follows the site's page
-  links or Next to that number. Never edit a page number or offset into a URL yourself.
-- `api`: the site's own token, page or offset that fetched that response (`token`, none for the
-  first), and the offset within it. `open` opens the results page, then calls the endpoint inside
-  the page with that token, or, for a position with only a `page`, fetches the responses up to
-  that page. Keep the visible mechanism as the fallback when the endpoint refuses or changes.
-- `append` and `scroll`: the fewest steps that load that row (`steps`) and its offset in the
-  list. `open` starts the list, then repeats the one action `steps` times, waiting for each step's
-  rows with `waitForRows`, the click or scroll as its `action`.
-- `offset`: the whole list is on one page; the position's `offset` is where the next window
-  starts.
-
-## Find how the site pages
-
-While building, scroll to the end of the list for a typical query and note the page links, a
-Next link, a "Load more" control, rows that appear as you scroll, and the requests that bring
-the next rows. Pick the first that fits, and name it as the mechanism: `api` when the page
-fetches rows from its own list endpoint with an offset, page or cursor parameter; `pages` or
-`next_link` for numbered page links or a Next link; `append` or `scroll` for a "Load more"
-control or rows that load as the list scrolls; `offset` when the whole list is on one page. If
-the URL gains a page parameter after a step, the site is paged: use `pages`. The host accepts
-only a site link on the tool's site.
-
-For `append` and `scroll`, the control gone or disabled after a step's rows arrived is the end of
-the list. A control that hides or disables while a step loads is not: when a step adds no
-identified rows, read once more without acting, and report `hasNext` false only if the rows still
-did not grow and the control is still gone or disabled. A list that stalls while the control is
-still offered has more: `readList` returns the rows read with `has_more` true and a position that
-continues, never a null next cursor. On a list that drops earlier rows as it scrolls, collect rows
-by key as they show. Never treat a repeated click as safe if it could submit or change anything.
+A "Load more" control that hides or disables while a step loads is not the end of the list, and a
+list that stalls while its control is still offered has more: the pager and `readList` keep
+`has_more` true with a position that continues. Never step a control whose click could submit or
+change anything.
 
 ## Changed lists
 
@@ -115,7 +102,7 @@ the previous segment: `readList` reads that segment by its page number when that
 call's reads, counting one read per page, since `open` reaches a page by its number by following
 Next from the first page. When neither shows that row or any remembered row, it starts over from
 the list's first segment in the same call, repeating rows rather than skipping any. So `open`
-must reach a position that has only a `page`, as the mechanisms below say. `list_changed` is
+must reach a position that has only a `page`, as the pager's reader does. `list_changed` is
 true when anything changed at or above that row: it moved from where the cursor saw it, because
 rows were inserted above it (rows the caller never gets) or rows it already got were removed; it
 is gone; or a remembered row came back. After a start over, or a page continued from a segment's
@@ -143,13 +130,6 @@ stopped (`no_progress`), so a caller paging until `has_more` is false still ends
 names that depth. When the site refuses its own link or token and the position cannot be
 rebuilt, throw `errors.InvalidInput` with `field: "cursor"` and `kind: "site_expired"`. Never
 return a position the tool could not follow.
-
-## Wait only for this page's rows
-
-Wait for the list's answer with `waitForOutcome`, then for the key fields of the first `count`
-rows with `waitForRows` (core skill): identifier, name and each value the request needs. Do not
-wait for rows outside the window, for the whole list to settle or for slots the site fills late; a
-slot with no identifier is a placeholder.
 
 ## Signed-in lists
 
@@ -180,8 +160,9 @@ that ends inside a site page and check that page two finishes that page and cont
 next. Reach a last page where a case you already run ends on one, such as the combined case's
 narrow filters, and check that `next_cursor` is null (testing skill). A signed-in read runs page
 two within its combined case when its example did not, and reports what it did not reach as
-untested. `references/pagination.ts` is a compiling pattern for a paged site with a Next link,
-and for a "Show more" list (`readRooms`), both on `readList`; their reads are site logic.
+untested. `references/pager.ts` is a compiling pattern on the pager; `references/pagination.ts`
+writes the reader by hand for a Next link and a "Show more" list (`readRooms`). Their selectors
+are site logic.
 <!-- pomerado:section pagination.cursor-scope:start
 
 ## Standalone cursor scope

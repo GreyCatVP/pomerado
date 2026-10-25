@@ -83,9 +83,17 @@ const offeredTools = async (host: Partial<MintDependencies>) => {
       observations: [],
     }).pipe(Effect.provideService(MintServices, dependencies)),
   );
+  // Every build sends every tool; the request's allowed_tools names those this build may call.
+  const choice: unknown = requests[0]?.modelSettings.providerData?.["tool_choice"];
+  const allowed =
+    typeof choice === "object" && choice !== null && "tools" in choice && Array.isArray(choice.tools)
+      ? new Set(choice.tools.map((tool: { readonly name?: string }) => tool.name))
+      : undefined;
   return new Map(
     (requests[0]?.tools ?? []).flatMap((tool) =>
-      tool.type === "function" ? [[tool.name, tool.description] as const] : [],
+      tool.type === "function" && (allowed === undefined || allowed.has(tool.name))
+        ? [[tool.name, tool.description] as const]
+        : [],
     ),
   );
 };

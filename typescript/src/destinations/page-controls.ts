@@ -1,9 +1,10 @@
 import { Schema } from "effect";
+import { accessibleNames } from "./accessible-name.js";
 
 /**
- * A control on the page as the minter reads it after a submit: its role, accessible name or
- * label, input type and state. Never its value, typed text or placeholder, which a site may fill
- * with what was typed.
+ * A control on the page as the minter reads it after a submit: its role, accessible name, input
+ * type and state. Never its value, typed text or placeholder, which a site may fill with what was
+ * typed.
  */
 export const PageControl = Schema.Struct({
   role: Schema.String,
@@ -50,6 +51,9 @@ export const pageControlTextLimit = 32_768;
  * field is never one. An alert is text a person sees: never one a pixel wide or tall, as a
  * screen reader's is, transparent, hidden or wholly off the page, and never one styled as a
  * success or a notice.
+ * A name is the control's accessible name as `accessibleNames` reads it, the name a `role=`
+ * selector matches, so words the page hides from assistive technology, such as a required mark,
+ * are not in it.
  * Names and roles come back as the page has them, never trimmed, collapsed or cut short, so the
  * host screens a typed value echoed in them whole before `presentControls` shortens them; a name
  * longer than `pageControlTextLimit` is null, and such a role is the element's implicit one. The
@@ -62,12 +66,7 @@ export const pageControlsCode = `const pageControls = async (alertsOnly = false)
     const raw = (value) => (typeof value === "string" && value.trim() !== "" ? value : null);
     // Text past the limit is dropped whole, never cut, so no part of a typed value escapes screening.
     const capped = (value) => (value !== null && value.length > textLimit ? null : value);
-    // A label's own words, without the text of any control inside it.
-    const words = (node) => {
-      const copy = node.cloneNode(true);
-      for (const field of copy.querySelectorAll("input,textarea,select")) field.remove();
-      return copy.textContent;
-    };
+    const accessibleName = (${String(accessibleNames)})();
     const buttonTypes = ["submit", "button", "reset", "image"];
     const roleOf = (element) => {
       const explicit = capped(raw(element.getAttribute("role")));
@@ -85,24 +84,15 @@ export const pageControlsCode = `const pageControls = async (alertsOnly = false)
       if (element instanceof HTMLAnchorElement) return "link";
       return element.tagName.toLowerCase();
     };
-    // The first source of a name that has words, as the page has it.
-    const sourceName = (element) => {
-      const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
-        .split(/\\s+/).map((id) => document.getElementById(id)).filter(Boolean);
-      if (labelledBy.length > 0) return raw(labelledBy.map(words).join(" "));
-      const aria = raw(element.getAttribute("aria-label"));
-      if (aria !== null) return aria;
-      const labels = "labels" in element && element.labels ? Array.from(element.labels) : [];
-      if (labels.length > 0) return raw(labels.map(words).join(" "));
-      // A button's own words: its text, or an input button's site-authored value or alt text.
-      if (element instanceof HTMLInputElement && buttonTypes.includes(element.type))
-        return raw(element.type === "image" ? element.getAttribute("alt") : element.getAttribute("value"));
-      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement))
-        return raw(words(element)) ?? raw(element.getAttribute("title"));
-      return raw(element.getAttribute("title"));
+    // The accessible name, or null when it has no words, is longer than the limit or cannot be
+    // read: never cut, and a name that cannot be read never costs the frame its other controls.
+    const nameOf = (element) => {
+      try {
+        return capped(raw(accessibleName(element)));
+      } catch {
+        return null;
+      }
     };
-    // The name, or null when it is longer than the limit: never cut, and never a later source's.
-    const nameOf = (element) => capped(sourceName(element));
     const selector = 'input:not([type="hidden"]), select, textarea, button, a[href], [role~="button"], [role~="link"], [role~="checkbox"], [role~="radio"], [role~="switch"], [role~="tab"], [role~="menuitem"], [role~="option"], [role~="textbox"], [role~="combobox"]';
     const found = alertsOnly ? [] : Array.from(document.querySelectorAll(selector));
     // Rank every control before keeping any: visible first, then enabled fields, required first.

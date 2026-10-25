@@ -12,6 +12,12 @@ bad value before the tool touches the site, and fail loudly whenever the run can
 the caller asked for. Never return results computed without a value the caller supplied, except
 an input that tailors the answer, which a read returns labeled with the value the site applied.
 
+Apply each caller input the way the site applies it, and only that. Don't add your own
+constraints between inputs, filter them, or swap in a value the caller didn't give; a write
+follows the site's preselected substitute only when the caller's own task asks for whatever the
+site ends up with (writes skill). For example, a store and a delivery ZIP that the site sets
+separately are both applied as given, even when they're far apart.
+
 1. Express in the input schema everything it can hold, so the host refuses a bad value before
    the script runs: each field's type, an enum of the site's full set of options when the
    options are fixed, a minimum and maximum for numbers, counts and lengths, a format such as a
@@ -21,50 +27,83 @@ an input that tailors the answer, which a read returns labeled with the value th
    naming the field and the rule. Such rules include:
    - an end date on or after its start date, and a check-out after its check-in;
    - a date the task rules out, such as a departure before today in its airport's time zone.
-     On a site with places in several time zones, use the place's zone when the tool knows it
-     before any site action, and otherwise refuse only a date that is past in every time zone,
-     such as one before yesterday in UTC (core skill);
-   - a count within the site's own limits, such as a party size or quantity the site caps,
-     found while building and stated in the message;
+     A date is past when it is before today in the site's time zone; UTC's date can be a day
+     ahead or behind. On a site with places in several time zones, use the place's zone, such
+     as a restaurant's or a departure airport's, when the tool knows it before any site action,
+     and otherwise refuse only a date that is past in every time zone, such as one before
+     yesterday in UTC;
+   - a count below one, or above the site's own limits, such as a party size or quantity the
+     site caps, found while building and stated in the message;
    - inputs that exclude each other, such as a store and a ZIP code where the site takes one;
    - at least one of a set the tool needs one of, such as a record's number or its name.
+
+   When the refusal is obvious, start the message with "Caller input error:" so the caller gets
+   it at once. It is obvious when the input alone breaks a rule of the task, as above, checked
+   before any site action. It is also obvious when the page itself refuses the value in its own
+   words, which the message quotes, or when the site's own lookup of a record's own key, such as
+   an order, ticket or item number, or the site's own link to that record, shows the site's
+   not-found or empty result. Never use that start for a breakage, which goes to repair: a URL
+   the tool built itself, a page whose layout or controls the tool no longer finds, or a lookup,
+   slider or list that hadn't loaded. Nor when a suggestion list or picker offered nothing, or a
+   write finds a day disabled without the page saying why. Prefer not starting a refusal of an
+   ambiguous value with it (below).
 3. Throw the error that matches what happened:
    - `InvalidInput`: the caller's value is wrong or the site does not offer it. It breaks a rule
      above, or is not among the options the page lists, such as a store missing from its
      picker. Pass `field`, and `available`, every option the page offers
-     as selectable, exactly as shown, whenever the page lists them. The caller corrects the
-     input and runs again.
+     as selectable, exactly as shown, whenever the page lists them. When the page refuses the
+     value with an error of its own, prefer passing as `field` the input that error belongs to,
+     matched by where the page puts it, such as the field or label it sits under, or the field
+     whose `aria-describedby` points at it, even when its words don't name the field. An error
+     that covers several inputs or none, such as a notice for the whole form, leaves `field`
+     out. The caller corrects the input and runs again. A write follows the site's preselected
+     substitute instead when the caller's own task asks for whatever the site ends up with
+     (writes skill).
    - `InputNotApplied`: the value is valid and the site offers it, but the page did not apply
      it after the tool's bounded retries. It ignored, reset or replaced the value, such as a
-     filter, sort or date, and the read-back shows its own default or another
-     value (core skill, "Configure, then read"). Throw
-     `new errors.InputNotApplied(message, { field, requested, applied, step, siteMessage })`
-     as the core skill says. A read, or a run that left the site untouched, may run again with
-     the same request. Not this error: a number on a stepped scale set to the nearest step
-     inside the caller's bound and returned as applied, a filter group the page disables
-     reported as not offered, or a broader choice that covers the value (core and search
-     skills).
+     filter, sort or date (on a write, a location or store too), and the read-back shows its own
+     default or another value (core skill, "Configure, then read"). Throw
+     `new errors.InputNotApplied(message, { field, requested, applied, step, siteMessage })`:
+     `field` the input's name, `requested` the caller's value, `applied` the value the page kept
+     as read back (left out when it shows none), `step` the tool's step that failed, such as
+     `set_location` or `apply_sort`, and `siteMessage` the page's own error when it showed one.
+     The run then fails and returns nothing computed without the caller's value. A read, or a
+     run that left the site untouched, may run again with the same request. On a write, check
+     it before the first commit step: a write that may already have changed the site still ends
+     as a possible change, never retried. Never let an answer to a question make a filter, sort,
+     date or other value that narrows the results optional or lookup-only.
+     `errors.LocationNotApplied` is an older name for the same error; write `InputNotApplied`.
+     Not this error: a number on a stepped scale set to the nearest step inside the caller's
+     bound and returned as applied, a filter group the page disables reported as not offered, a
+     broader choice that covers the value, a search query the site corrected or rewrote,
+     returned with `applied_query` and `query_corrected` (core and search skills), or a value a
+     write typed that the site rewrote before any save, kept and reported as the writes skill
+     says.
    - An input that tailors the answer, such as a location, store or vehicle, that the site still
-     won't apply, or a location it says it does not serve, on a read: not an error. Return what
-     the site showed with the value it applied beside the caller's and the site's message (core
-     skill, the input schema, "Inputs that tailor the answer").
-   - An option the page lists but greys out, such as a booked date or a sold-out size, on a
-     read: not an error. Return it unavailable, with the page's reason and alternatives, and the
-     run succeeds. A write throws `InvalidInput` with `available` instead.
+     won't apply, or a location it says it does not serve, on a read: not an error (core skill,
+     the input schema, "Inputs that tailor the answer").
+   - An option the page lists but greys out, such as a booked date or a sold-out size: not an
+     error on a read, `InvalidInput` with `available` on a write (core skill, "Configure, then
+     read"); a write follows the site's preselected substitute only when the caller's own task
+     asks for whatever the site ends up with (writes skill).
+   - A read whose site says no to the whole request, such as a product it no longer sells,
+     prefers returning that no as a declared refusal with `site_message` over throwing (writes
+     skill).
    - A write that declines the task because the caller's own limit or the page's state rules it
-     out, such as a total over the caller's price limit, an item out of stock, a variant the
-     page does not offer or a product number whose page names another item than the caller's:
-     `InvalidInput`, thrown before the mark of the commit it guards (writes skill). Pass
-     `field`, the input the caller would change, `kind`, the reason as a stable lowercase token
-     such as `over_price_limit`, `out_of_stock`, `variant_unavailable` or `item_mismatch`, and
-     `available` where the page lists choices, and give in the message the values the caller
-     needs, such as the total the page shows beside the limit. That is a refusal: the run
-     reports why, and that it changed nothing unless an earlier marked step ran, and the caller
-     can run again with corrected input. It differs from a failure, a tool that broke, and from
-     a write that may have changed the site and could not confirm it (both below). A write
-     returns a refusal as its output only when its output schema declares that refusal, and
-     only before its first mark (writes skill): any other output a write returns without
-     `verified()` reports a possible change.
+     out, such as a total over the caller's price limit or a product number whose page names
+     another item than the caller's: `InvalidInput`, thrown before the mark of the commit it
+     guards (writes skill). Pass `field`, the input the caller would change, `kind`, the reason
+     as a stable lowercase token such as `over_price_limit` or `item_mismatch`, and `available`
+     where the page lists choices, and give in the message the values the caller needs, such as
+     the total the page shows beside the limit. That is a refusal: the run reports why, and that
+     it changed nothing unless an earlier marked step ran, and the caller can run again with
+     corrected input. It differs from a failure, a tool that broke, and from a write that may
+     have changed the site and could not confirm it (both below). A write returns a refusal as
+     its output only when its output schema declares that refusal, and only where the writes
+     skill says one completes the run, such as before its first mark: any other output a write
+     returns without `verified()` reports a possible change.
+   - When the site itself says no to a valid request, such as an item out of stock or a variant
+     it does not offer, prefer the writes skill's refusal quoting the site.
    - A write whose steps may have changed the site and then failed or could not confirm the
      change: let it end as a possible change, which is never retried. Never throw
      `InvalidInput` or `InputNotApplied` to make it look untouched (writes skill).
@@ -72,9 +111,13 @@ an input that tailors the answer, which a read returns labeled with the value th
      never `InvalidInput` or `InputNotApplied`.
 
    Never pick another value for the caller, such as a near match, the page's default or the
-   first option, and never report a refused or unapplied value in the output instead of
-   throwing, such as a `sort_applied: false` flag or a "best-effort" description. The cases
-   above that return results with what applied are the only exceptions.
+   first option, except a value that matches several site entries equally, where the tool may
+   take the first and return the one it used (core skill), or the stem match a read of a
+   category or term takes with
+   `stem: true`, returning the option it used (forms skill), and never report a refused or
+   unapplied value in the output instead of throwing, such as a `sort_applied: false` flag or a
+   "best-effort" or "lookup-only" description. The cases above that return results with what
+   applied, and a declared refusal, are the only exceptions.
 
 ## Ask the caller during a run
 
@@ -86,24 +129,21 @@ Try first. Ask only for what the page or the caller uniquely knows at that point
 - whether to take a paid add-on within the tool's purpose that the page shows on the way to a
   commit when the input leaves it open, asked before the commit mark; a paid upsell outside the
   tool's purpose is declined, never asked (writes skill);
-- which of several site entries the caller's value matches equally, such as a restaurant
-  with several locations or a city with several airports, with those entries as the options.
-  That is ambiguous, as is a near-miss name the site offers alternatives for: prefer not
-  starting a refusal of either with "Caller input error:" (core skill). A day or option the
-  page greys out, with or without a reason, is not ambiguous and never a question: it follows
-  "Configure, then read" below;
+- which of several site entries the caller's value matches equally, such as a restaurant with
+  several locations or a city with several airports, with those entries as the options, each
+  selecting exactly one, when the tool asks instead of taking the first in the site's order;
+  each tool decides which (core skill). That is ambiguous, as is a near-miss name the site
+  offers alternatives for: prefer not starting a refusal of either with "Caller input error:"
+  (above). A day or option the page greys out, with or without a reason, is not ambiguous and
+  never a question (core skill, "Configure, then read");
 - a code the site sends to confirm a protected action after sign-in, such as a confirmation code
-  by text or email. A code that is part of signing in is the host's: a `code` field of the
-  `authenticate` step, never a question;
+  by text or email, never a code that is part of signing in (auth skill);
 - a fact only the caller has that the site now asks for.
 
 Never ask for a value the request, the input or an earlier answer already supplied, a private
 one included: use that value. Never undo an answer that declined something by doing it anyway
-or by offering it as an input (core skill), except a costly choice a write still meets on its path,
-one that changes what the caller buys or pays or whether the action can be cancelled or refunded
-(a paid add-on within the tool's purpose, a rate, fare or plan tier, a refundable option, shipping
-speed, the payment method or the delivery address), which stays an input or a declared question
-(writes skill). In the tool, take it from its input, or a private one, such as
+or by offering it as an input (core skill), except a costly choice a write still meets on its
+path, which stays an input or a declared question (writes skill). In the tool, take it from its input, or a private one, such as
 part of an identity number, through a declared `secret` question, never a plain-text field.
 When question review finds a question redundant, remove the ask and use the supplied value; a
 reworded question still asks for it again. A placeholder that stands in for a redacted value,
@@ -112,12 +152,10 @@ conflict, can still need a question, one that names the actual problem.
 
 Work the request already covers proceeds without a question, such as finding the right field
 or choosing among alternatives the request already allows. A supplied value the site does not
-offer is not such a question either, and never one to ask about, as .agents/core/SKILL.md says
-("Configure, then read"). A value the page does not list at all throws `InvalidInput` with
-`field` and `available`, the choices the page offers. An option the page lists but greys out,
-such as a booked date or a sold-out size, whether or not it says why, is an answer on a read:
-return it unavailable with the alternatives the page offers. A write throws `InvalidInput` with
-`available`. Neither substitutes another value. Asking the
+offer, whether the page does not list it or greys it out, is not such a question either, and
+never one to ask about: it follows .agents/core/SKILL.md ("Configure, then read"), which never
+substitutes another value; a write follows the site's preselected substitute only when the
+caller's own task asks for whatever the site ends up with (writes skill). Asking the
 owner to revise it or stop is the minter's own `request_input` question while it builds, as
 `AGENTS.md` says.
 
@@ -158,7 +196,8 @@ already asked for, or to solve a CAPTCHA.
      when your explore, test or `act` source runs live, and only where it is the whole
      string passed to `fill`, `type` or `pressSequentially` or a field of a request to this
      site (core skill); the published script never holds a handle and asks for the value
-     with `ask` instead.
+     with `ask` instead. Prefer a `secret` question of kind `private_text` for an access
+     code, such as a gate, door, alarm or lockbox code.
    - For a payment card the checkout requires, ask for every part its card form shows
      at once, in one request with one `secret` question for each part: `card_number`,
      `card_expiry`, `card_cvc` and `billing_postal_code`. Those handles go only into a
@@ -201,9 +240,12 @@ already asked for, or to solve a CAPTCHA.
 
 The run waits with its browser open and its active budget stopped, and the next call
 starts on the same page. Continue from there. Do not reload, search again or repeat an
-earlier step, and never resubmit anything the run already submitted. The wait can be
-long, so in that next call confirm the page still shows the chosen option before acting
-on it.
+earlier step, and never resubmit anything the run already submitted. A second click on a
+marked step is not a resubmission when `blockingRequiredFields` returned the fields you
+asked for and you called `notCommitted` for that step before asking: fill the answers, check
+the step again, then call `enteringCommit` again for that step, and click once, as the writes
+skill says. The wait can be long, so in that next call confirm the page still shows the chosen
+option before acting on it.
 
 ## When no answer comes
 

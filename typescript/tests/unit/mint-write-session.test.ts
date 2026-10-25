@@ -1,6 +1,7 @@
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Schema } from "effect";
 import { describe, expect, it } from "vitest";
-import { MintFailure } from "../../src/mint/contracts.js";
+import { ExecutionRequest, MintFailure, type WritePath } from "../../src/mint/contracts.js";
+import { contractJsonSchema } from "../../src/runtime/operation.js";
 import {
   checkWriteSession,
   commitEvidenceOf,
@@ -10,6 +11,8 @@ import {
   sessionSentWrite,
   uncertainCommit,
   verifyFirstNotice,
+  writePathRefusal,
+  writePathRemaining,
   type WriteSessionMarks,
 } from "../../src/mint/write-session.js";
 
@@ -271,11 +274,205 @@ describe("a write session's publication check", () => {
     });
   });
 
+  describe("with the composed script's output schema", () => {
+    const placing = contract({ confirmation: "readback", commits: ["place-order"] });
+    const refused = (reason: string) =>
+      Schema.Struct({
+        status: Schema.Literal("refused"),
+        reason: Schema.Literal(reason),
+        site_message: Schema.String,
+      });
+    const refusals = Schema.Union(refused("not_eligible"), refused("sold_out"));
+    const placed = <Status extends Schema.Schema.AnyNoContext>(status: Status) =>
+      Schema.Struct({ status, orderNumber: Schema.String });
+    // A free-text status beside the refusals could be `refused` too, so none of them is declared.
+    const unreadable = contractJsonSchema(Schema.Union(placed(Schema.String), refusals));
+    const readable = contractJsonSchema(Schema.Union(placed(Schema.Literal("placed")), refusals));
+    const publish = (outputSchema: unknown, registeredOutputSchema?: unknown) =>
+      Effect.runSyncExit(
+        checkWriteSession({
+          session: { steps: [confirmed] },
+          step: confirmed,
+          extract: Effect.succeed({ ...placing, outputSchema }),
+          ...(registeredOutputSchema === undefined ? {} : { registeredOutputSchema }),
+        }),
+      );
+
+    it("refuses an output schema whose listed refusals the host cannot read", () => {
+      expect(reason(publish(unreadable))).toBe("refusal_unreadable");
+    });
+
+    it("publishes refusals the host reads, and a script with no refused status", () => {
+      expect(Exit.isSuccess(publish(readable))).toBe(true);
+      expect(Exit.isSuccess(publish(contractJsonSchema(placed(Schema.String))))).toBe(true);
+      // A host that passes no output schema skips the check.
+      expect(Exit.isSuccess(check([confirmed], placing).result)).toBe(true);
+    });
+
+    it("never refuses a republish for the unreadable refusal its published revision has", () => {
+      expect(Exit.isSuccess(publish(unreadable, unreadable))).toBe(true);
+      expect(reason(publish(unreadable, readable))).toBe("refusal_unreadable");
+    });
+
+    it("checks it only after the contract, as the contract's refusal comes first", () => {
+      const exit = Effect.runSyncExit(
+        checkWriteSession({
+          session: { steps: [confirmed] },
+          step: confirmed,
+          extract: Effect.succeed({ ...contract(), outputSchema: unreadable }),
+        }),
+      );
+      expect(reason(exit)).toBe("confirmation_undeclared");
+    });
+  });
+
   it("publishes an unverifiable write whose step entered its mark and confirmed nothing", () => {
     const { result } = check(
       [{ enteredMarks: ["place-order"], action: "write", possiblySent: true }],
       contract({ confirmation: "unverifiable", commits: ["place-order"] }),
     );
     expect(Exit.isSuccess(result) && result.value.declared).toBe("unverifiable");
+  });
+});
+
+describe("a write build's write path", () => {
+  const path = (...marks: readonly string[]): WritePath => ({
+    steps: marks.map((commit) => ({ commit, does: `Sends ${commit}` })),
+    ends: "The quote the site returns",
+  });
+  const quote = path("save-draft", "save-coverage", "get-quote");
+  const act = (writePath?: WritePath) => ({
+    purpose: "act" as const,
+    target: "liveBrowser" as const,
+    ...(writePath === undefined ? {} : { writePath }),
+  });
+  const session = (started: boolean, recorded?: WritePath, entered: readonly string[] = []) => ({
+    started,
+    path: recorded,
+    enteredMarks: new Set(entered),
+  });
+
+  it("names the marks no step entered yet, in path order", () => {
+    expect(writePathRemaining(quote, new Set(["save-draft"]))).toEqual([
+      "save-coverage",
+      "get-quote",
+    ]);
+    expect(writePathRemaining(quote, new Set(["get-quote", "save-coverage", "save-draft"]))).toEqual(
+      [],
+    );
+    expect(writePathRemaining(undefined, new Set())).toEqual([]);
+  });
+
+  it("is required on the session's first act step, and only there", () => {
+    expect(writePathRefusal(act(), session(false))).toContain(
+      "A write build's first act step declares writePath before anything is sent",
+    );
+    expect(writePathRefusal(act(quote), session(false))).toBeUndefined();
+    expect(writePathRefusal(act(), session(true, quote))).toBeUndefined();
+    // A session a host started before it kept paths runs on without one.
+    expect(writePathRefusal(act(), session(true))).toBeUndefined();
+    expect(writePathRefusal({ ...act(), purpose: "explore" }, session(false))).toBeUndefined();
+  });
+
+  it("may be revised to add steps, never to drop or reorder a mark the session entered", () => {
+    const entered = session(true, quote, ["save-draft", "save-coverage"]);
+    expect(
+      writePathRefusal(act(path("save-draft", "save-coverage", "save-property", "get-quote")), entered),
+    ).toBeUndefined();
+    // A step the site skips for this input may leave the path before the session enters it.
+    expect(writePathRefusal(act(path("save-draft", "save-coverage")), entered)).toBeUndefined();
+    expect(writePathRefusal(act(path("save-draft", "get-quote")), entered)).toContain(
+      "keeps every mark of the recorded path the session already entered, in the same order: save-coverage.",
+    );
+    expect(
+      writePathRefusal(act(path("save-coverage", "save-draft", "get-quote")), entered),
+    ).toContain("in the same order: save-coverage.");
+  });
+
+  it("names each mark once, and decodes on the execute request", () => {
+    const decode = Schema.decodeUnknownEither(ExecutionRequest);
+    const request = {
+      purpose: "act",
+      target: "liveBrowser",
+      entrypoint: "src/draft.mjs",
+      fixtureRefs: [],
+      caseFilter: [],
+      maxWorkers: 1,
+      timeoutSeconds: 30,
+    };
+    expect(decode({ ...request, writePath: quote })._tag).toBe("Right");
+    expect(decode({ ...request, writePath: path("save-draft", "save-draft") })._tag).toBe("Left");
+    expect(decode({ ...request, writePath: path("save draft") })._tag).toBe("Left");
+    expect(decode({ ...request, writePath: { steps: [], ends: "The quote" } })._tag).toBe("Left");
+  });
+
+  describe("at publication", () => {
+    const contract = (write: {
+      readonly confirmation: "message" | "readback";
+      readonly commits: readonly unknown[];
+    }) => ({ contract: { write }, inputDecodes: true });
+    const reason = (exit: Exit.Exit<unknown, unknown>) =>
+      Exit.isFailure(exit) && exit.cause._tag === "Fail" && exit.cause.error instanceof MintFailure
+        ? exit.cause.error.reason
+        : undefined;
+    const confirmed: WriteSessionMarks = { enteredMarks: ["place-order"], confirmation: "readback" };
+    const quoted = contract({
+      confirmation: "message",
+      commits: ["save-draft", "save-coverage", "get-quote"],
+    });
+    const draft: WriteSessionMarks = { enteredMarks: ["save-draft"], confirmation: "message" };
+    const rest: WriteSessionMarks = {
+      enteredMarks: ["save-coverage", "get-quote"],
+      confirmation: "message",
+    };
+    const run = (
+      steps: readonly WriteSessionMarks[],
+      extracted: ReturnType<typeof contract>,
+      writePath: WritePath | "none" = quote,
+    ) => {
+      let extractions = 0;
+      const result = Effect.runSyncExit(
+        checkWriteSession({
+          session: { steps },
+          step: steps.at(-1) ?? { enteredMarks: [] },
+          extract: Effect.sync(() => {
+            extractions++;
+            return extracted;
+          }),
+          ...(writePath === "none" ? {} : { writePath }),
+        }),
+      );
+      return { result, extractions };
+    };
+    const marksOf = (exit: Exit.Exit<unknown, unknown>) =>
+      Exit.isFailure(exit) && exit.cause._tag === "Fail" && exit.cause.error instanceof MintFailure
+        ? exit.cause.error.writePathMarks
+        : undefined;
+
+    it("refuses a session that has not entered every mark of its path, before reading the contract", () => {
+      const { result, extractions } = run([draft], quoted);
+      expect(reason(result)).toBe("write_path_unfinished");
+      expect(marksOf(result)).toEqual(["save-coverage", "get-quote"]);
+      expect(extractions).toBe(0);
+    });
+
+    it("refuses a contract that leaves a mark of the path out", () => {
+      const { result } = run(
+        [draft, rest],
+        contract({ confirmation: "message", commits: ["save-draft", "get-quote"] }),
+      );
+      expect(reason(result)).toBe("write_path_undeclared");
+      expect(marksOf(result)).toEqual(["save-coverage"]);
+    });
+
+    it("publishes the whole path, and a session with no recorded path as before", () => {
+      expect(run([draft, rest], quoted).result).toEqual(
+        Exit.succeed({ extracted: quoted, declared: "message" }),
+      );
+      const placing = contract({ confirmation: "readback", commits: ["place-order"] });
+      expect(run([confirmed], placing, "none").result).toEqual(
+        Exit.succeed({ extracted: placing, declared: "readback" }),
+      );
+    });
   });
 });

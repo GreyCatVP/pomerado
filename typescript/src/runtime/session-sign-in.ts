@@ -6,6 +6,7 @@ import type {
   AutofillStep,
   AutofillStepReport,
 } from "../destinations/autofill-step.js";
+import { pageMatches } from "../destinations/autofill-recipe.js";
 import { failureDetail, type FailureDetail } from "./failure-detail.js";
 import {
   InputRequestFailure,
@@ -53,19 +54,22 @@ export const sessionSignInAllowance = (
     : "session_not_kept";
 
 /** A path without its trailing slash, the root `/` kept. */
-const pathOf = (path: string) => (path.length > 1 ? path.replace(/\/$/u, "") : path);
+export const pathOf = (path: string) => (path.length > 1 ? path.replace(/\/$/u, "") : path);
 
-/** A recorded screen's page, which a signed-out page lands back on. */
-const placeOf = (page: string) => {
+/**
+ * A page's origin and path, the path as `pathOf` gives it, as recorded screens compare pages: a
+ * signed-out page lands back on its screen's. Undefined for no page or one that is not an absolute
+ * URL, such as a workspace screen's path.
+ */
+export const placeOf = (page: string | undefined) => {
+  if (page === undefined) return undefined;
   const url = URL.parse(page);
   return url === null ? undefined : `${url.origin}${pathOf(url.pathname)}`;
 };
 
-/** Whether the page is one of the recorded sign-in screens. */
-const onSignInScreen = (url: string | undefined, steps: readonly { readonly page: string }[]) => {
-  const here = url === undefined ? undefined : placeOf(url);
-  return here !== undefined && steps.some((step) => placeOf(step.page) === here);
-};
+/** Whether the page is one of the recorded sign-in screens (`pageMatches`). */
+const onSignInScreen = (url: string | undefined, steps: SessionCheckRecipe["steps"]) =>
+  url !== undefined && steps.some((step) => pageMatches(url, step));
 
 const markerFailure = (failed: string) =>
   failed === "indicator_not_visible" ||
@@ -87,7 +91,10 @@ const onMarkerPath = (url: string | undefined, urlPath: string, failed: string) 
 
 /** What a session check reads of a recorded sign-in: its screens and its marker's path. */
 export interface SessionCheckRecipe {
-  readonly steps: readonly { readonly page: string }[];
+  readonly steps: readonly {
+    readonly page: string;
+    readonly anySegments?: readonly number[] | undefined;
+  }[];
   readonly signedIn: { readonly urlPath?: string | undefined };
 }
 

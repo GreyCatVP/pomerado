@@ -56,6 +56,15 @@ export interface AutofillHooks<E = unknown, V extends string = string> {
     readonly values: readonly string[];
     readonly inspection: AutofillInspection;
   }) => Effect.Effect<AutofillStepReport>;
+  /**
+   * Clicks again the submit of the open sign-in's `blocked` screen, typing nothing, after its
+   * `dismiss` when the step names one (`resubmitAutofillStep`). A host without it fills that
+   * screen again as any other.
+   */
+  readonly resubmit?: (input: {
+    readonly step: AutofillStep;
+    readonly inspection: AutofillInspection;
+  }) => Effect.Effect<AutofillStepReport>;
   /** The marker check alone, which verifies nothing: a replay polls it. */
   readonly check: (
     indicator: AutofillSignedIn,
@@ -167,15 +176,23 @@ interface AutofillRecordedStep {
   readonly methods?: AutofillRecipeStep["methods"];
   /** The password an earlier screen took that this one asked for again beside a second factor. */
   readonly refills?: AutofillRecipeStep["refills"];
+  /** The covering notice's own control the host clicks on this screen (`AutofillStep.dismiss`). */
+  readonly dismiss?: string;
   /** The page the step ran on, origin and path only. */
   readonly page: string;
 }
 
-/** A screen's popup and how it submits, which a step rebuilt for that screen keeps. */
-export const screenSubmit = (screen: Pick<AutofillStep, "popup" | "submit" | "submitKey">) => ({
+/**
+ * A screen's popup, how it submits and the covering notice's control it dismisses, which a step
+ * rebuilt for that screen keeps.
+ */
+export const screenSubmit = (
+  screen: Pick<AutofillStep, "popup" | "submit" | "submitKey" | "dismiss">,
+) => ({
   ...(screen.popup === undefined ? {} : { popup: screen.popup }),
   ...(screen.submit === undefined ? {} : { submit: screen.submit }),
   ...(screen.submitKey === undefined ? {} : { submitKey: screen.submitKey }),
+  ...(screen.dismiss === undefined ? {} : { dismiss: screen.dismiss }),
 });
 
 /** A recorded screen as the minter reads it back: without what only the signed-in check uses. */
@@ -212,6 +229,12 @@ export interface AutofillSignInState<E = unknown, V extends string = string> {
   /** Set once a screen's host click ran or its fill's answer was lost: it may have sent a value. */
   mayHaveSent?: true;
   /**
+   * The screen just filled whose host click another element caught (`blocked`): nothing of it was
+   * sent, and its fields still hold what was typed, so the same screen sent again is clicked again
+   * without typing (`blockedScreen`). Cleared by the next screen's fill.
+   */
+  blocked?: AutofillStep | undefined;
+  /**
    * The host's record of saved security answers a fill typed, which counts one as sent once its
    * screen's submit was clicked (`submitFilled`).
    */
@@ -233,6 +256,37 @@ export const isSecret = (slot: AutofillSlot): slot is AutofillSecret =>
   !isIdentifier(slot) && !isPrivateAnswer(slot);
 /** The secrets that prove the login: a sign-in verifies only once a submit sent one. */
 export const provesLogin = (slot: AutofillSlot) => slot === "password" || slot === "code";
+
+/** What a host keeps of the secrets its open sign-in filled, and whether its last one verified. */
+interface FilledSecrets {
+  readonly managedAuthenticationComplete: { readonly current: boolean };
+  readonly autofillSecretsFilled: { readonly current: readonly AutofillSecret[] };
+  readonly autofillSecretsRefilled: { readonly current: readonly AutofillSecret[] };
+}
+
+/**
+ * The field of `step` that names a secret this sign-in may not fill again, or -1. A fill is not a
+ * write, so a password or code filled once may be filled once more; any other secret never is. A
+ * sign-in after one that completed starts with nothing filled (`open` false).
+ */
+export const exhaustedSecret = (h: FilledSecrets, open: boolean, step: AutofillStep) => {
+  if (!open && h.managedAuthenticationComplete.current) return -1;
+  return step.fields.findIndex(
+    (field) =>
+      isSecret(field.slot) &&
+      h.autofillSecretsFilled.current.includes(field.slot) &&
+      (!provesLogin(field.slot) || h.autofillSecretsRefilled.current.includes(field.slot)),
+  );
+};
+/**
+ * Whether the sign-in under way filled the login's password as often as it may, and none verified
+ * since: every further screen that needs the password is refused (`exhaustedSecret`) until a
+ * sign-in verifies, or a corrected login starts its fills again.
+ */
+export const passwordFillsSpent = (h: FilledSecrets) =>
+  !h.managedAuthenticationComplete.current &&
+  h.autofillSecretsFilled.current.includes("password") &&
+  h.autofillSecretsRefilled.current.includes("password");
 /**
  * Whether a sign-in submitted the login's identifier and its password or code (`submittedSlots`:
  * a submit clicked after the fill, `submitFilled`), or passed a step the owner approves: the proof
@@ -374,6 +428,7 @@ const armScreened = (
     ...(step.submit === undefined ? {} : { submit: step.submit }),
     ...(step.submitKey === undefined ? {} : { submitKey: step.submitKey }),
     ...(step.methods === undefined ? {} : { methods: step.methods }),
+    ...(step.dismiss === undefined ? {} : { dismiss: step.dismiss }),
     page: inspection.page,
   });
   state.securityAnswers?.arm(step, values);
@@ -429,8 +484,9 @@ export const noteRefill = (state: AutofillSignInState) => {
 
 /**
  * Records what a fill did once it returns: a field it did not fill is not held as filled, nor a
- * saved security answer typed, a step that reached nothing leaves the recipe, and a step the host
- * clicked records it. Returns whether anything reached the page.
+ * saved security answer typed, a step that reached nothing leaves the recipe, a step the host
+ * clicked records it, and one whose click another element caught is the open sign-in's `blocked`
+ * screen. Returns whether anything reached the page.
  */
 export const recordStep = (
   state: AutofillSignInState,
@@ -448,9 +504,67 @@ export const recordStep = (
   state.securityAnswers?.settle(step, filled);
   const reached = filled.includes(true);
   const submit = stepReport.outcome === "filled" ? stepReport.submit : stepReport.outcome;
+  state.blocked = submit === "blocked" && reached ? step : undefined;
   const last = state.steps.at(-1);
   if (!reached && submit !== "clicked" && submit !== "uncertain") state.steps.pop();
   else if (submit === "clicked" && last)
     state.steps[state.steps.length - 1] = { ...last, submittedBy: "host" };
   return reached || submit === "clicked" || submit === "uncertain";
+};
+
+/**
+ * The open sign-in's `blocked` screen when `request` names it again, by its popup, its fields'
+ * selectors in order, its submit, submit key and methods, with the request's `dismiss`: the host
+ * clicks its submit again and types nothing (`resubmitAutofillStep`). Undefined for any other
+ * screen, which is a fill of its own.
+ */
+export const blockedScreen = (
+  state: AutofillSignInState | undefined,
+  request: Pick<AutofillStep, "popup" | "submit" | "submitKey" | "methods" | "dismiss"> & {
+    readonly fields: readonly { readonly selector: string }[];
+  },
+): AutofillStep | undefined => {
+  const blocked = state?.blocked;
+  if (
+    blocked === undefined ||
+    blocked.submit !== request.submit ||
+    blocked.submitKey !== request.submitKey ||
+    JSON.stringify(blocked.popup) !== JSON.stringify(request.popup) ||
+    JSON.stringify(blocked.methods) !== JSON.stringify(request.methods) ||
+    blocked.fields.length !== request.fields.length ||
+    blocked.fields.some((field, index) => field.selector !== request.fields[index]?.selector)
+  )
+    return undefined;
+  const { dismiss: _dismiss, ...screen } = blocked;
+  return request.dismiss === undefined ? screen : { ...screen, dismiss: request.dismiss };
+};
+
+/**
+ * Records the host's click again of the `blocked` screen (`resubmitAutofillStep`) once it returns:
+ * the screen's recorded step, the open sign-in's last, takes the `dismiss` the host clicks there,
+ * which a run's replay clicks too, and the report settles it as a fill's would (`recordStep`). A
+ * refusal clicked nothing, so the screen stays blocked with what it holds. A field found empty
+ * before the click clicked nothing either, and nothing of the screen was sent: its step leaves the
+ * recipe, so the screen filled again records it once, with its dismiss, and what the blocked fill
+ * typed is no longer held. Returns those slots, which the host counts as filled, so the screen
+ * filled again is a refill and a password or code is typed twice at most.
+ */
+export const recordResubmit = (
+  state: AutofillSignInState,
+  step: AutofillStep,
+  stepReport: AutofillStepReport,
+): readonly AutofillSlot[] => {
+  if (stepReport.outcome === "refused") return [];
+  if (stepReport.outcome === "filled" && stepReport.submit === "not_attempted") {
+    state.blocked = undefined;
+    state.steps.pop();
+    const typed = [...state.filled.keys()];
+    state.filled.clear();
+    return typed;
+  }
+  const last = state.steps.at(-1);
+  if (last !== undefined && step.dismiss !== undefined)
+    state.steps[state.steps.length - 1] = { ...last, dismiss: step.dismiss };
+  recordStep(state, step, stepReport);
+  return [];
 };

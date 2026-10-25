@@ -1,6 +1,6 @@
 import { Clock, Duration, Effect } from "effect";
 import type { YieldableError } from "effect/Cause";
-import type { AutofillRecipeStep } from "../destinations/autofill-recipe.js";
+import { pageMatches, type AutofillRecipeStep } from "../destinations/autofill-recipe.js";
 import type {
   AutofillInspection,
   AutofillRefusal,
@@ -22,26 +22,34 @@ import {
 } from "./autofill-replay-pages.js";
 
 /**
- * Which pages are the recorded screens: by default each screen's exact recorded page; a replay of a
- * tool with a workspace relation puts its workspace screens on the login's workspace origin.
+ * Which pages are the recorded screens: by default each screen's recorded page, its origin and its
+ * path with any trailing slash but the root's dropped. Every replay session passes its own, which
+ * put a workspace screen on the login's workspace origin.
  */
 export interface ReplayScreens {
   readonly onScreens: (page: string) => boolean;
   readonly matches: (page: string, recorded: AutofillRecipeStep) => boolean;
 }
 
-const exactScreens = (steps: readonly AutofillRecipeStep[]): ReplayScreens => {
-  const pages = new Set(steps.map((step) => step.page));
+/**
+ * The default screens: a page is a screen on that screen's recorded origin and path
+ * (`pageMatches`). A workspace screen records a path alone, so it matches no page here.
+ */
+export const exactScreens = (steps: readonly AutofillRecipeStep[]): ReplayScreens => {
+  const matches = (page: string, recorded: AutofillRecipeStep) => pageMatches(page, recorded);
   return {
-    onScreens: (page) => pages.has(page),
-    matches: (page, recorded) => page === recorded.page,
+    onScreens: (page) => steps.some((step) => matches(page, step)),
+    matches,
   };
 };
+
+/** The recorded screen a wait is on: its page as the replay knows it, and its listed segments. */
+type RecordedPage = Pick<AutofillRecipeStep, "page" | "anySegments">;
 
 /** A later page or ready credential fields prove progression; a coincident same-page button cannot. */
 const inspectReplayProgression = <E>(
   hooks: Pick<AutofillHooks<E>, "inspect">,
-  currentPage: string,
+  currentPage: RecordedPage,
   current: AutofillStep,
   alternatives: readonly AutofillStep[],
   later: readonly AutofillRecipeStep[],
@@ -67,7 +75,7 @@ const inspectReplayProgression = <E>(
         if (
           !("outcome" in found) &&
           screens.matches(found.page, recorded) &&
-          (found.page !== currentPage ||
+          (!pageMatches(found.page, currentPage) ||
             (current.fields.length > 0 &&
               probe.fields.some(
                 (field) => !current.fields.some((previous) => previous.selector === field.selector),
@@ -358,7 +366,7 @@ export const makeReplayScreenWait = <
   /** Inspect the current stage, rejection evidence and proved later stages before timing a wait. */
   const inspectStage = (
     step: AutofillStep,
-    currentPage: string,
+    currentPage: RecordedPage,
     later: readonly AutofillRecipeStep[],
     alternatives: readonly AutofillStep[],
   ) =>
@@ -401,17 +409,18 @@ export const makeReplayScreenWait = <
   return (
     step: AutofillStep,
     until: number,
-    currentPage: string,
+    currentPage: string | RecordedPage,
     later: readonly AutofillRecipeStep[] = [],
     alternatives: readonly AutofillStep[] = [],
   ) =>
     Effect.gen(function* () {
+      const current = typeof currentPage === "string" ? { page: currentPage } : currentPage;
       const left = { off: undefined as OffScreens | undefined };
       const entry = { at: undefined as OffScreens | undefined };
       let waitUntil = until;
       const held = holdShown(input, progress, timing);
       while (true) {
-        const stage = yield* inspectStage(step, currentPage, later, alternatives);
+        const stage = yield* inspectStage(step, current, later, alternatives);
         if (stage === "extra_retried") continue;
         if (typeof stage === "string") return stage;
         if (yield* held(step, stage.found, waitUntil)) continue;

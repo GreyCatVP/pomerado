@@ -10,6 +10,13 @@ import { signInOutcomeUnknown, type SignInDiagnostic } from "../execution/sign-i
  */
 export const maximumHostRefusals = 3;
 
+/**
+ * How many correctable Guardian denials in a row of one unchanged sign-in step end sign-in in the
+ * build: the agent sent the step again each time, so nothing it could say in the step got past
+ * Guardian. A changed step, or an authenticate that ends any other way, starts the count again.
+ */
+export const maximumSignInDenials = 3;
+
 /** Why a host check refused a field, and what may get past it; value-free. */
 interface RefusalNotice {
   readonly why: string;
@@ -140,8 +147,9 @@ const spentReason: Record<SpentSignIn, string> = {
   relogin_spent: "the attempt's one extra sign-in is spent",
   fresh_profile_sign_ins_spent:
     "the sign-ins the attempt allows on a recovery's new profile are spent",
-  sign_in_retry_spent: "the attempt's one retry of a sign-in whose outcome was unclear is spent",
+  sign_in_retry_spent: "the attempt's retries of a sign-in whose outcome was unclear are spent",
   host_refusals_repeated: `the host refused the same field of the same screen the same way ${maximumHostRefusals} times in a row, and no correction of the step got past it`,
+  guardian_denials_repeated: `Guardian denied the same sign-in step ${maximumSignInDenials} times in a row, and the step did not change between them`,
   sign_in_origin_untrusted:
     "the caller did not trust the origin the site's sign-in sent the login to, so no sign-in of the site can verify",
 };
@@ -295,6 +303,13 @@ const endingNotice = {
   after_publication:
     " A retained receipt may still publish: call finish_build with it if it supports the request; otherwise the build ends with this result.",
 };
+
+/**
+ * What the agent hears at Guardian's `maximumSignInDenials`th correctable denial in a row of one
+ * unchanged sign-in step: sign-in is unavailable in this build, and how the build then ends.
+ */
+export const repeatedDenialNotice = (ending: keyof typeof endingNotice) =>
+  `No further sign-in can run in this attempt: ${spentReason.guardian_denials_repeated}. ${unavailableInBuild}${endingNotice[ending]}`;
 
 /**
  * A failed or refused sign-in's answer: the root cause's code, the fields the agent acts on and

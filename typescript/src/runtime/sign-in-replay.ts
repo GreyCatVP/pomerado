@@ -166,8 +166,8 @@ const replayHooks = <E>(
   };
 };
 
-/** The local masking as the shared replay's broker. */
-const replayBroker = (secrets: RunSignInSecrets): SecretBroker => ({
+/** The local masking as the shared sign-in code's broker, for runs and builds. */
+export const localSecretBroker = (secrets: RunSignInSecrets): SecretBroker => ({
   register: (entry) => Effect.sync(() => secrets.register(entry.value)),
   registeredSecretMatches: (text) =>
     Effect.either(secrets.assertAbsent(text)).pipe(
@@ -356,7 +356,7 @@ export const signInForRun = <E>(input: {
       input.login.correct(field, held, triesLeft).pipe(Effect.mapError(loginUnanswered));
     const retryState = input.retryState ?? makeAutofillRetryState();
     const hooks = replayHooks(input.browser, input.allowCantTell === true, input.markerSettle);
-    const broker = replayBroker(input.secrets);
+    const broker = localSecretBroker(input.secrets);
     const given = { current: {} };
     let held = runLogin.held();
     let cleared = false;

@@ -91,7 +91,10 @@ it("offers execute with signInStep to the model on an autofill site", async () =
   expect(JSON.stringify(execute ?? null)).toContain("signInStep");
   const signInStep = (execute as { readonly parameters?: JsonSchema } | undefined)?.parameters
     ?.properties?.signInStep;
-  const secretFields = (signInStep?.anyOf ?? [])
+  // A nullable union is an anyOf holding the union's own anyOf and null.
+  const branches = (schema: JsonSchema | undefined): JsonSchema[] =>
+    schema?.anyOf === undefined ? (schema ? [schema] : []) : schema.anyOf.flatMap(branches);
+  const secretFields = branches(signInStep)
     .flatMap((step) => step.properties?.fields?.items?.anyOf ?? [])
     .filter((field) => field.properties?.slot !== undefined);
   expect(secretFields).toHaveLength(1);

@@ -182,7 +182,6 @@ Your agent then calls `get_job`. Each call waits up to 30 seconds and returns th
 
 - `"build": "published"` means Pomerado ran the task, Guardian approved the source, and the integration is saved.
 - `"build": "incomplete"` comes with a `summary` and saves nothing. The folder is removed, so you can retry with the same name.
-- `"untrustedSignInOrigins"` lists the origins outside the site that the site's sign-in script sent your login to in a `fetch` or XHR request other than a GET, when no sign-in through them verified. It leaves out an origin when everything it received already counts as sent to the site. When some of them received your password or a code, it lists only those. Pomerado asks you once during the mint whether to trust one to three https origins like these. Until your password or a code has been sent anywhere, it asks only when there's one. To trust one up front, or one Pomerado doesn't ask about, pass it in the `mint` call's `authenticationOrigins`.
 - A `"status": "failed"` job carries an `error`. See [Troubleshooting](#troubleshooting).
 
 To use the integration, follow the steps in the README's [Use your integration](../README.md#use-your-integration).

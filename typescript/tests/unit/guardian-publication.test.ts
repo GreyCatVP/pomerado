@@ -1,6 +1,6 @@
 import { OpenAIProvider, setDefaultModelProvider, Usage } from "@openai/agents";
 import type { ModelRequest, ModelResponse } from "@openai/agents";
-import { Effect } from "effect";
+import { Effect, Either } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   guardianExecutionPolicy,
@@ -9,6 +9,7 @@ import {
 import { makeOpenAIReviewer } from "../../src/guardian/openai.js";
 import { answersForReview } from "../../src/guardian/question.js";
 import {
+  decodePublicationDecision,
   guardianPublicationPolicy,
   publicationCallerDecisionPolicy,
   publicationDecisionPolicy,
@@ -24,7 +25,16 @@ import {
   type PendingExecution,
   type Reviewer,
 } from "../../src/guardian/review.js";
+import {
+  publicationFindingCategories,
+  publicationReasons,
+  unfixableFindingCategories,
+  unfixablePublicationReasons,
+} from "../../src/guardian/review-contracts.js";
+import type { PublicationScope } from "../../src/guardian/review-contracts.js";
 import { makeSourceInspector } from "../../src/guardian/source.js";
+import { publicationScope } from "../../src/mint/publication-review.js";
+import { instructionsOf } from "../support/guardian-requests.js";
 
 afterEach(() => setDefaultModelProvider(new OpenAIProvider()));
 
@@ -649,12 +659,13 @@ describe("a finding about a choice on the site's sign-in pages", () => {
     });
   });
 
-  // A broken, incorrect or unsafe tool is never excused, wherever the finding sits.
+  // A broken, incorrect or unsafe tool is never excused, wherever the finding sits. Much of the
+  // recipe records the minter's own sign-in choices, which it fixes by signing in again, so a
+  // denial a correction gets past keeps its reason there too.
   it.each([
     { reason: "source_correction", finding: inRecipe("schema_mismatch") },
     { reason: "unsupported_claim", finding: inRecipe("unsupported_claim") },
     { reason: "source_correction", finding: inRecipe("confirmation") },
-    { reason: "privacy", finding: inRecipe("customer_data") },
     { reason: "host_owned", finding: inRecipe("credential") },
     { reason: "source_correction", finding: at("operation/operation.mjs", "schema_mismatch") },
     { reason: "source_correction", finding: at("operation/operation.mjs", "confirmation") },
@@ -668,19 +679,31 @@ describe("a finding about a choice on the site's sign-in pages", () => {
   );
 
   // An input design finding about anything but a sign-in page choice still stands: one in
-  // another host-written file, one in the minter's files, and one in the recipe under a refusal
-  // for privacy or authority, which the exception never touches.
+  // another host-written file and one in the minter's files.
   it.each([
     { reason: "input_feedback", finding: at("operation/operation.mjs", "input_option") },
     { reason: "source_correction", finding: at("operation/operation.mjs", "example_value") },
     { reason: "input_feedback", finding: at("publication/definition.json", "input_option") },
     { reason: "source_correction", finding: at(pending.entrypoint, "example_value") },
-    { reason: "authority", finding: inRecipe("input_option") },
   ])(
     "keeps a $reason denial for $finding.category in $finding.path that is no sign-in page choice",
     async ({ reason, finding }) => {
       const decided = await review({ outcome: "deny", reason, findings: [finding] });
       expect(decided).toMatchObject({ outcome: "deny", reason, findings: [finding] });
+      expect(decided).not.toHaveProperty("excusedSignInChoices");
+    },
+  );
+
+  // A refusal for privacy or authority in the recipe is one no correction gets past, and the
+  // exception never touches it: it blocks as the host's own, host_owned.
+  it.each([
+    { reason: "privacy", finding: inRecipe("customer_data") },
+    { reason: "authority", finding: inRecipe("input_option") },
+  ])(
+    "blocks a $reason denial for $finding.category in $finding.path as host_owned",
+    async ({ reason, finding }) => {
+      const decided = await review({ outcome: "deny", reason, findings: [finding] });
+      expect(decided).toMatchObject({ outcome: "deny", reason: "host_owned", findings: [finding] });
       expect(decided).not.toHaveProperty("excusedSignInChoices");
     },
   );
@@ -735,7 +758,187 @@ describe("a finding about a choice on the site's sign-in pages", () => {
   });
 });
 
+// The minter edits no bundle file the host writes, such as its sign-in recipe, though much of the
+// recipe records the minter's own sign-in choices, which it fixes by signing in again. So a refusal
+// no correction gets past, whose every finding is in such a file, ends the build as the host's own
+// failure. The host sets that reason itself: a reviewer that names another one would let the
+// minter end the build on it as its own policy block.
+describe("a denial whose every finding is in a bundle file the host wrote", () => {
+  const recipe = JSON.stringify({
+    version: 1,
+    steps: [{ page: "https://portal.example/team/sample/login", fields: [], submit: "#sign-in" }],
+    signedIn: { selector: "#account" },
+  });
+  const bundle = new Map([
+    ["src/tool.mjs", "export default {};"],
+    ["auth-fill.json", recipe],
+  ]);
+  const evidence = new Map([
+    ["publication/definition.json", '{"name":"read_reports"}'],
+    ["publication/tests.json", '{"cases":[]}'],
+  ]);
+  // The index as a host that marks the files it adds to the bundle builds it, and as one that
+  // marks none, as the local host does.
+  const marked = publicationScope(bundle, evidence, { hostWritten: new Set(["auth-fill.json"]) });
+  const unmarked = publicationScope(bundle, evidence);
+  const at = (path: string, category: string) => ({
+    path,
+    byteStart: 0,
+    byteEnd: 1,
+    category,
+    explanation,
+  });
+  const inRecipe = at("operation/auth-fill.json", "private_literal");
+  const inSource = at("operation/src/tool.mjs", "private_literal");
+  const rationale = "The recipe's path names a team.";
+  const decode = (scope: PublicationScope, decision: Record<string, unknown>) =>
+    Effect.runPromise(
+      Effect.either(decodePublicationDecision(scope, { rationale, findings: [], ...decision })),
+    );
+
+  it("marks the sign-in recipe as the host's only when the host says it wrote it", () => {
+    expect(marked.files.find((file) => file.path === "operation/auth-fill.json")?.owner).toBe(
+      "host",
+    );
+    expect(unmarked.files.find((file) => file.path === "operation/auth-fill.json")?.owner).toBe(
+      "minter",
+    );
+  });
+
+  it.each(["source_correction", "privacy", "authority", "evidence"])(
+    "decodes a %s denial whose only finding is a private literal in the host's sign-in recipe as host_owned",
+    async (reason) => {
+      const decided = await decode(marked, { outcome: "deny", reason, findings: [inRecipe] });
+      expect(decided).toMatchObject({
+        _tag: "Right",
+        right: { outcome: "deny", reason: "host_owned", findings: [inRecipe] },
+      });
+      // The rationale keeps the reason the review gave, so the record shows the host set it.
+      expect(Either.getOrThrow(decided).rationale).toContain(reason);
+      expect(Either.getOrThrow(decided).rationale).toContain(rationale);
+    },
+  );
+
+  // A signed-in marker that also shows signed out is the minter's own choice, recorded in the
+  // recipe, which it fixes by signing in again, so the denial goes back to it.
+  it("keeps a source_correction denial for a signed-in marker in the host's sign-in recipe", async () => {
+    const marker = {
+      ...at("operation/auth-fill.json", "schema_mismatch"),
+      explanation:
+        "The signed-in marker also shows on the signed-out page. Sign in again with one only a signed-in page shows.",
+    };
+    expect(
+      await decode(marked, { outcome: "deny", reason: "source_correction", findings: [marker] }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "source_correction", rationale, findings: [marker] },
+    });
+  });
+
+  // Any other denial a correction gets past keeps its reason too.
+  it.each([
+    { reason: "source_correction", category: "confirmation" },
+    { reason: "unsupported_claim", category: "unsupported_claim" },
+    { reason: "evidence", category: "schema_mismatch" },
+  ])(
+    "keeps a $reason denial for a $category finding in the host's sign-in recipe",
+    async ({ reason, category }) => {
+      const finding = at("operation/auth-fill.json", category);
+      expect(await decode(marked, { outcome: "deny", reason, findings: [finding] })).toMatchObject({
+        _tag: "Right",
+        right: { outcome: "deny", reason, rationale, findings: [finding] },
+      });
+    },
+  );
+
+  // A sign-in page choice beside it is still set aside, and the rest blocks as host_owned.
+  it("sets a sign-in page choice aside and decodes the rest as host_owned", async () => {
+    const choice = at("operation/auth-fill.json", "input_option");
+    expect(
+      await decode(marked, {
+        outcome: "deny",
+        reason: "source_correction",
+        findings: [choice, inRecipe],
+      }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: {
+        outcome: "deny",
+        reason: "host_owned",
+        findings: [inRecipe],
+        excusedSignInChoices: [choice],
+      },
+    });
+  });
+
+  it("keeps a denial host_owned when the review already named it", async () => {
+    expect(
+      await decode(marked, { outcome: "deny", reason: "host_owned", findings: [inRecipe] }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "host_owned", rationale, findings: [inRecipe] },
+    });
+  });
+
+  // Any finding the minter can fix keeps the review's reason, so the denial goes back to it.
+  it.each([
+    { where: "a file the minter wrote", findings: [inRecipe, inSource] },
+    { where: "the public definition", findings: [at("publication/definition.json", "private_literal")] },
+    { where: "the live test record", findings: [at("publication/tests.json", "unsupported_claim")] },
+    {
+      where: "the recipe and the public definition",
+      findings: [inRecipe, at("publication/definition.json", "private_literal")],
+    },
+  ])("keeps a source_correction denial with a finding in $where", async ({ findings }) => {
+    expect(
+      await decode(marked, { outcome: "deny", reason: "source_correction", findings }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "source_correction", rationale, findings },
+    });
+  });
+
+  it("keeps a denial whose recipe a host never marked as its own", async () => {
+    expect(
+      await decode(unmarked, { outcome: "deny", reason: "source_correction", findings: [inRecipe] }),
+    ).toMatchObject({
+      _tag: "Right",
+      right: { outcome: "deny", reason: "source_correction", rationale, findings: [inRecipe] },
+    });
+  });
+
+  // Input feedback never blocks publication on its own, a denial with no finding names no file,
+  // and an escalation asks for a person's decision, so each keeps the review's reason.
+  it.each([
+    {
+      outcome: "deny",
+      reason: "input_feedback",
+      findings: [at("operation/auth-fill.json", "account_specific_enum")],
+    },
+    { outcome: "deny", reason: "evidence", findings: [] },
+    { outcome: "escalate", reason: "source_correction", findings: [inRecipe] },
+  ])("keeps a $outcome for $reason with $findings.length findings", async (decision) => {
+    expect(await decode(marked, decision)).toMatchObject({
+      _tag: "Right",
+      right: { ...decision, rationale },
+    });
+  });
+});
+
 describe("the publication policy", () => {
+  // Hosts with their own publication policy compose the same decision policy.
+  it("says the host sets host_owned itself for a denial in the host's bundle files", () => {
+    const rule =
+      "The host itself sets reason host_owned on a deny it cannot send back for a fix, one for privacy or authority or with a private_literal, credential, customer_data, exfiltration, unsafe_logging or safety_default finding, whose every finding is in an owner: host file under operation/, so when the minter's source causes such a problem, also put a finding on that source.";
+    expect(publicationDecisionPolicy).toContain(
+      `approved only with allow and no findings. ${rule} Site naming`,
+    );
+    expect(guardianPublicationPolicy.split(rule)).toHaveLength(2);
+    // It names every refusal the host counts as one no correction gets past.
+    for (const name of [...unfixablePublicationReasons, ...unfixableFindingCategories])
+      expect(rule).toContain(name);
+  });
+
   it("is the core text, naming the files the host writes", () => {
     const policy = guardianPublicationPolicy;
     expect(policy.split("\n")).toHaveLength(18);
@@ -755,9 +958,21 @@ describe("the publication policy", () => {
   // a live step nor the publication review asks a tool to require an exact match.
   it("gives the execution and publication reviews the same fuzzy proper-noun rule", () => {
     const rule =
-      "A tool matches the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name. Never ask a tool to require an exact match. When more than one option matches, the tool lists them for the caller instead of picking one.";
+      "A tool matches the caller's proper nouns, such as places, venues and company names, with a fuzzy match that accepts the usual forms of the same name. Never ask a tool to require an exact match. When more than one option matches a caller's value equally, the tool either takes the first in the site's order and returns the one it used, as the site labels it, or lists them for the caller to choose one, in a question or a refusal whose options each select exactly one of them. Which of the two is the tool's own choice, never a finding or a reason to deny. A tool that takes the first and does not return the one it used is a schema_mismatch finding with reason source_correction.";
     expect(guardianPublicationPolicy.split(rule)).toHaveLength(2);
     expect(guardianExecutionPolicy(nativeExecutionEnvironment)).toContain(`\n${rule}\n`);
+  });
+
+  // Of several equal matches, taking the first or letting the caller choose is the tool's own
+  // choice. Only taking the first without returning the match it used is a finding, and one the
+  // publication review can return.
+  it("finds a tool that takes the first of equal matches without returning it, never the choice", () => {
+    const choice = "Which of the two is the tool's own choice, never a finding or a reason to deny.";
+    const missing =
+      "A tool that takes the first and does not return the one it used is a schema_mismatch finding with reason source_correction.";
+    expect(guardianPublicationPolicy.split(`${choice} ${missing}`)).toHaveLength(2);
+    expect(publicationFindingCategories).toContain("schema_mismatch");
+    expect(publicationReasons).toContain("source_correction");
   });
 
   // A repair is judged on what it changed: an unchanged line is denied only when a failing run or
@@ -830,11 +1045,35 @@ describe("the publication policy", () => {
   it("accepts a write confirmed from its own commit request, and refuses a loose check", () => {
     const policy = guardianPublicationPolicy;
     expect(policy).toContain(
-      "perform and return the confirmation or read-back it declares, and never resubmit or commit twice. A script that confirms from its commit request is confirming, not missing a read-back: in the same call as the final commit click it waits for the site's response on the route the session's commit used, requires a 2xx or 3xx status and no error in a body it can read, checks the page for an error or validation message (a 201 whose Location names the new record needs no page check), and only then calls verified(). It is a confirmation finding when the script accepts any request or any status, takes a 200 from an endpoint that can report errors in its body without checking that body, or skips the page's error check.",
+      "perform and return the confirmation or read-back it declares, and never resubmit or commit twice. A second click on a marked step is not a resubmission when the marked call returned `blockingRequiredFields`' fields and the script called `notCommitted` for that step once, after `blockingRequiredFields` returned them and before entering it again, and entered it again once they were answered; a `notCommitted` without that, or a second one for the same step, is a confirmation finding. A `notCommitted` for a step right after the marked call of the step's first click got `unaskable` from `blockingRequiredFields`, followed by `InvalidInput` and no further click, is no finding. A script that confirms from its commit request is confirming, not missing a read-back: in the same call as the final commit click it waits for the site's response on the route the session's commit used, requires a 2xx or 3xx status and no error in a body it can read, checks the page for an error or validation message (a 201 whose Location names the new record needs no page check), and only then calls verified(). It is a confirmation finding when the script accepts any request or any status, takes a 200 from an endpoint that can report errors in its body without checking that body, or skips the page's error check.",
     );
     expect(policy).toContain(
       "'unverifiable' is valid only if the session evidence shows the site offered no commit response the script can check, no confirmation and no read-back.",
     );
+  });
+
+  // The click's proof lets the step go back once before it is entered again: before the
+  // site-field question, as the skills teach, or after the answers, as tools published before do.
+  it("accepts a step put back after the fields that stopped its click, before or after asking them", () => {
+    expect(guardianPublicationPolicy).toContain(
+      "and a check run again after a marked call returned `blockingRequiredFields`' fields and they were answered, before that step's next enteringCommit.",
+    );
+    expect(guardianPublicationPolicy).not.toContain("just before entering it again");
+    const execution = guardianExecutionPolicy(nativeExecutionEnvironment);
+    expect(execution).toContain(
+      "A second click on a marked step is not submitting the task a second time when the marked call returned blockingRequiredFields' fields and the step called notCommitted for that step once, after blockingRequiredFields returned them and before entering it again, and entered it again once they were answered.",
+    );
+    expect(execution).not.toContain("just before entering it again");
+  });
+
+  // A write that follows the site's own substitute for an unoffered option is right only when the
+  // caller's task, in the trusted request or a confirmed task update, asks for whatever the site
+  // ends up with; nothing the minter wrote is such an ask.
+  it("accepts a write that follows the site's substitute only on the caller's own ask", () => {
+    expect(publicationOutputPolicy).toContain(
+      "For any other input, the fix is to throw InputNotApplied with the requested and applied value, or InvalidInput with the values the site offers when it does not offer the caller's value. Neither the description nor an answer in trusted_authority.answeredQuestions excuses it. A write that follows the site's preselected substitute for an option the page doesn't offer is no finding when the caller's own task, in trusted_request.intent or a caller-confirmed update in trusted_authority.taskUpdates, asks for whatever the site ends up with and the output returns the value the site used; nothing the minter wrote, in notes, observations, source or the definition, such as an output field or its description, counts as that ask. When the site shows no results,",
+    );
+    expect(guardianPublicationPolicy).toContain(publicationOutputPolicy);
   });
 });
 
@@ -877,6 +1116,7 @@ const reviewRequest = (request: ModelRequest | undefined): Record<string, unknow
   }
   throw new Error("No review request");
 };
+/** The policy the review's own message carries for its kind. */
 const policyOf = (request: ModelRequest | undefined) =>
   (reviewRequest(request)["trusted_review"] as { readonly policy: string }).policy;
 
@@ -901,8 +1141,12 @@ describe("the OpenAI publication reviewer", () => {
         ).review(pending, sourcesOf(files)),
       );
       const policy = policyOf(requests[0]);
-      expect(policy.startsWith("Return the structured outcome allow, deny or escalate")).toBe(true);
-      expect(policy.endsWith(`\n\n${guardianPublicationPolicy}`)).toBe(true);
+      expect(policy).toContain(
+        "Return the structured outcome allow, deny or escalate and a concise rationale.",
+      );
+      expect(policy).toContain(guardianPublicationPolicy);
+      // The review carries its own policy; the shared instructions hold none of it.
+      expect(instructionsOf(requests[0])).not.toContain(guardianPublicationPolicy);
       const request = reviewRequest(requests[0]);
       const keys = Object.keys(request);
       const at = keys.indexOf("trusted_authority");
@@ -915,9 +1159,47 @@ describe("the OpenAI publication reviewer", () => {
     },
   );
 
-  // A host that sends its own publication policy keeps exactly what it sends: no core policy,
-  // file index or turn limit is added to its review.
-  it("keeps a host's own publication policy, input and turn limit as it sends them", async () => {
+  // A host that registers its own publication policy keeps exactly what it sends: the policy
+  // replaces the core one in the review's own message, and no file index or turn limit is added
+  // to its review.
+  it("keeps a host's registered publication policy, input and turn limit as it sends them", async () => {
+    const requests = scripted((index) => [read(pending.entrypoint, 0, `read_${index}`)]);
+    const result = await Effect.runPromise(
+      Effect.either(
+        makeGuardian(
+          makeOpenAIReviewer("Synthetic policy {{ tenant_policy_config }}", false, {
+            ...native,
+            policies: { publication: "Synthetic host publication policy." },
+            specialize: (turn) =>
+              turn.pending.publication === undefined
+                ? {}
+                : { input: { trusted_host_record: { synthetic: true } } },
+          }),
+        ).review(pending, sourcesOf(files)),
+      ),
+    );
+    const policy = policyOf(requests[0]);
+    expect(policy).toContain("Synthetic host publication policy.");
+    expect(policy).not.toContain(guardianPublicationPolicy);
+    expect(instructionsOf(requests[0])).not.toContain("Synthetic host publication policy.");
+    const request = reviewRequest(requests[0]);
+    const keys = Object.keys(request);
+    const at = keys.indexOf("trusted_authority");
+    expect(keys.slice(at, at + 3)).toEqual([
+      "trusted_authority",
+      "trusted_host_record",
+      "trusted_execution_environment",
+    ]);
+    expect(request).not.toHaveProperty("trusted_publication");
+    expect(result).toMatchObject({ _tag: "Left", left: { code: "TurnLimitExceeded" } });
+    // Its 12 turns, then the one final turn that must decide.
+    expect(requests).toHaveLength(13);
+  });
+
+  // A host that still sends its publication policy with each review, the deprecated way, keeps
+  // it: the review's request carries it in place of the core policy, with no file index and
+  // the 12-turn default.
+  it("keeps a host's own per-review publication policy, input and turn limit as it sends them", async () => {
     const requests = scripted((index) => [read(pending.entrypoint, 0, `read_${index}`)]);
     const result = await Effect.runPromise(
       Effect.either(
@@ -936,9 +1218,8 @@ describe("the OpenAI publication reviewer", () => {
       ),
     );
     const policy = policyOf(requests[0]);
-    expect(policy.startsWith("Return the structured outcome allow, deny or escalate")).toBe(true);
     expect(policy.split("\n\n").at(-1)).toBe("Synthetic host publication policy.");
-    expect(policy).not.toContain("This is the existing publication review");
+    expect(policy).not.toContain(guardianPublicationPolicy);
     const request = reviewRequest(requests[0]);
     const keys = Object.keys(request);
     const at = keys.indexOf("trusted_authority");
@@ -1048,9 +1329,7 @@ describe("the OpenAI publication reviewer", () => {
         makeOpenAIReviewer("Synthetic policy {{ tenant_policy_config }}", false, native),
       ).review({ ...pending, screenedIntent: intent, answeredQuestions }, sourcesOf(files)),
     );
-    expect(requests[0]?.systemInstructions).toContain(
-      `trusted_request: ${JSON.stringify({ intent })}`,
-    );
+    expect(instructionsOf(requests[0])).toContain(`trusted_request: ${JSON.stringify({ intent })}`);
     expect(reviewRequest(requests[0])["trusted_authority"]).toMatchObject({
       answeredQuestions: [{ id: "blank_fields", question: prompt, answer: "As an empty string" }],
     });
@@ -1081,7 +1360,7 @@ describe("the OpenAI publication reviewer", () => {
         makeOpenAIReviewer("Synthetic policy {{ tenant_policy_config }}", false, native),
       ).review(execution, sourcesOf(files)),
     );
-    expect(policyOf(requests[0])).not.toContain("publication review");
+    expect(policyOf(requests[0])).not.toContain(guardianPublicationPolicy);
     expect(reviewRequest(requests[0])).not.toHaveProperty("trusted_publication");
   });
 

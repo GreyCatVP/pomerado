@@ -2,7 +2,11 @@ import { Effect, Option, Schema } from "effect";
 import { publicDefinitionPath } from "../guardian/publication.js";
 import type { PendingExecution, ReviewTurn } from "../guardian/review.js";
 import type { PublicationScope } from "../guardian/review-contracts.js";
-import { inlineLocalRefs, UnresolvedSchemaReference } from "../registry/schema-references.js";
+import {
+  inlineLocalRefs,
+  UnresolvedSchemaReference,
+  withLoneReferences,
+} from "../registry/schema-references.js";
 import type { ScriptQuestionDeclarations } from "../runtime/script-input.js";
 import type { TaskChange } from "../guardian/task-update.js";
 import { MintFailure } from "./contracts.js";
@@ -485,8 +489,17 @@ export const sessionEvidenceFiles = (
   );
 
 /**
+ * A published schema as the review reads it: every keyword and value as published, each
+ * reference with a constraint beside it moved into `allOf` (`withLoneReferences`). The published
+ * text declares Draft-07, which ignores a bound Effect writes beside a reference, while the tool
+ * and its callers apply it.
+ */
+const reviewedSchema = (schema: unknown): unknown =>
+  isRecord(schema) ? withLoneReferences(schema) : schema;
+
+/**
  * The public definition as Guardian reads it, at `publication/definition.json`: the build's name
- * and description, then its input and output schemas and declared questions.
+ * and description, then its input and output schemas (`reviewedSchema`) and declared questions.
  */
 export const publicDefinition = (
   metadata: { readonly name: string; readonly description: string },
@@ -500,8 +513,8 @@ export const publicDefinition = (
     {
       name: metadata.name,
       description: metadata.description,
-      inputSchema: schemas.input,
-      outputSchema: schemas.output,
+      inputSchema: reviewedSchema(schemas.input),
+      outputSchema: reviewedSchema(schemas.output),
       ...(schemas.questions === undefined ? {} : { questions: schemas.questions }),
     },
     null,

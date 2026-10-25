@@ -18,6 +18,7 @@ import type { MintAgentSnapshot, MintRecoveryFactory } from "../../src/mint/reco
 import type { MintHarnessSnapshot } from "../../src/mint/contracts.js";
 import { makeMintContinuationFixture } from "../support/mint-fixtures.js";
 import { portableJobSession } from "../support/portable-mint.js";
+import { instructionsOf } from "../support/guardian-requests.js";
 
 // The outcome reviewer through the mint harness: the real minter and the real reviewer, each on
 // a scripted model, with a scripted host standing in for Guardian review and execution.
@@ -330,6 +331,64 @@ it("tracks a write's source by content when it imports the host runtime, and ref
   });
 });
 
+/** A build that runs the write step `src/book.ts` twice, with or without an outcome review. */
+const repeatedWrite = async (outcomeReview?: OutcomeReviewHost) => {
+  let dispatched = 0;
+  const f = await fixture(
+    (_request, index) =>
+      [
+        minter("execute", step("src/book.ts"), "first"),
+        minter("execute", step("src/book.ts"), "again"),
+      ][index] ?? respond(message("Stopped.")),
+    {
+      reviewAndExecute: allowedStep(() =>
+        Effect.sync(() => {
+          dispatched++;
+          return {
+            executionId: "booked",
+            status: "completed" as const,
+            effect: "possible" as const,
+            resultRef: "booking_result",
+            observations: { page: "Request received." },
+          };
+        }),
+      ),
+      ...(outcomeReview === undefined ? {} : { outcomeReview }),
+    },
+    { effect: "write" },
+  );
+  await f.run();
+  const refusal = toolOutput(f.requests[2] as ModelRequest, "again");
+  return { dispatched, refusal, reason: JSON.stringify(refusal) };
+};
+
+// Fails when the refusal tells an agent with no outcome review to wait for one: it can never
+// come, so the agent sends the write again through a copy of the step.
+it("refuses a repeat for the rest of the attempt when no outcome review runs", async () => {
+  const { dispatched, refusal, reason } = await repeatedWrite();
+
+  expect(dispatched).toBe(1);
+  expect(refusal).toMatchObject({ status: "unsupported" });
+  expect(reason).toMatch(/src\/book\.ts stays refused for the rest of this attempt/u);
+  expect(reason).toMatch(/Never run a copy of it/u);
+  expect(reason).not.toMatch(
+    /until the outcome review|unless its outcome review|review can settle/u,
+  );
+});
+
+// Fails when the refusal with an outcome review does not say to run the step itself once the
+// review finds the write did not happen, so the agent reaches for a copy instead.
+it("tells the agent to rerun the write's own step once the outcome review clears it", async () => {
+  const review = reviewHost(scriptedReviewer(() => respond(message("Waiting."))).provider);
+  const { dispatched, refusal, reason } = await repeatedWrite(review.host);
+
+  expect(dispatched).toBe(1);
+  expect(refusal).toMatchObject({ status: "unsupported" });
+  expect(reason).toMatch(/until the outcome review finds the earlier write did not happen/u);
+  expect(reason).toMatch(/run src\/book\.ts itself again, not a copy/u);
+  expect(reason).not.toMatch(/for the rest of this attempt/u);
+});
+
 // Fails when the reviewer cannot see minter history from before a compaction: the request the
 // minter sends after it no longer carries the confirmation.
 it("finds a write's confirmation in minter history from before a compaction", async () => {
@@ -496,7 +555,7 @@ it("settles a write done from its own commit request's status in the step's resu
   ]);
   // The step's listed status reached the reviewer through the minter's history.
   expect(review.recorded[0]?.evidence.length).toBeGreaterThan(0);
-  const instructions = String(reviewer.requests[0]?.systemInstructions);
+  const instructions = instructionsOf(reviewer.requests[0]);
   expect(instructions).toContain(
     "or the write's commit request: in the step that clicked the final commit control, a request to the site's own origin on the route the session's commit used, listed in that step's stateChangingRequests with a 2xx or 3xx status, and no error after it in its readable response or on the page.",
   );

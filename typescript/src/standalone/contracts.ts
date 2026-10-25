@@ -11,7 +11,11 @@ import type { ListCursorKeys } from "../runtime/list-cursor.js";
 import { ScriptQuestionDeclarations } from "../runtime/script-input.js";
 export interface PomeradoOptions {
   readonly ask: InputAsker;
-  readonly browser?: PlaywrightOptions;
+  /**
+   * The browser the host launches or attaches to. It never attaches over CDP (`cdp`): its runs
+   * close other tabs and reset site data, which would change a browser it doesn't own.
+   */
+  readonly browser?: Omit<PlaywrightOptions, "cdp">;
   readonly minterProvider?: ModelProvider;
   readonly guardianProvider?: ModelProvider;
   /** The outcome reviewer's model provider, which judges whether each write took effect. */
@@ -43,10 +47,9 @@ export interface PomeradoRequest {
 }
 
 /**
- * A local mint's outcome. An unpublished build whose sign-in sent the login only to origins off
- * the site and `authenticationOrigins` names them in `untrustedSignInOrigins`, each an exact
- * origin, whether or not the caller trusted one when asked: answer yes when the build asks, or add
- * one you trust to `authenticationOrigins`, and mint again.
+ * A local mint's outcome. A build no longer sets `untrustedSignInOrigins`: it refuses a sign-in
+ * form that submits off the site and `authenticationOrigins` before anything is typed, and counts
+ * a screen as sent by its clicked submit. The field stays so older callers still type-check.
  */
 export type LocalMintOutcome = MintOutcome & {
   readonly untrustedSignInOrigins?: readonly string[];
@@ -59,9 +62,10 @@ export interface Pomerado {
    * reviewed the artifact when it was minted. `intent`, `effect` and `authenticationOrigins` are
    * not checked here, so run only artifacts you minted or trust. Its sign-in types the login on
    * the site, the request's `authenticationOrigins` and the ones the artifact saved in
-   * `signIn.authenticationOrigins`, which a caller trusted when its build asked. A read or a
-   * confirmed write returns its output. A failed sign-in fails with `SignInRunFailed`, and any
-   * other run with `RunOutcomeFailure`, which says what it did to the website and how to retry.
+   * `signIn.authenticationOrigins`, which its build's request declared (a tool an older version
+   * built may also hold ones its caller trusted when asked). A read or a confirmed write returns
+   * its output. A failed sign-in fails with `SignInRunFailed`, and any other run with
+   * `RunOutcomeFailure`, which says what it did to the website and how to retry.
    */
   readonly run: (
     artifact: MintArtifact,

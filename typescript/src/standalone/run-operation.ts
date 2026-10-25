@@ -114,6 +114,7 @@ export const runOperation = (
         // so a read tool has no record to accept from even when the request names no effect.
         readOnly: request.effect === "read",
         expectedConfirms: artifact.acceptedConfirms,
+        input: request.input ?? {},
         incidents: noIncidents,
       }),
       ...(signIn === undefined ? {} : { signIn: signIn.hook() }),

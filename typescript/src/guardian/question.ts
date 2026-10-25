@@ -26,14 +26,18 @@ interface ReviewedOption {
 /**
  * What Guardian sees of one proposed question: every string the caller will see, screened like
  * the rest (prompt, option labels including account-specific ones and their masked labels, and a
- * confirm dialog's follow-up). Never an answer, a credential value, a provider field id, or a
- * host-held login's username or site.
+ * confirm dialog's follow-up), and a multiple choice's selection bounds. Never an answer, a
+ * credential value, a provider field id, or a host-held login's username or site.
  */
 interface ReviewedQuestion {
   readonly id: string;
   readonly type: Question["type"];
   readonly prompt: string;
   readonly options?: readonly ReviewedOption[];
+  /** A multiple choice's fewest picks; 0 lets the user pick none. */
+  readonly minSelections?: number;
+  /** A multiple choice's most picks. */
+  readonly maxSelections?: number;
   readonly followUp?: { readonly prompt: string; readonly defaultText?: string };
   readonly secretKind?: SecretKind;
   readonly fields?: "username_password" | "password";
@@ -112,12 +116,21 @@ export const questionForReview = <E>(
         const base = { id: question.id, type: question.type, prompt };
         switch (question.type) {
           case "choice":
-          case "multi_choice":
             return {
               ...base,
               options: yield* Effect.forEach(question.options, (option) =>
                 reviewedOption(option, screen),
               ),
+            };
+          case "multi_choice":
+            // The bounds are validated numbers, not caller text: nothing to screen.
+            return {
+              ...base,
+              options: yield* Effect.forEach(question.options, (option) =>
+                reviewedOption(option, screen),
+              ),
+              minSelections: question.minSelections,
+              maxSelections: question.maxSelections,
             };
           case "confirm": {
             const followUp = question.followUp;

@@ -6,7 +6,10 @@
 // site or over http, or a workspace step without a workspace relation for the site, passes; a
 // recipe no host reads, such as one with no steps or a workspace page that names a host, passes; a
 // workspace step under a valid relation is refused; a one-time entry URL the host already asked
-// about is refused, for its spent values too.
+// about is refused, for its spent values too; a step page, selector or marker holding the
+// `[private]` mask passes when the caller passes no identity values; a step page whose every
+// segment is written as `*` passes; a URL path marker on a sign-in screen whose page writes a
+// segment as `*` passes.
 import { describe, expect, it } from "vitest";
 import {
   checkSignInVersion,
@@ -143,6 +146,26 @@ describe("checkSignInVersion", () => {
       { rule: "page_names_contact", part: "recipe.steps[0].page" },
       { rule: "indicator_holds_identity", part: "recipe.signedIn.selector" },
     ]);
+  });
+
+  it.each([
+    [
+      "a step page",
+      withStep(0, { page: "https://www.example.com/login?email=[private]" }),
+      [{ rule: "page_names_contact", part: "recipe.steps[0].page" }],
+    ],
+    [
+      "a submit",
+      withStep(0, { submit: "text=Continue as [private]" }),
+      [{ rule: "selector_names_contact", part: "recipe.steps[0].submit" }],
+    ],
+    [
+      "a signed-in marker",
+      withMarker({ selector: "text=Hi, [private]", openPath: "/account" }),
+      [{ rule: "indicator_holds_identity", part: "recipe.signedIn.selector" }],
+    ],
+  ] as const)("refuses %s holding the [private] mask", (_name, change, findings) => {
+    expect(checkSignInVersion(input(change))).toEqual(findings);
   });
 
   it("checks the masked pattern past the origin only, so a port is not a number", () => {
@@ -395,5 +418,97 @@ describe("checkSignInVersion", () => {
     expect(checkSignInVersion(input(() => popup))).toEqual([
       { rule: "foreign_origin", part: "recipe.steps[0].popup.origin" },
     ]);
+  });
+
+  it("passes a segment written as * on the site's own origin or a workspace step, and refuses one on another origin or on the page the entry URL opens", () => {
+    const listed = (page: string, entryUrl = version.entryUrl): SignInVersion => ({
+      entryUrl,
+      recipe: {
+        version: 7,
+        workspace: { parent: "example.com" },
+        steps: [
+          version.recipe.steps[0]!,
+          { ...version.recipe.steps[1]!, page, anySegments: [1] },
+          {
+            origin: "workspace",
+            page: "/team/*/code",
+            anySegments: [1],
+            fields: [{ selector: "#code", slot: "code" }],
+          },
+        ],
+        signedIn: version.recipe.signedIn,
+      },
+    });
+    expect(checkSignInVersion(input(() => listed("https://www.example.com/team/*/password")))).toEqual([]);
+    expect(checkSignInVersion(input(() => listed("https://login.example.com/team/*/password")))).toEqual([
+      { rule: "wildcard_placement", part: "recipe.steps[1].anySegments" },
+    ]);
+    // Another site's sign-in keeps its exact page, even for a host that drops `foreign_origin`.
+    expect(checkSignInVersion(input(() => listed("https://accounts.provider.example/team/*/password")))).toEqual([
+      { rule: "foreign_origin", part: "recipe.steps[1].page" },
+      { rule: "wildcard_placement", part: "recipe.steps[1].anySegments" },
+    ]);
+    // The first step's page is where a run starts: the recipe that lists it is refused as it decodes.
+    const first = listed("https://www.example.com/team/*/password");
+    const firstListed: SignInVersion = {
+      ...first,
+      recipe: {
+        ...first.recipe,
+        steps: first.recipe.steps.map((step, at) =>
+          at === 0 ? { ...step, page: "https://www.example.com/*/login", anySegments: [0] } : step,
+        ),
+      } as SignInVersion["recipe"],
+    };
+    expect(checkSignInVersion(input(() => firstListed))).toEqual([
+      { rule: "invalid_recipe", part: "recipe" },
+    ]);
+    expect(
+      checkSignInVersion(
+        input(() =>
+          listed("https://www.example.com/team/*/password", "https://www.example.com/team/a/password"),
+        ),
+      ),
+    ).toEqual([{ rule: "wildcard_placement", part: "recipe.steps[1].anySegments" }]);
+  });
+
+  /** The version whose second step's page writes the listed segments as `*`, and a third on the workspace host. */
+  const wildcard = (page: string, anySegments: readonly number[], signedIn = version.recipe.signedIn) =>
+    input(() => ({
+      ...version,
+      recipe: {
+        version: 7,
+        workspace: { parent: "example.com" },
+        steps: [
+          version.recipe.steps[0]!,
+          { ...version.recipe.steps[1]!, page: `${site}${page}`, anySegments },
+          {
+            origin: "workspace",
+            page: "/team/*/code",
+            anySegments: [1],
+            fields: [{ selector: "#code", slot: "code" }],
+          },
+        ],
+        signedIn,
+      },
+    }));
+
+  it("refuses a step page with no literal segment left, which would match any page with as many segments", () => {
+    expect(checkSignInVersion(wildcard("/*", [0]))).toEqual([{ rule: "invalid_recipe", part: "recipe" }]);
+    expect(checkSignInVersion(wildcard("/*/*", [0, 1]))).toEqual([
+      { rule: "invalid_recipe", part: "recipe" },
+    ]);
+    expect(checkSignInVersion(wildcard("/*/password", [0]))).toEqual([]);
+    expect(checkSignInVersion(wildcard("/team/*/password", [1]))).toEqual([]);
+  });
+
+  it("refuses a URL path marker on a sign-in screen whose page writes a segment as *", () => {
+    const refused = [{ rule: "marker_is_login_path", part: "recipe.signedIn.urlPath" }];
+    expect(checkSignInVersion(wildcard("/team/*/password", [1], { urlPath: "/team/b/password" }))).toEqual(
+      refused,
+    );
+    expect(checkSignInVersion(wildcard("/team/*/password", [1], { urlPath: "/team/b/code/" }))).toEqual(
+      refused,
+    );
+    expect(checkSignInVersion(wildcard("/team/*/password", [1], { urlPath: "/team/b/home" }))).toEqual([]);
   });
 });

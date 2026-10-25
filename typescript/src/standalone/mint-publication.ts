@@ -69,7 +69,7 @@ const retainedPublicationSample = (
  * not sign in, and the build took the task to need the account. A write rests on every act step
  * of its session, since its composed script is judged against all of them; a read on the step it
  * publishes, an example or an explore. A sign-in the build verifies later records one, and then
- * the build publishes. The refusal names the origins the login went to off the site, if any.
+ * the build publishes.
  */
 const unverifiedSignInRefusal = (state: MintState, sample: Run) =>
   Effect.suspend(() => {
@@ -80,20 +80,18 @@ const unverifiedSignInRefusal = (state: MintState, sample: Run) =>
           )
         : sample.afterUnverifiedSignIn === true;
     if (!rests || state.recorder.published() !== undefined) return Effect.void;
-    const origins = state.namedSignInOrigins();
     return Effect.fail(
       new MintFailure({
         code: "PublicationUnavailable",
         reason: "autofill_recipe_not_verified",
-        ...(origins.length === 0 ? {} : { untrustedSignInOrigins: origins }),
       }),
     );
   });
 
 /**
  * The build's https sign-in origins, as the tool saves them with a published sign-in: the
- * request's that are https origins, same-site ones included, then each the caller trusted when
- * asked, once each. None when there are none, so a build without them saves what it always did.
+ * request's that are https origins, same-site ones included. None when there are none, so a build
+ * without them saves what it always did.
  */
 const savedSignInOrigins = (state: MintState) => {
   const origins = state.signInOrigins
@@ -211,8 +209,8 @@ export const screenedSignIn = <E>(
  * identity values or signed-out pages: it no longer holds the login, and the recorder already
  * applied the identity guards to each screen and compared the marker with the build's signed-out
  * pages as it recorded the sign-in. A login URL, page or popup off the site's registrable domain
- * is refused (`foreign_origin`), on a sign-in origin the build trusted too, and one that is not
- * https (`insecure_origin`).
+ * is refused (`foreign_origin`), on a sign-in origin the request declares in
+ * `authenticationOrigins` too, and one that is not https (`insecure_origin`).
  */
 const signInVersionRefusal = (
   signIn: PublishedSignIn,
@@ -324,6 +322,7 @@ export const mintPublication =
           signIn,
           result,
           contract: result,
+          outputSchema: result.schemas.output,
           inputDecodes: result.inputDecodes === true,
         };
       });
@@ -342,6 +341,7 @@ export const mintPublication =
             step: sample.journal,
             extract,
             confirms: { steps: writeSession.confirmSteps, entrypoint: publication.entrypoint },
+            ...(writeSession.path === undefined ? {} : { writePath: writeSession.path }),
           })
         : undefined;
       const { files, sources, signIn, result } = session?.extracted ?? (yield* extract);

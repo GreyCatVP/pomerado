@@ -33,8 +33,36 @@ export type Registered = keyof typeof entities;
 /** A value an ask returns for a field the login does not hold; a security answer has its own. */
 type AskedSlot = Exclude<Registered, "private_answer">;
 
-/** The question for a value the login does not hold. */
-const question = (asked: Asked, site: string, notice?: string): Question => {
+/** The longest prompt a question may have, as the input request allows. */
+const promptLimit = 2_000;
+
+/** `text` cut to `room` characters with an ellipsis, never leaving half a surrogate pair. */
+const cutTo = (text: string, room: number) =>
+  text.length <= room ? text : `${text.slice(0, room - 1).replace(/[\uD800-\uDBFF]$/u, "")}…`;
+
+/**
+ * The code question's prompt. With the screen's own instruction for the code (`instruction`), such
+ * as to call a number or approve in an app, it quotes that, cut to fit, so the owner does what the
+ * site asks; without one it names the code the site sent.
+ */
+const codePrompt = (site: string, notice: string | undefined, instruction: string | undefined) => {
+  const lead = notice === undefined ? "" : `${notice} `;
+  if (instruction === undefined)
+    return notice === undefined
+      ? `Enter the sign-in code ${site} sent you.`
+      : `${lead}Enter the newest sign-in code ${site} sent you.`;
+  const opening = `${lead}${site} shows this on its sign-in screen: “`;
+  const closing = `” Follow it, then enter the ${notice === undefined ? "" : "newest "}code here.`;
+  return `${opening}${cutTo(instruction, promptLimit - opening.length - closing.length)}${closing}`;
+};
+
+/** The question for a value the login does not hold; a code's with its screen's instruction. */
+const question = (
+  asked: Asked,
+  site: string,
+  notice?: string,
+  instruction?: string,
+): Question => {
   const withNotice = (prompt: string) => (notice === undefined ? prompt : `${notice} ${prompt}`);
   // A code asked with a notice is asked again, so it asks for the newest code the site sent.
   // Nothing tells the host the site sent another: after a refusal with no resend, the newest is
@@ -44,10 +72,7 @@ const question = (asked: Asked, site: string, notice?: string): Question => {
       id: "code",
       type: "secret",
       secretKind: "one_time_code",
-      prompt:
-        notice === undefined
-          ? `Enter the sign-in code ${site} sent you.`
-          : `${notice} Enter the newest sign-in code ${site} sent you.`,
+      prompt: codePrompt(site, notice, instruction),
     };
   if (asked === "recovery_code")
     return {
@@ -131,13 +156,11 @@ const askedQuestions = (
   site: string,
   notice: string | undefined,
   offered: Question | undefined,
+  instruction: string | undefined,
 ): Question[] => [
-  question(asked, site, notice),
+  question(asked, site, notice, instruction),
   ...(offered !== undefined && asked !== "code" && asked !== "recovery_code" ? [offered] : []),
 ];
-
-/** The longest prompt a question may have, as the input request allows. */
-const promptLimit = 2_000;
 
 /**
  * The question for a security answer: the question the page shows, cut to fit; else that the
@@ -148,12 +171,7 @@ const answerQuestion = (site: string, shown: ShownAnswerField | undefined): Ques
   const prompt = (() => {
     if (shown?.questionText !== undefined && shown.questionUnread !== true) {
       const lead = `${site} asks this security question: `;
-      const room = promptLimit - lead.length;
-      const question =
-        shown.questionText.length <= room
-          ? shown.questionText
-          : `${shown.questionText.slice(0, room - 1).replace(/[\uD800-\uDBFF]$/u, "")}…`;
-      return `${lead}${question}`;
+      return `${lead}${cutTo(shown.questionText, promptLimit - lead.length)}`;
     }
     if (shown?.questionUnread === true)
       return `Enter your ${site} security answer. The question it answers could not be read from the page.${label === null ? "" : ` The answer field reads "${label.slice(0, 200)}".`}`;
@@ -164,7 +182,10 @@ const answerQuestion = (site: string, shown: ShownAnswerField | undefined): Ques
   return { id: "private_answer", type: "secret", secretKind: "private_text", prompt };
 };
 
-/** What the inspection read of a security answer's field: its question and its own words. */
+/**
+ * What the inspection read of a security answer's field: its question and its own words. A code
+ * field's `questionText` is the screen's own instruction for the code.
+ */
 export interface ShownAnswerField {
   readonly questionText?: string | undefined;
   readonly questionUnread?: true | undefined;
@@ -246,6 +267,8 @@ export const makeLoginFieldAsk = <E extends YieldableError>(dependencies: {
     attempt = 0,
     /** A code's screen's code fields, when it has several, such as one-character boxes. */
     codeBoxes?: number,
+    /** A code screen's own instruction for the code, as the host read it (`codeInstruction`). */
+    instruction?: string,
   ): Effect.Effect<Unanswered | { slot: AskedSlot; value: string }, E> =>
     Effect.gen(function* () {
       const questions = askedQuestions(
@@ -253,6 +276,7 @@ export const makeLoginFieldAsk = <E extends YieldableError>(dependencies: {
         dependencies.site,
         notice,
         offerSave ? saveOffer?.field : undefined,
+        asked === "code" ? instruction : undefined,
       );
       const response = yield* Effect.either(
         asker({
@@ -269,7 +293,8 @@ export const makeLoginFieldAsk = <E extends YieldableError>(dependencies: {
       const kept = parsedAnswer(asked, answer.value);
       const misfit = misfitCode(kept, codeBoxes);
       if (kept === undefined || misfit) {
-        if (attempt < 2) return yield* ask(asker, asked, notice, offerSave, attempt + 1, codeBoxes);
+        if (attempt < 2)
+          return yield* ask(asker, asked, notice, offerSave, attempt + 1, codeBoxes, instruction);
         return misfit
           ? new Unanswered(codeDoesNotFit)
           : yield* fail("autofill.ask", { check: "answer_kind" });

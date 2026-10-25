@@ -120,7 +120,7 @@ Authority decides what an integration is allowed to do, so choose it deliberatel
 - A read mint that finds the task needs a change asks to switch to write, and your agent's answer decides
 - A run doesn't check authority or intent, and edits to `src/` or `deployment.json` aren't reviewed. A run that signs in replays its sign-in only on the site and its sign-in origins. A served call takes them from `deployment.json`, and `pomerado run --artifact` from `pomerado.json`
 
-Some sites sign in through a script that sends your login to another website, such as a hosted identity service. Pomerado then asks you once whether the site signs in through that address, when there are one to three such https addresses. Until your password or a code has been sent anywhere, it asks only when there's one. Yes trusts it for signing in only and saves it with the integration. No stops the mint without saving anything. To trust it up front, or to trust one Pomerado doesn't ask about, pass it in `authenticationOrigins` when you call `mint`.
+Pomerado types your login only on the site, or on a sign-in address you pass in `authenticationOrigins` when you call `mint`. A sign-in form whose fields or submit go to any other website is refused before anything is typed. A sign-in whose pages are on another website doesn't publish, even one you pass there. Pomerado doesn't ask about other addresses, and it doesn't check where the page's own scripts send what you typed.
 
 Names start with a lowercase letter and use only lowercase letters, digits and underscores. The integration's folder must not exist yet. Each mint gets 20 minutes of active work, and time spent waiting for your answers doesn't count against it.
 
@@ -214,4 +214,4 @@ Copyright (c) 2026 Pomerado AI, Inc. Licensed under the MIT License (`MIT`). See
 
 Versions 0.1.2 and earlier were published under the GNU Affero General Public License version 3 only (`AGPL-3.0-only`).
 
-Third-party code keeps its own license. The Guardian policy in `typescript/src/guardian/upstream-policy.md` is adapted from [OpenAI Codex](https://github.com/openai/codex) under the Apache License 2.0. Its license and notice are in [third-party/codex/](third-party/codex/) and ship with the npm package.
+Third-party code keeps its own license. The Guardian policy in `typescript/src/guardian/upstream-policy.md` is adapted from [OpenAI Codex](https://github.com/openai/codex) under the Apache License 2.0. Its license and notice are in [third-party/codex/](third-party/codex/) and ship with the npm package. The accessible name computation in `typescript/src/destinations/accessible-name.ts` is adapted from [Playwright](https://github.com/microsoft/playwright) under the Apache License 2.0. Its license and notice are in [third-party/playwright/](third-party/playwright/) and ship with the npm package.

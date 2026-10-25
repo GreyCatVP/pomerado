@@ -1,12 +1,13 @@
 import { Either, Schema } from "effect";
 import { SignInRecipe, type SignInRecipeStep } from "../destinations/sign-in-recipe.js";
+import { pageMatches } from "../destinations/autofill-recipe.js";
 import {
   loginPathRefusal,
   matchSignedOutSnapshots,
   type SignedOutSnapshot,
 } from "../destinations/signed-in-marker.js";
 import { oneTimeLoginUrlParameters } from "./login-url.js";
-import { namesIdentity, namesMaskedContact } from "./sign-in-guards.js";
+import { namesIdentityOrPrivateMask, namesMaskedContact } from "./sign-in-guards.js";
 import { registrableDomain, sameSite } from "../runtime/same-site.js";
 import { workspaceRelation } from "../runtime/workspace-origin.js";
 
@@ -34,9 +35,9 @@ export interface SignInVersionInput {
   /**
    * Identity values the host knows for the account that recorded the version, such as its
    * username, email, phone or account number. No part of a version may name one; none is ever
-   * returned. The identity rules apply only to the values a caller passes: a host that no longer
-   * holds them, because it applied the same identity guards to each screen while it recorded the
-   * sign-in, passes none.
+   * returned. The identity rules apply to the values a caller passes, and to the `[private]`
+   * placeholder whatever it passes: a host that no longer holds them, because it applied identity
+   * guards of its own to each screen while it recorded the sign-in, passes none.
    */
   readonly identities?: readonly string[] | undefined;
   /**
@@ -81,7 +82,11 @@ export type SignInVersionRule =
   // alone, so a host that permits sign-in on another site's origin, such as an identity
   // provider's, drops this rule's findings itself and still gets every other rule, https
   // included. A workspace step without a valid relation is also refused as `workspace_parent`.
-  | "foreign_origin";
+  | "foreign_origin"
+  // A step lists segments written as `*` (version 7's `anySegments`) on a page off the site's own
+  // origin that is no workspace step, such as another site's sign-in, or on the page the entry URL
+  // opens, which a run opens rather than matches.
+  | "wildcard_placement";
 
 /** A refused part, by its path in the version, such as `recipe.steps[2].submit`. */
 export interface SignInVersionFinding {
@@ -196,8 +201,8 @@ export const checkSignInVersion = (
     // An asked one-time URL's query and fragment hold spent random values, which often have four
     // digits in a row: only its path is read for a masked number.
     namesMaskedContact(input.entryUrlAsked === true ? (entry?.pathname ?? entryPast) : entryPast) ||
-    namesIdentity(entryPast, pageValues) ||
-    namesIdentity(belowDomain(version.entryUrl), values)
+    namesIdentityOrPrivateMask(entryPast, pageValues) ||
+    namesIdentityOrPrivateMask(belowDomain(version.entryUrl), values)
   )
     refuse("page_names_contact", "entryUrl");
   if (signsOut(entryPast)) refuse("sign_out", "entryUrl");
@@ -206,7 +211,7 @@ export const checkSignInVersion = (
   steps.forEach((step, index) => {
     const at = `recipe.steps[${index}]`;
     for (const { part, text } of stepSelectors(step, at)) {
-      if (namesMaskedContact(text) || namesIdentity(text, values))
+      if (namesMaskedContact(text) || namesIdentityOrPrivateMask(text, values))
         refuse("selector_names_contact", part);
       // What a step clicks: its submit and its methods.
       if (/\.(?:submit|methods\[\d+\]\.selector)$/u.test(part) && signsOut(text))
@@ -215,16 +220,22 @@ export const checkSignInVersion = (
     const page = pastOrigin(step.page);
     if (
       namesMaskedContact(page) ||
-      namesIdentity(page, pageValues) ||
-      namesIdentity(belowDomain(step.page), values)
+      namesIdentityOrPrivateMask(page, pageValues) ||
+      namesIdentityOrPrivateMask(belowDomain(step.page), values)
     )
       refuse("page_names_contact", `${at}.page`);
     if (signsOut(page)) refuse("sign_out", `${at}.page`);
     if (step.origin !== "workspace" && !secure(step.page)) refuse("insecure_origin", `${at}.page`);
     if (step.origin === "workspace" ? relation === undefined : !onSite(siteOrigin, step.page))
       refuse("foreign_origin", `${at}.page`);
+    if (
+      step.anySegments !== undefined &&
+      ((step.origin !== "workspace" && URL.parse(step.page)?.origin !== siteOrigin) ||
+        pageMatches(version.entryUrl, step))
+    )
+      refuse("wildcard_placement", `${at}.anySegments`);
     if (step.popup !== undefined) {
-      if (namesIdentity(belowDomain(step.popup.origin), values))
+      if (namesIdentityOrPrivateMask(belowDomain(step.popup.origin), values))
         refuse("page_names_contact", `${at}.popup.origin`);
       if (!secure(step.popup.origin)) refuse("insecure_origin", `${at}.popup.origin`);
       if (!onSite(siteOrigin, step.popup.origin)) refuse("foreign_origin", `${at}.popup.origin`);
@@ -240,7 +251,10 @@ export const checkSignInVersion = (
     if (text === undefined) continue;
     const selector = key === "selector";
     const named = selector ? text : pastOrigin(text);
-    if (namesMaskedContact(named) || namesIdentity(named, selector ? values : pageValues))
+    if (
+      namesMaskedContact(named) ||
+      namesIdentityOrPrivateMask(named, selector ? values : pageValues)
+    )
       refuse("indicator_holds_identity", `recipe.signedIn.${key}`);
     // The host opens the account page before it checks the marker.
     if (key === "openPath" && signsOut(named)) refuse("sign_out", "recipe.signedIn.openPath");
@@ -250,8 +264,8 @@ export const checkSignInVersion = (
     return findings;
   }
   if (
-    [version.entryUrl, ...steps.map((step) => step.page)].some(
-      (page) => loginPathRefusal(marker, page) !== undefined,
+    [{ page: version.entryUrl, anySegments: undefined }, ...steps].some(
+      (step) => loginPathRefusal(marker, step.page, step.anySegments) !== undefined,
     )
   )
     refuse("marker_is_login_path", "recipe.signedIn.urlPath");

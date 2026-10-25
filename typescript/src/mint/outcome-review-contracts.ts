@@ -370,4 +370,6 @@ export interface OutcomeReviewerModelOptions {
   readonly maxTurns?: number;
   /** How long one turn may run; default 5 minutes. */
   readonly turnTimeout?: Duration.DurationInput;
+  /** The host's `prompt_cache_key`, sent on every request and the prewarm. */
+  readonly promptCacheKey?: string;
 }

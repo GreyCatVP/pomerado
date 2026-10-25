@@ -20,6 +20,12 @@ import {
 } from "./guardian-context-fixture.js";
 import { act, mint, noteSite, readNote, saveNote } from "./standalone-mint-fixture.js";
 
+/** The note site's write path: its one save, as a write build's first act step declares it. */
+const savePath = {
+  steps: [{ commit: "save", does: "Saves the note" }],
+  ends: "The site's confirmation of the save",
+};
+
 const definitionPath = "publication/definition.json";
 const publications = (reviews: readonly RecordedReview[]) =>
   reviews.filter((review) => review.kind === "publication");
@@ -513,6 +519,7 @@ const cliRuntime = async (directory: string) => {
     `import { startCli } from ${JSON.stringify(runtime)};
 import { Usage } from ${JSON.stringify(import.meta.resolve("@openai/agents"))};
 import { appendFileSync } from 'node:fs';
+
 const ledger=${JSON.stringify(ledger)};
 const tool=${JSON.stringify(accountTool('Schema.Literal("acct-4417")'))};
 const objects=(value)=>{if(typeof value==='string'){try{return objects(JSON.parse(value));}catch{return [];}}if(Array.isArray(value))return value.flatMap(objects);if(value===null||typeof value!=='object')return [];return [value,...Object.values(value).flatMap(objects)];};
@@ -608,7 +615,7 @@ test("a write's publication review reads each act step under publication/session
       turns: [
         () =>
           patch({ "src/read.mjs": readNote, "src/save.mjs": saveNote, "src/tool.mjs": saveNote }),
-        () => [call("execute", act("src/read.mjs", { note: "kept" }), "read")],
+        () => [call("execute", act("src/read.mjs", { note: "kept" }, savePath), "read")],
         () => [call("execute", act("src/save.mjs"), "save")],
         (request) => [
           call("finish_build", {

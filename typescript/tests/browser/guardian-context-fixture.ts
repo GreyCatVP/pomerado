@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Usage } from "@openai/agents";
 import type { ModelProvider, ModelRequest, ModelResponse } from "@openai/agents";
 import { Schema } from "effect";
+import { instructionsOf } from "../support/guardian-requests.js";
 
 type Output = ModelResponse["output"];
 type Item = Output[number];
@@ -101,7 +102,7 @@ export interface RecordedReview {
   /** `outcome`: the review of a build's outcome report, such as the minter's last answer. */
   readonly kind: "question" | "outcome" | "update" | "execution" | "publication";
   readonly reads: Readonly<Record<string, unknown>>[];
-  /** The reviewer's system instructions. */
+  /** The reviewer's instructions: its leading developer messages, joined. */
   readonly instructions: string;
 }
 /** A publication review's file index. */
@@ -121,7 +122,7 @@ export const currentOf = (review: RecordedReview) =>
   contextOf(review)?.["currentExecution"] as Readonly<Record<string, unknown>> | undefined;
 export const authorityOf = (review: RecordedReview) =>
   review.input["trusted_authority"] as Readonly<Record<string, unknown>>;
-/** The build's request, which ends the instructions every review of the build shares. */
+/** The build's request, which ends the instructions: the build's own developer message. */
 export const intentOf = (review: RecordedReview) => {
   const marker = "\ntrusted_request: ";
   const at = review.instructions.lastIndexOf(marker);
@@ -182,7 +183,7 @@ export const recordingGuardian = (
                 ? "publication"
                 : "execution",
         reads: [],
-        instructions: request.systemInstructions ?? "",
+        instructions: instructionsOf(request),
       });
     const review = reviews.at(-1);
     if (review === undefined) throw new Error("No review recorded");
@@ -316,6 +317,12 @@ export const execution = (
   timeoutSeconds: 10,
   intent: `Run ${entrypoint} for ${purpose}`,
   ...extra,
+});
+
+/** A write path naming `marks` in order, as a write build's first act step declares it. */
+export const writePath = (...marks: readonly string[]) => ({
+  steps: marks.map((commit) => ({ commit, does: `Sends the ${commit} step` })),
+  ends: "The site's confirmation of the task",
 });
 
 /** A read operation whose live step returns the page's main heading. */

@@ -61,15 +61,18 @@ the source files, never captures.
   `testInput`, on a supplied facility: `liveBrowser`,
   `savedDOM`, `savedHTTP` or `pureFiles`. Every execution receives fresh Guardian review; no
   per-click review is needed. When the host-bound input is empty (`{}`), write the tool's
-  input from the request and the owner's answers and pass it as `exampleInput` (JSON text) on
+  input from the request and the owner's answers, with dates normalized (10/4 is the next
+  October 4, as `2026-10-04`), and pass it as `exampleInput` (JSON text) on
   a read's example, or on each write act step that needs it (the first act step that passes it
   fixes it, and later steps repeat it or omit it and run it); each of its keys must be a schema
-  input, required where the request needs it, and publication decodes that input.
+  input, required where the request needs it, and publication decodes that input and returns a
+  key the schema lacks as an `example_input` input feedback. An optional input plus a declared
+  question is only for a value the request leaves open.
 - `live_tests` runs a read's live tests when the host offers it: the few combined cases you
   design in `test/cases.json` from what you saw on the site, and every result, run in batches on
   reset pages, on `src/tool.mjs` and on `src/tool-http.mjs`, each version keeping its own
   results. A read signed out's run in parallel, at least one case cold where the host has
-  several browsers; a signed-in read's run on its own signed-in browser, on two distinct inputs
+  several browsers; a signed-in read's run on its own signed-in browser, on four distinct inputs
   at most. Design them as soon as you know the page and its inputs, and read
   .agents/testing/SKILL.md first. A write runs no live tests.
 - `retain_capture`, `finish_build` and `request_input` are described below and in their
@@ -195,16 +198,9 @@ This holds for `src/tool.mjs`, every fallback in it and your own probes.<!-- pom
 **Read back every input before returning.** Read the page's own display of each input the
 site shows, such as the date picker, selected time, party size, passengers, cabin, applied
 filters, sort and selected options, and refuse a mismatch: the tool throws `InputNotApplied`
-(.agents/core/SKILL.md) and never returns results for an input that did not apply; a control
-the tool could not find or read is `OperationFailure`. Five cases
-return results with what applied instead: a number on a scale the site steps returns its applied
-bound, a filter group the page disables for the results is reported as not offered, a value
-the page's choices do not hold returns the rows of a broader choice that covers it
-(.agents/search/SKILL.md), and an input that tailors the answer, such as a location, that the
-site still won't apply returns what the site showed with the applied value beside the caller's
-(.agents/core/SKILL.md, "Inputs that tailor the answer"), and a search query the site corrected or
-rewrote, such as a spelling fix, returns the site's results with the query it searched as
-`applied_query` and `query_corrected` true, never silently (.agents/search/SKILL.md). Echoed
+and never returns results for an input that did not apply, except in the cases
+.agents/caller-input/SKILL.md lists, such as a location the site won't apply; a control
+the tool could not find or read is `OperationFailure`. Echoed
 input, a
 URL the tool built, a URL parameter, a box checked before the site applied it or the option's
 name elsewhere on the page does not show an input applied; read the site's committed state, such
@@ -235,6 +231,23 @@ where the page landed.
 time, with no parallel live manipulation. The host chooses the private example input and
 account; never embed private literals or tokens in source.
 
+**Publication blocks on these.** Each skill named holds the full rule. Separately, the execution
+review escalates a live step that enters a name, email or phone unless you asked the owner with
+`request_input` first (core skill, "Inputs that tailor the answer").
+
+- Never make an account-specific value an enum member, example or default; take it free-form
+  or as a declared `ask` with `accountSpecific` options (core skill, the input schema).
+- Never narrow an input to the example's value (`example_value`): the code works for every value
+  the schema accepts (core skill).
+- Write every constraint in a form JSON Schema shows, never a `Schema.filter`, and type every
+  output field, never `Schema.Unknown` (core skill).
+- A secret answer is a handle, written only as the whole value it fills; published source never
+  holds one (core skill, "Secret answers").
+- After a write, call `verified()` with no argument just before returning, once a call has read
+  the result back (writes skill).
+- Publish only a flow its example ran: a changed read flow needs a fresh example (publication
+  skill).
+
 ## Try hard, then ask
 
 First use the request, the business input, earlier answers and what the page shows. Ask no
@@ -257,9 +270,12 @@ whose answers come back to you while this attempt continues, when:
    the key rules say;
 6. how the tool should use an input that tailors the answer is genuinely ambiguous, such as
    whether a postal code sets the store or only finds nearby ones: ask the design question
-   `input_use_<input>` (.agents/core/SKILL.md, "Inputs that tailor the answer");
+   `input_use_<input>` (.agents/core/SKILL.md, "Inputs that tailor the answer"); an input whose
+   description starts "By design:" records that answer, so keep its use and description word for
+   word;
 7. the site never shows a value the request needs: ask before you build whether to build without
-   it or stop (.agents/core/SKILL.md, "Find contract gaps before your first example");
+   it or stop, and settle every other contract gap before your first example too
+   (.agents/core/SKILL.md, "Find contract gaps before your first example");
 8. you would leave out or refuse a capability the site offers, such as a field or column type,
    an option, or what a review finding asks for, because supporting it costs more, such as a
    lookup or an extra request: before narrowing, ask the owner one batched question that lists
@@ -270,6 +286,10 @@ whose answers come back to you while this attempt continues, when:
    the owner's choice. A field, input or output the request itself names is never such a
    capability: support it, or end with `report_blocked` saying why the site cannot; never offer
    to leave it out.
+
+When the owner decides only whether to go on as asked or stop, prefer a `confirm` question whose
+no stops the build over a stop option in a `choice` question, so you can end it as
+`owner_declined` on their no.
 
 When nobody answers before the question expires, `request_input` returns `no_answer`. Decide
 how to go on without it: continue with a sensible default and list it in `finish_build`
@@ -297,44 +317,36 @@ and so is asking whether to support or leave out a capability the site offers (i
 a design question, not a request for permission.
 On a write, you never assume a missing business choice: ask about each costly choice actually
 observed on the site, one that changes what the caller buys or pays or whether the action can be
-cancelled or refunded (paid add-ons and pre-selected paid options within the tool's purpose, a
-rate, fare or plan tier, a refundable or non-refundable option, shipping speed, saved payment and
-the delivery address), and about any other optional field
-only when the request's purpose clearly depends on its value (an unset optional input keeps the
-page's default; it is still a tool input). A control with exactly one possible value (a select or radio group with a single option),
-or one the input or an earlier answer already settles, is no choice: never ask about it. An
-add-on toggle, a pre-selected checkbox or a lone saved payment method or address is still a
-choice to ask about. A paid upsell outside the tool's purpose, such as a membership offered at
-checkout, is declined without asking, and never accepted without an input the caller set. A safety default (core skill) is neither: never ask about it, and the script turns it off. Read the path's options with read-only exploration where you can and settle them before
-the first act step where possible; a question during the session waits in place. Take a site default only for a choice that is not a
-credential, not a write and easy to reverse, and list it in `finish_build` `assumptions`. On a write, prefer keeping the value the page already shows in an optional field that adds no cost over asking the caller to confirm or correct it: list it in `assumptions`, and it stays an optional input. Paid add-ons, pre-selected paid options, saved payment and the delivery address are still asked, as above. A full
-new login goes through execute purpose `authenticate`: an SMS, email or authenticator code that
-is part of signing in is a `code` field of its `signInStep`, which the host fills or asks the
-caller for, so never ask for it with `request_input`. The standalone code path, a
-`request_input` secret question, is only for a later protected action after sign-in, when the
-site asks for another code to confirm it; `authenticate` is never started just for such a code. You may ask after live
+cancelled or refunded, and about any other optional field only when the request's purpose
+clearly depends on its value, as .agents/writes/SKILL.md ("Before the session") says. Take a site
+default only for a choice that is not a credential, not a write and easy to reverse, and list it
+in `finish_build` `assumptions`. A code that is part of signing in is a `code` field of the
+`authenticate` step, never a `request_input` question (.agents/auth/SKILL.md). You may ask after live
 execution has closed or while a write's outcome is uncertain; after the answer, verify the
 current state before writing again.
+
+On every tool, read or write, a safety default, a preselected option whose only effect is to
+share the caller's data with another company, opt into tracking beyond what the site needs or
+sign the caller up for marketing, is never an input or a question: the tool turns it off
+(.agents/core/SKILL.md, "Safety defaults").
 
 Every mint is real: never make up a value or pick a business choice yourself. Each value an
 example or step enters comes from the request, the business input, an answer or the page. A
 choice the input leaves open is asked, or kept at the page's default where the paragraph above
 allows; a default kept unasked stays an optional input that keeps it. An answer that settles how
 the tool behaves, such as a sort order, a filter, which kind of record a write creates or whether
-a save runs the site's automation, is the tool's default, never a value every caller must send:
-when a caller could reasonably want another value, make it an optional input whose default is the
-answered value (`defaultedInput`, .agents/core/SKILL.md) and say so in its description; keep it
-fixed, with no input, only where varying it would be unsafe or meaningless. Never make it a
-required input or a question the tool asks when it runs. An answer that gives only this run's
-value, such as which customer or date, is this run's input. A choice that changes what the
-caller buys or pays, or whether the action can be cancelled or refunded, such as a paid add-on, a
-rate or plan tier, shipping speed, the payment method or the delivery address, stays a required
-input or a declared question for every caller: an answer may default it only to declining, off
-or the option that adds no cost, never to accepting, keeping or choosing one
-(.agents/core/SKILL.md, .agents/writes/SKILL.md). No request or answer authorizes made-up values:
+a save runs the site's automation, is the tool's default, never a required input or a question
+the tool asks when it runs: when a caller could reasonably want another value, make it an
+optional input whose default is the answered value (`defaultedInput`), and keep it fixed, with
+no input, only where varying it would be unsafe or meaningless (.agents/core/SKILL.md, the input
+schema). An
+answer that gives only this run's value, such as which customer or date, is this run's input. A
+costly choice stays a required input or a declared question for every caller, and an answer may
+only make declining it its default (.agents/writes/SKILL.md). No request or answer authorizes made-up values:
 words such as synthetic, sample or test data settle no value or choice. A caller that wants
 invented values supplies them itself, as its answers to your questions. Guardian denies a live
-step that types or submits a value none of those supplied, naming the field. Signed out,
+step that types or submits a value none of those supplied, naming the field, except the one
+made-up record key the writes and testing skills allow. Signed out,
 picking one of the page's own options for state a read needs, such as a pickup mode that opens
 the store picker, is part of the read.
 
@@ -387,18 +399,10 @@ authentication. Follow these stages in order:
    Anonymous exploration may navigate to and click the actual public login controls and follow
    the site's own redirects, without entering any value. Observe the resulting page, exact final
    URL and origin, frames and username or login controls<!-- pomerado:section agents.login-evidence -->. Do not
-   infer a login route from a link label or guess an SSO origin. A sign-in page on the site's
-   own registrable domain, such as login.example.com for www.example.com, is the site's own
-   sign-in; only an origin on a different site needs host configuration, which the host checks
-   during `authenticate`. A sign-in screen is a step whose form signs in and asks for a
-   username, email, phone number, account number, password, code, date of birth, ZIP or recovery
-   code, including an identifier-only first step. Read it with a read-only probe: wait for its
-   controls and read its visible fields (label, type, placeholder, id and name, never a value),
-   buttons, frames, URL and form actions. Reopening the login route to read it again is fine,
-   after a failed sign-in too. Never type, fill or select into its fields, press keys in them, or
-   click its submit, Next, Continue or send-code control during exploration: that is signing in,
-   which only `authenticate` does. Other controls on the page, such as a site search or a cookie
-   banner, are not the sign-in. Record the site's own sign-in link, then call execute purpose
+   infer a login route from a link label or guess an SSO origin. Read each sign-in screen with a
+   read-only probe and never type into it or click its submit during exploration, which is
+   signing in: only `authenticate` does that (.agents/auth/SKILL.md, "Discover the entry before
+   authenticating"). Record the site's own sign-in link, then call execute purpose
    `authenticate`, with a `signInStep` built from what you read. An authenticated request already grants sign-in, so never use
    `request_input` to ask permission to log in.
 2. Use that evidence to pass `loginUrl` directly on `authenticate`: the site's own sign-in link
@@ -448,8 +452,9 @@ conversation:
   the tool's input or `ask()` (.agents/caller-input/SKILL.md), never a literal copied from
   the answer.
 - `reference/publication-review.md` holds the rules Guardian's publication review applies
-  to live tests and output, in the review's own words: read it while you explore, and gather
-  the evidence it asks for before your first `finish_build`.
+  to live tests, output and a write's outcome and path, in the review's own words: read it
+  while you explore, gather the evidence it asks for before your first `finish_build`, and in a
+  write, settle the path it asks for before your first `act` step.
 
 ## Reviews and retries
 
@@ -491,13 +496,17 @@ write session's first act step start on the site origin page, with fresh page st
 host closes other tabs and loads the site origin, and keeps the browser's cookies and site
 storage. So the source must set every value its input controls, such as a location, store,
 filter or search, itself, never rely on what the site remembers; a live test case that runs
-cold, first on a new browser with an empty profile, is the proof. A build whose sign-in
+cold, first on a new browser with an empty profile, is the proof. A published run can start on
+such a browser too, so the source also sets up its own start state from a cold page, such as a
+guest session, a chosen location or a consent banner, never relying on cookies or state only the
+build's browser holds. A build whose sign-in
 started and was never confirmed is the exception: its resets clear cookies and site storage,
 so a half-finished sign-in never reaches a step. Every sign-in step starts a new sign-in, a
 signed-in check included, so check once per sign-in: a check after the host confirmed one
 starts a new sign-in. That source must run the flow from the input, including
 entering search terms, options and dates, not read results an exploration left on screen.
-A write session's later act steps continue on the page the previous step left.
+A live test stays read-only. A write session's later act steps continue on the page the
+previous step left.
 
 The host execute receipt and `review_rejected` feedback carry `repeatableRead`. Only explicit
 host `repeatableRead:true` permits another fresh Guardian-reviewed example read after
@@ -519,10 +528,9 @@ submit one; when its task needs that, ask the caller with request_input what wou
 change the task to a write with mint_update, as .agents/writes/SKILL.md says; a live read example
 that already ran is fine. An updated result makes it a write build in place. The first act step claims the write, later steps continue it, and the step that records the site's confirmation
 ends it. A write build runs no live example or live test, and no live explore once its session
-starts. Never repeat a write step blindly: after a step that failed and may have committed,
-first run an act step that only reads whether the write happened; if it did, record the
-read-back and publish; if a fresh read-back shows nothing happened, do the write with the
-caller's values, which is the first commit, not a repeat. The host never resubmits for you. A
+starts. Never repeat a write step that may have committed: first read back whether the write
+happened, as .agents/writes/SKILL.md says ("Never repeat a step blindly"); the host never
+resubmits for you. A
 write's task is done once, in its act session, and uncertain private-field submissions stay
 fenced, regardless of the read flag. An authentication submission with an unknown outcome is
 always fenced.
@@ -538,17 +546,14 @@ during exploration too, not only in the published tool. A filter the site does n
 part of the read.
 
 Testing a read signed out is your job, never the caller's (.agents/testing/SKILL.md). It designs
-its own cases at the start, from what it saw on the site: a handful, each covering as much as it
-can, led by one case that sets together every input the example left unset. It refines them once
-the example passes, runs them in parallel batches<!-- pomerado:section agents.http-cases -->. Finish in this order: your last edit, every case again on each version you ship, then
-the example last, before `finish_build`. A signed-in read runs that combined case, and a second
-only for inputs that cannot be set together: two distinct inputs at most, which the host
-enforces, on its own signed-in browser. A write does the original task: its act session is the
-one run that proves the tool. It designs no tests and runs no live tests or offline test suites
+a handful of combined cases from what it saw on the site and
+runs them in parallel batches<!-- pomerado:section agents.http-cases -->. Finish in this order: your last edit, every case again on each version you ship, then
+the example last, before `finish_build`. A signed-in read tests four distinct inputs at most. A
+write's act session is the one run that proves the tool: it designs no tests and runs no live
+tests or offline test suites
 beyond it<!-- pomerado:section agents.write-http-check -->. It still checks its composed
 script's read-back and comparison offline over what the session read (writes skill). The scope
-follows what the tool is now: a read that becomes a write keeps to the one run from then on, a read that signs in keeps to
-the signed-in bound, and a repair that rebuilds one as a read signed out tests it as one.
+follows what the tool is now, as the testing skill says.
 Report skipped, unsupported or missing bodies honestly.
 
 <!-- pomerado:section agents.implementations -->
@@ -592,13 +597,28 @@ never with final text, which the host treats as unfinished work:
   invent a value or substitute a different field.
 - `site_declined`: the site offers what the task needs but declines this example's own facts,
   such as an applicant it will not quote. Name the reason the site gave in `explanation`.
+- `site_unavailable`: the site is temporarily down for the failing input: its own pages show a
+  maintenance or outage page, or fail with a 5xx answer from its own service, while the tool's
+  code and the caller's input are unchanged. A 5xx answer only to the request your tool made is
+  not that evidence, since that request can be wrong. Prefer it over changing the code or over
+  `site_lacks_capability`. Never use it for a bot check or an access-denied page.
+- `caller_input`: the caller's own request stops the build: what it states conflicts with itself
+  or its cited sources, a file it needs is missing, or it rules out going on, such as a stop
+  condition it set that cannot be met. Prefer asking with `request_input` for a missing fact the
+  caller could supply. Cite the field or instruction in `intent`, and say in `explanation` what
+  the caller should supply or change.
 - `owner_declined`: the owner answered no to a `confirm` question, or declined to sign in, and
   the build needs that step.
 - `question_unanswered`: a question you asked came back `no_answer`, and the build cannot go on
   without its answer.
+- `owner_ended`: the owner chose in an answer to end the build, such as after confirming that a
+  fact it needs is unknown.
 - `host_refused`: a host check refused a step the build needs, such as `finish_build`, a sign-in
   form or a site change, and nothing left in this attempt can fix it. Name the check in
-  `explanation`.
+  `explanation`. It also stands once `live_tests` answered `no_time` and no batch is left, the
+  reserved one included, while Guardian's denial of the last publication stands: prefer it when
+  that denial rests on a failure only a new batch could clear, and name the refused live tests and
+  the finding in `explanation`.
 - `policy`: in this attempt Guardian refused an execution the task needs with refusal final,
   denied or escalated a publication with reason `privacy` or `authority`, or with a
   `private_literal`, `credential`, `customer_data`, `exfiltration`, `unsafe_logging` or

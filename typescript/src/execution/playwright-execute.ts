@@ -1,76 +1,42 @@
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
-import { chromium, type Browser, type BrowserServer } from "playwright";
+import type { Browser, BrowserServer } from "playwright";
 import { Cause, Effect, Exit, Fiber, Schema, type Scope } from "effect";
 import {
-  CredentialInsertion,
+  CredentialReadBack,
   type CredentialKeyboard,
 } from "../destinations/credential-keyboard.js";
-import type { SignInRequest } from "../destinations/sign-in-recipe.js";
 import { BrowserExecuteResponse, type BrowserExecute } from "../runtime/browser-execution.js";
 import type { HostExecute } from "../runtime/host-execute.js";
+import {
+  NativeWorkerOptions,
+  NativeWorkerReply,
+  NativeWorkerRequest,
+  PlaywrightLibrary,
+} from "./playwright-protocol.js";
 
-export const NativeWorkerRequest = Schema.Union(
-  Schema.Struct({
-    id: Schema.String,
-    kind: Schema.Literal("execute"),
-    code: Schema.String,
-    /**
-     * Values to watch for: the worker answers which ones a typing call delivered, and in which
-     * frame (`typed`).
-     */
-    watch: Schema.optional(Schema.Array(Schema.String)),
-  }),
-  Schema.Struct({
-    id: Schema.String,
-    kind: Schema.Literal("credential"),
-    target: Schema.Struct({
-      targetId: Schema.optional(Schema.String),
-      bindingKey: Schema.String,
-      documentOrigin: Schema.String,
-    }),
-    text: Schema.String,
-  }),
-);
-/** Starts or stops the worker's report of each request the context sends (`onRequest`). */
-export const NativeWorkerListen = Schema.Struct({
-  kind: Schema.Literal("listen"),
-  on: Schema.Boolean,
-});
-/** The most of a request's body the worker reports; a longer one is reported unseen. */
-export const requestBodyLimit = 65_536;
-/** A request the browser context sent, as the worker reports it; see `SignInRequest`. */
-const PageRequest = Schema.Struct({
-  url: Schema.String,
-  method: Schema.String,
-  body: Schema.NullOr(Schema.String.pipe(Schema.maxLength(requestBodyLimit))),
-  bodyUnseen: Schema.optional(Schema.Literal(true)),
-  channel: Schema.Literal("navigation", "popup", "http"),
-  frame: Schema.optional(Schema.Literal("main", "sub")),
-  resourceType: Schema.String,
-  ownerTargetId: Schema.optional(Schema.String),
-});
 type WithoutId<A> = A extends { readonly id: string } ? Omit<A, "id"> : never;
 type NativePayload = WithoutId<typeof NativeWorkerRequest.Type>;
+export type { PlaywrightLibrary };
 
-export const NativeWorkerReply = Schema.Union(
-  Schema.Struct({
-    kind: Schema.Literal("ready"),
-    targetId: Schema.String,
-    contextId: Schema.String,
-  }),
-  Schema.Struct({ kind: Schema.Literal("response"), id: Schema.String, value: Schema.Unknown }),
-  Schema.Struct({ kind: Schema.Literal("failure"), id: Schema.String, error: Schema.String }),
-);
-/** A request the worker reports while the parent listens (`onRequest`). */
-const NativeWorkerHeard = Schema.Struct({ kind: Schema.Literal("request"), request: PageRequest });
-export const NativeWorkerOptions = Schema.Struct({
-  endpoint: Schema.String,
-  startupTimeoutMs: Schema.Number,
-});
+/**
+ * A running Chromium reached through its DevTools websocket, such as one started with
+ * `--remote-debugging-port` or a cloud browser's CDP URL.
+ */
+export interface PlaywrightCdpAttach {
+  /** The websocket URL. The executor connects to it once, so a URL that works once will do. */
+  readonly url: string;
+  /** The page to drive, by its CDP target id. The default context's first page when absent. */
+  readonly targetId?: string;
+}
 
 export interface PlaywrightOptions {
+  /** A Playwright server's websocket endpoint, as `launchServer` or `playwright run-server` give. */
   readonly endpoint?: string;
+  /** Attach over CDP to a running browser's own page instead; exclusive with `endpoint`. */
+  readonly cdp?: PlaywrightCdpAttach;
+  /** The Playwright build the executor drives the browser with. Defaults to `playwright`. */
+  readonly library?: PlaywrightLibrary;
   readonly headless?: boolean;
   readonly startupTimeoutMs?: number;
   readonly cleanupTimeoutMs?: number;
@@ -113,18 +79,14 @@ export interface PlaywrightExecutor {
   ) => TypingWatch;
   readonly execute: HostExecute;
   readonly keyboard: CredentialKeyboard;
-  /**
-   * Hears each request the browser context sends, every tab's, with its body up to
-   * `requestBodyLimit`, until the returned function stops it. The browser reports requests only
-   * while a listener is attached. Bodies stay in this process's memory; never log them.
-   */
-  readonly onRequest: (listener: (request: SignInRequest) => void) => () => void;
   readonly close: Effect.Effect<void, Error>;
 }
 
 const asError = (cause: unknown): Error =>
   cause instanceof Error ? cause : new Error("Native Playwright transport failed", { cause });
 const promise = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: asError });
+const loadChromium = (library: PlaywrightLibrary) =>
+  promise(async () => ((await import(library)) as typeof import("playwright")).chromium);
 const duration = (value: number, name: string) => {
   if (!Number.isFinite(value) || value <= 0 || value > 300_000)
     throw new Error(`${name} must be positive and at most 300000 ms`);
@@ -136,8 +98,6 @@ interface NativeOwnership {
   readonly remote: boolean;
   readonly cleanupTimeoutMs: number;
   readonly pending: Map<string, PendingResponse>;
-  /** Who hears the context's requests; see `onRequest`. */
-  readonly listeners: Set<(request: SignInRequest) => void>;
   server?: BrowserServer;
   supervisor?: Browser;
   worker?: Worker;
@@ -247,12 +207,7 @@ const stopFromCallback = <A>(
       resume(Effect.fail(Exit.isFailure(exit) ? asError(Cause.squash(exit.cause)) : reason)),
   });
 
-const bindNativeWorker = (
-  owner: NativeOwnership,
-  worker: Worker,
-  browser: Browser,
-  startupTimeoutMs: number,
-) =>
+const bindNativeWorker = (owner: NativeOwnership, worker: Worker, startupTimeoutMs: number) =>
   Effect.async<{ targetId: string }, Error>((resume) => {
     const fail = (error: Error) => {
       clearTimeout(timer);
@@ -263,23 +218,6 @@ const bindNativeWorker = (
       startupTimeoutMs,
     );
     worker.on("message", (message: unknown) => {
-      if (
-        typeof message === "object" &&
-        message !== null &&
-        Reflect.get(message, "kind") === "request"
-      ) {
-        // A request's body may hold a value the page sent: it is matched in memory and never kept,
-        // logged or put in an error. One this process cannot read is not heard.
-        const heard = Schema.decodeUnknownOption(NativeWorkerHeard)(message);
-        if (heard._tag === "None" || owner.stopped) return;
-        for (const listener of [...owner.listeners])
-          try {
-            listener(heard.value.request);
-          } catch {
-            // A listener's failure leaves the request unheard by it, and the others still hear it.
-          }
-        return;
-      }
       const decoded = Schema.decodeUnknownEither(NativeWorkerReply)(message);
       if (decoded._tag === "Left") {
         fail(new Error("Malformed native worker response", { cause: decoded.left }));
@@ -288,8 +226,10 @@ const bindNativeWorker = (
       const reply = decoded.right;
       if (reply.kind === "ready") {
         clearTimeout(timer);
-        owner.contextId = reply.contextId;
+        if (reply.contextId !== undefined) owner.contextId = reply.contextId;
         resume(Effect.succeed({ targetId: reply.targetId }));
+      } else if (reply.kind === "disconnected") {
+        if (!owner.stopped) fail(new Error("Native browser disconnected; completion uncertain"));
       } else {
         if (owner.stopped) return;
         const complete = owner.pending.get(reply.id);
@@ -306,7 +246,7 @@ const bindNativeWorker = (
       if (!owner.stopped)
         fail(new Error(`Native execution worker exited (${code}); completion uncertain`));
     });
-    browser.on("disconnected", () => {
+    owner.supervisor?.on("disconnected", () => {
       if (!owner.stopped) fail(new Error("Native browser disconnected; completion uncertain"));
     });
     return Effect.sync(() => clearTimeout(timer)).pipe(
@@ -367,7 +307,11 @@ const dispatchNative = (
     });
   });
 
-/** Owns one native connection and context. A failed transport invalidates it without replay. */
+/**
+ * Owns one native connection and context. A failed transport invalidates it without replay. Over
+ * CDP it owns only its connection and the contexts its scripts make: it drives the browser's own
+ * context, and closing it leaves that context and its pages running.
+ */
 export const makePlaywrightExecutor = (
   options: PlaywrightOptions = {},
 ): Effect.Effect<PlaywrightExecutor, Error, Scope.Scope> =>
@@ -380,24 +324,40 @@ export const makePlaywrightExecutor = (
       try: () => duration(options.cleanupTimeoutMs ?? 5_000, "cleanupTimeoutMs"),
       catch: asError,
     });
+    if (options.endpoint !== undefined && options.cdp !== undefined)
+      return yield* Effect.fail(new Error("endpoint and cdp cannot both be set"));
+    const library = yield* Schema.decodeUnknown(PlaywrightLibrary)(
+      options.library ?? "playwright",
+    ).pipe(Effect.mapError(() => new Error("library must be playwright or patchright")));
     const owner: NativeOwnership = {
-      remote: options.endpoint !== undefined,
+      remote: options.endpoint !== undefined || options.cdp !== undefined,
       cleanupTimeoutMs,
       stopped: false,
       pending: new Map(),
-      listeners: new Set(),
     };
     const close = stopNative(owner, new Error("Native browser executor closed"));
     yield* Effect.addFinalizer(() => close.pipe(Effect.orDie));
-    if (options.endpoint === undefined)
-      owner.server = yield* promise(() =>
-        chromium.launchServer({ headless: options.headless ?? true, timeout: startupTimeoutMs }),
-      );
-    const endpoint = options.endpoint ?? owner.server?.wsEndpoint();
-    if (endpoint === undefined)
-      return yield* Effect.fail(new Error("Native Playwright endpoint missing"));
-    const browser = yield* promise(() => chromium.connect(endpoint, { timeout: startupTimeoutMs }));
-    owner.supervisor = browser;
+    // Over CDP the worker's connection is the only one: it reports its own disconnection.
+    const endpoint =
+      options.cdp === undefined
+        ? yield* Effect.gen(function* () {
+            const chromium = yield* loadChromium(library);
+            if (options.endpoint === undefined)
+              owner.server = yield* promise(() =>
+                chromium.launchServer({
+                  headless: options.headless ?? true,
+                  timeout: startupTimeoutMs,
+                }),
+              );
+            const playwrightEndpoint = options.endpoint ?? owner.server?.wsEndpoint();
+            if (playwrightEndpoint === undefined)
+              return yield* Effect.fail(new Error("Native Playwright endpoint missing"));
+            owner.supervisor = yield* promise(() =>
+              chromium.connect(playwrightEndpoint, { timeout: startupTimeoutMs }),
+            );
+            return playwrightEndpoint;
+          })
+        : options.cdp.url;
     const worker = yield* Effect.try({
       try: () =>
         new Worker(
@@ -410,13 +370,23 @@ export const makePlaywrightExecutor = (
             env: {},
             // Parent entrypoint flags such as --input-type do not apply to this file entrypoint.
             execArgv: [],
-            workerData: { endpoint, startupTimeoutMs },
+            workerData: {
+              endpoint,
+              startupTimeoutMs,
+              library,
+              ...(options.cdp === undefined
+                ? {}
+                : {
+                    cdp:
+                      options.cdp.targetId === undefined ? {} : { targetId: options.cdp.targetId },
+                  }),
+            } satisfies typeof NativeWorkerOptions.Encoded,
           },
         ),
       catch: asError,
     });
     owner.worker = worker;
-    const ready = yield* bindNativeWorker(owner, worker, browser, startupTimeoutMs);
+    const ready = yield* bindNativeWorker(owner, worker, startupTimeoutMs);
     const semaphore = yield* Effect.makeSemaphore(1);
     const call = (payload: NativePayload, timeoutSec: number) =>
       dispatchNative(owner, worker, payload, timeoutSec).pipe(semaphore.withPermits(1));
@@ -454,26 +424,14 @@ export const makePlaywrightExecutor = (
         }),
       );
     const keyboard: CredentialKeyboard = {
-      insertText: (target, text) =>
-        call({ kind: "credential", target, text }, 15).pipe(
-          Effect.flatMap((value) => Schema.decodeUnknown(CredentialInsertion)(value)),
+      insertText: (target, text, options) =>
+        call(
+          { kind: "credential", target, text, ...(options?.phone === true ? { phone: true } : {}) },
+          15,
+        ).pipe(
+          Effect.flatMap((value) => Schema.decodeUnknown(CredentialReadBack)(value)),
           Effect.mapError(asError),
         ),
-    };
-    const listen = (on: boolean) => {
-      if (owner.stopped) return;
-      try {
-        worker.postMessage({ kind: "listen", on } satisfies typeof NativeWorkerListen.Type);
-      } catch {
-        // A stopped worker hears nothing more; its executor is already invalidated.
-      }
-    };
-    const onRequest = (listener: (request: SignInRequest) => void) => {
-      owner.listeners.add(listener);
-      if (owner.listeners.size === 1) listen(true);
-      return () => {
-        if (owner.listeners.delete(listener) && owner.listeners.size === 0) listen(false);
-      };
     };
     return {
       sessionId: randomUUID(),
@@ -482,7 +440,6 @@ export const makePlaywrightExecutor = (
       watchTyping,
       execute,
       keyboard,
-      onRequest,
       close,
     };
   }).pipe(Effect.uninterruptible);

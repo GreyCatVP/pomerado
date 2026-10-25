@@ -1,6 +1,6 @@
 ---
 name: testing
-description: Design and run a few combined live test cases for a read. A read signed out runs a handful; a signed-in read runs one combined filter case, two at most. A write skips this skill and proves its tool with one run.
+description: Design and run a few combined live test cases for a read. A read signed out runs a handful; a signed-in read runs four inputs at most. A write skips this skill and proves its tool with one run.
 ---
 
 # Test a read with a few combined cases
@@ -10,8 +10,8 @@ This skill is for reads. A write does the original task: it proves its tool with
 composed script's read-back and comparison offline over what the session read (writes skill). A
 read proves its operation with its example, run again after each fix as the core skill says, then tests what the example did not
 exercise with a few live cases, each designed to cover as much as it can. A read signed out runs a
-handful (below). A signed-in read runs at most two distinct inputs beyond its example: one
-combined filter case, and a second only when it needs one (Signed-in reads, below). Report what
+handful (below). A signed-in read runs at most four distinct inputs beyond its example
+(Signed-in reads, below). Report what
 no run exercised as untested in `coverage`. The scope follows what the tool is now: a read that
 becomes a write mid-build, a repair included, stops testing from then on; a read that signs in
 mid-build keeps to the signed-in bound from then on, and only cases run signed in count for it;
@@ -20,8 +20,7 @@ and a repair that rebuilds a signed-in tool or a write as a read signed out test
 Use execute with purpose=test, target, relative entrypoint/test file, fixtureRefs,
 caseFilter, maxWorkers and timeoutSeconds. Fixtures are host-authorized immutable
 inputs. Offline cases may use isolated workers; a live test is one read-only flow. It starts
-like the example: the site origin page, with the browser's cookies and site storage kept. So
-the tool sets every value its input controls itself, never relying on what the site remembers.
+like the example, from a reset page (`AGENTS.md`, "Reads, writes and examples").
 A read proves its operation with purpose=example and iterates from that start; running the
 example or a live test again after a fix is normal, but keep rounds few: fix everything a run
 shows before you run again (Run and fix the cases, below).
@@ -61,17 +60,18 @@ Design it as soon as you know the page and its inputs, and run it once the examp
 ## Signed-in reads
 
 Where the host runs no signed-in live tests, `live_tests` answers `unavailable` and the example
-alone proves a signed-in read's tool. Otherwise a signed-in read runs its combined case and, only
-where it needs one, the second case above:
-at most two distinct inputs in a build or repair, beyond its example. The host enforces it: a
-batch or `testInput` that would add a third input is refused as `limit` and runs nothing.
+alone proves a signed-in read's tool. Otherwise a signed-in read runs at most four distinct
+inputs in a build or repair, beyond its example, each chosen for high value and broad coverage:
+its combined case first, the second case above where it needs one, and one made-up key for an
+input that takes a record's own key, as a read signed out runs it (below). The host enforces
+it: a batch or `testInput` that would add a fifth input is refused as `limit` and runs nothing.
 Running an input that already ran again, after a fix or on `src/tool-http.mjs`, is free, so
-merge inputs into those two cases rather than adding a case. The host runs them on the build's
+merge inputs into those cases rather than adding a case. The host runs them on the build's
 own signed-in browser, one at a time and warm, never on a new browser. Each case stays a read
 under the signed-in session rules that already apply to the example: it saves no record, view or
 setting, and a filter the site saves with a view or setting goes through the page's own row query
-or is restored in the same step, as the workspace guide says. Design no other cases: no example
-run cold, no no-results case and no edge cases.<!-- pomerado:section testing.signed-in-http --> Publication review reads
+or is restored in the same step, as the workspace guide says. Design no example run cold, no
+other no-results case and no edge cases.<!-- pomerado:section testing.signed-in-http --> Publication review reads
 the host's record of the cases you ran signed in, judges a failing case as a bug, and treats
 what you did not test as disclosure, not a gap. Then go on at "Run and fix the cases", below.
 
@@ -95,9 +95,16 @@ run no batch before then. Aim for a handful of cases, not dozens:
   the caller types rather than picks, use a made-up value the site has no match for here, so
   this case also shows that value ends as the caller-input skill says: `empty` for a search
   query, `invalid_input` naming the field, or a labeled `result` for a location the site won't
-  apply, never another throw. Skip the made-up value for an input that takes a person's,
-  account's or record's name, number or code. Without a no-results answer, move on: it needs no
+  apply, never another throw. Skip it for an input that takes a person's or account's name,
+  number or code. For one that takes a record's own key, such as an order or ticket number, use
+  one made-up key in the site's own format, with a serial past any the site lists, and expect
+  `invalid_input`. For a read with no results list whose answer is a count or total, the
+  no-results case expects `result`, sets `noMatch: true` and returns the count or total as 0:
+  prefer an input the site matches nothing for, and name in its `purpose` the capture where the
+  site applied that input and showed zero. Without a no-results answer, move on: it needs no
   `notTested` entry and no question;
+- for a free-text input, one case with a value the example used written another way, such as in
+  other case or with other spacing, punctuation or accents;
 - another case only where a different page structure or a real variant needs one, and each such
   case sets as many inputs as still return rows: another retailer, store or seller; another
   category; a record whose page is laid out differently (a single option, grouped options, a
@@ -238,11 +245,12 @@ input (`changedExpectationBy`) clears it only with a capture of the site's own a
 exact input, as above, named in its `purpose`. Relabelling a case, or rebuilding it under new ids,
 clears nothing and adds another retired failure each time. The record's `clearedBy` says what can
 clear each failure that still counts. When `live_tests` answers `no_time`, run the example last and publish; the record says time
-ran out.
+ran out. If publication review then denies for a failure only a new batch could clear, and no batch is left, prefer
+`report_blocked` with reason `host_refused`, naming the refused live tests and the finding.
 
 When the host offers no `live_tests`, a read runs its cases one input at a time instead: execute
 purpose `test`, target `liveBrowser`, with `testInput`, the tool's input as JSON text; the host
-may limit how many. A signed-in read's inputs there count toward the same two.<!-- pomerado:section testing.http-cases -->
+may limit how many. A signed-in read's inputs there count toward the same four.<!-- pomerado:section testing.http-cases -->
 
 The example uses the caller's input, or your `exampleInput` when that input is empty, and offline
 tests always use the caller's input. If a test shows the schema must widen, widen it in source;
