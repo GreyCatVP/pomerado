@@ -188,12 +188,21 @@ const patternExcludesRefused = (status: unknown): boolean => {
  * Whether a branch that is not a refusal could still match an object whose `status` is `refused`:
  * any object branch, unless its `status` lists only other strings or is a string whose pattern
  * `refused` does not match, or it has no `status` property, no pattern properties, and admits no
- * property it does not list.
+ * property it does not list. A branch whose `type` is another type, or a list of type names that
+ * leaves out `object`, admits no object; an empty list, or one holding anything but names, shows
+ * nothing.
  */
 const admitsRefused = (branch: unknown): boolean => {
   if (!isJsonRecord(branch)) return branch !== false;
   const type = branch["type"];
   if (typeof type === "string" && type !== "object") return false;
+  if (
+    Array.isArray(type) &&
+    type.length > 0 &&
+    type.every((entry) => typeof entry === "string") &&
+    !type.includes("object")
+  )
+    return false;
   const properties = branch["properties"];
   const status = isJsonRecord(properties) ? properties["status"] : undefined;
   if (status === undefined)
