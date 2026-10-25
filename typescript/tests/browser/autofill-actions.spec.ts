@@ -217,9 +217,11 @@ for (const [name, control, reason] of [
     '<a id="continue" href="https://other.test/receive">Sign in</a>',
     "credential_target_refused",
   ],
+  // A link to a script that does nothing sends nothing itself, so it is judged by its form; one
+  // whose script does something runs what its address says.
   [
     "unsafe anchor",
-    '<a id="continue" href="javascript:void(0)">Sign in</a>',
+    '<a id="continue" href="javascript:send()">Sign in</a>',
     "credential_target_refused",
   ],
   // An inert control takes no interaction at all: it marks a form in the background, not one the
@@ -232,6 +234,24 @@ for (const [name, control, reason] of [
     expect(await page.locator("#password").inputValue()).toBe("");
     expect(received).toEqual([]);
   });
+
+// A form's elements leave out an image submit, so its own formaction is read beside them.
+test("the host refuses a sign-in whose image submit posts off the site before any password is filled", async ({
+  page,
+}) => {
+  const received = await serve(
+    page,
+    '<input id="continue" type="image" alt="Sign in" formaction="https://other.test/receive">',
+  );
+  expect(await inspect(page)).toMatchObject({
+    outcome: "refused",
+    reason: "credential_target_refused",
+    target: 0,
+    failureDetail: { context: { part: "form_action", actionOrigins: `${site} https://other.test` } },
+  });
+  expect(await page.locator("#password").inputValue()).toBe("");
+  expect(received).toEqual([]);
+});
 
 const usernameAndPassword: AutofillStep = {
   fields: [

@@ -168,6 +168,12 @@ const Target = Schema.Struct({
    * A step call that finds it changed judges the controls again.
    */
   scriptAction: Schema.optional(Schema.Boolean),
+  /**
+   * Its own link destination, one of `actions`, is a script that does nothing: following it sends
+   * nothing, and the page's own code does whatever the link does. A step call that finds it changed
+   * judges the controls again.
+   */
+  scriptHref: Schema.optional(Schema.Boolean),
   methods: Schema.Array(Schema.String),
   /**
    * The method its form submits by with it: a submit button's own `formmethod` when it has one,
@@ -592,7 +598,9 @@ export const notingHostTrust = (
  * `inspectAutofillStep`); a card-fill step's never do. A sign-in step's control whose form's own
  * action is a script that does nothing (`scriptAction`) is judged by its frame, document and other
  * destinations: navigating to such an action sends nothing, and the page's code, which can read the
- * field anyway, does the sending. A card-fill step's never is, nor any other script action.
+ * field anyway, does the sending. A sign-in step's link whose own address is such a script
+ * (`scriptHref`) is likewise judged by its frame, document and other destinations: following it
+ * sends nothing. A card-fill step's never is, nor any other script action or link.
  */
 export const untrustedTarget = (
   targets: typeof Targets.Type,
@@ -619,7 +627,11 @@ export const untrustedTarget = (
     // destinations still count.
     const script = signIn && target.scriptAction === true && target.actions[0] === "javascript:";
     const destinations = script ? target.actions.slice(1) : target.actions;
-    return destinations.every((url) => trusted(url, card)) ? undefined : action;
+    // So does a sign-in link's own address that is such a script. Every script address reads as
+    // `javascript:` here, so dropping one leaves exactly the others, and each of them still counts.
+    const link = signIn && target.scriptHref === true ? destinations.indexOf("javascript:") : -1;
+    const sent = link === -1 ? destinations : destinations.filter((_, index) => index !== link);
+    return sent.every((url) => trusted(url, card)) ? undefined : action;
   };
   /**
    * A card field's own checks: every frame above its own is on the site or on its own frame's
@@ -676,7 +688,8 @@ export const untrustedTarget = (
  * destination. A credential goes only into a field whose frame, form actions and submit's link
  * destination are on the site's registrable domain or a configured sign-in origin; a sign-in
  * form's own action that is a script doing nothing, which sends nothing itself, is judged by where
- * the field sits and the form's other destinations. A form that
+ * the field sits and the form's other destinations, and a sign-in submit link whose own address is
+ * such a script by where it sits and its other destinations. A form that
  * submits by GET is allowed when it is clearly the login form, which Guardian judges; its values
  * land in a URL that stays byte-exact. Once the host typed into the page
  * (`judgedBeforeTyping` given), a refusal names only the origins `namedAfterTyping` allows.

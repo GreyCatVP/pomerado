@@ -419,6 +419,58 @@ test("unsupported and oversized results fail without invalidating the browser", 
   });
 });
 
+// A string result's JSON adds its two quotes, so this returns `bytes` bytes of JSON.
+const resultOfBytes = (bytes: number) => `return 'x'.repeat(${bytes - 2});`;
+const mebibyte = 1_048_576;
+
+test("a result over 1 MiB fails by default and one of 1 MiB succeeds", async () => {
+  await native(async (executor) => {
+    const kernel = client(executor);
+    expect(
+      await kernel.execute(executor.sessionId, { code: resultOfBytes(mebibyte + 1) }),
+    ).toMatchObject({ success: false, error: "Native script result exceeds 1 MiB" });
+    const fits = await kernel.execute(executor.sessionId, { code: resultOfBytes(mebibyte) });
+    expect(fits.success, fits.error).toBe(true);
+    expect(String(fits.result)).toHaveLength(mebibyte - 2);
+  });
+});
+
+for (const [resultLimitBytes, named] of [
+  [4 * mebibyte, "4 MiB"],
+  [3_000_000, "3000000 bytes"],
+  [64 * mebibyte, "64 MiB"],
+] as const) {
+  test(`a ${named} result limit admits larger results and names itself when exceeded`, async () => {
+    await native(
+      async (executor) => {
+        const kernel = client(executor);
+        const larger = await kernel.execute(executor.sessionId, {
+          code: resultOfBytes(mebibyte + 1),
+        });
+        expect(larger.success, larger.error).toBe(true);
+        expect(String(larger.result)).toHaveLength(mebibyte - 1);
+        expect(
+          await kernel.execute(executor.sessionId, { code: resultOfBytes(resultLimitBytes + 1) }),
+        ).toMatchObject({ success: false, error: `Native script result exceeds ${named}` });
+        // The limit covers the result only: console output keeps its own 1 MiB cap.
+        expect(
+          await kernel.execute(executor.sessionId, {
+            code: "console.log('x'.repeat(1048577)); return 'printed';",
+          }),
+        ).toMatchObject({ success: false, error: "Native script output exceeds 1 MiB" });
+      },
+      { resultLimitBytes },
+    );
+  });
+}
+
+test("an invalid result limit is refused before a browser starts", async () => {
+  for (const resultLimitBytes of [0, -1, 1.5, 64 * mebibyte + 1, Number.NaN, Infinity])
+    await expect(
+      native(() => Promise.resolve(), { resultLimitBytes, endpoint: "ws://127.0.0.1:9/never" }),
+    ).rejects.toThrow("resultLimitBytes must be a positive integer and at most 67108864 bytes");
+});
+
 test("popup and frame actions preserve the original selected page across calls", async () => {
   await native(async (executor) => {
     const kernel = client(executor);

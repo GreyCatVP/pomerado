@@ -475,6 +475,88 @@ it("never offers a question it hands back to the minter as no answer", async () 
   expect(offers).toBe(0);
 });
 
+// Fails when the minter's report on a question handed back ends the build though the host could
+// suspend it: the owner's later answer then had no build to resume.
+it("offers the host a build its minter ends on a handed-back question, and resumes it with the owner's answer", async () => {
+  const report = { reason: "question_unanswered", explanation: "Only the owner knows which one." };
+  const givesUp = (index: number) =>
+    [
+      call("request_input", question, "ask"),
+      call("report_blocked", report, "report"),
+      call("execute", execution, "run"),
+      call("finish_build", publication, "publish"),
+    ][index] ?? prose();
+
+  // A host without the hook ends it blocked, as before, and its other hook is never offered it.
+  let offers = 0;
+  const today = await fixture((_request, index) => givesUp(index), {
+    suspendUnanswered: () =>
+      Effect.sync(() => {
+        offers++;
+        return "suspended" as const;
+      }),
+  });
+  expect(await today.run()).toMatchObject({
+    build: "incomplete",
+    blocked: { reason: "question_unanswered" },
+  });
+  expect(offers).toBe(0);
+
+  const store = recoveryStore();
+  const model = scriptedModel(givesUp);
+  const offered: UnansweredQuestion[] = [];
+  const first = await fixture(() => prose(), {
+    model: makeOpenAIMinter(model.provider, "medium", {}, { recoveryFactory: store.factory() }),
+    agentRecovery: { save: store.save },
+    suspendHandedBack: (unanswered) =>
+      Effect.sync(() => {
+        offered.push(unanswered);
+        return "suspended" as const;
+      }),
+  });
+  const ended = await first.run().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(interrupted(ended)).toBe(true);
+  expect(offered).toEqual([
+    { step: "question", requestId: expect.any(String), possibleCommit: false },
+  ]);
+  const checkpoint = store.checkpoints.at(-1);
+  if (checkpoint === undefined) throw new Error("No checkpoint");
+  expect(checkpoint.agent.tools).toContainEqual(
+    expect.objectContaining({ callId: "report", state: "started" }),
+  );
+  expect(checkpoint.harness.terminal).toBeUndefined();
+
+  // The owner answered while it was suspended: the report rejoins the answer and the build goes on.
+  const request = first.asked[0] as AgentInputRequest;
+  const resumed = await fixture(() => prose(), {
+    model: makeOpenAIMinter(
+      model.provider,
+      "medium",
+      {},
+      { recoveryFactory: store.factory(checkpoint.agent) },
+    ),
+    agentRecovery: {
+      save: store.save,
+      initial: checkpoint,
+      recoverTool: (recovered) =>
+        Effect.succeed(
+          recovered.callId === "report"
+            ? { input: { request, answers: { report: { type: "text", value: "Annual" } } } }
+            : undefined,
+        ),
+    },
+  });
+  expect(await resumed.run()).toMatchObject({ build: "published" });
+  const rejoined = inputOf(model.requests[2]).find(
+    (item) => item.type === "function_call_result" && item.callId === "report",
+  );
+  expect(JSON.stringify(rejoined)).toContain('\\"status\\":\\"answered\\"');
+  expect(JSON.stringify(rejoined)).toContain("Annual");
+});
+
 const request = {
   mode: "mint",
   intent: "Read public data",

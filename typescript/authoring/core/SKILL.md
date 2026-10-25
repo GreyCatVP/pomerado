@@ -545,6 +545,10 @@ that depends on them:
      time after a date, apply the input it depends on first and read `available` from that
      state, then drop the options the input alone rules out. Never list options read before
      the input they depend on applied.
+   - A venue or record page that says it takes no online booking, or not yet, and shows no
+     booking controls, such as "Reservations open November 1": the site says no to the whole
+     request (caller-input skill), so a read returns those words, preferably as a declared
+     refusal with `site_message`, never as no open times or an empty list.
    - A number on a scale the site steps, such as a price range slider or price boxes, is a
      number, not a choice: never refuse it because no label matches. Set the nearest step inside
      the caller's bound, down for a maximum and up for a minimum, so a maximum of 47 on steps of
@@ -903,13 +907,15 @@ See the compiling `references/variants.ts` example.
 
 ## Cookie banners
 
-Whenever a cookie or tracking consent banner shows, dismiss it before you do anything else on the
-page: in an `explore`, in each sign-in step as its `dismiss` (the auth skill), and in the tool's
-own code, which dismisses it on every run where it shows. Use the banner's own control, in this
-order: its close or dismiss control, then one that rejects or declines what is not essential, then
-accept, only when that is the only way out. Never click anything else in the banner, such as its
-settings or partner lists. A request that says otherwise about cookies wins. This is only for a
-banner about cookies or tracking, never a marketing prompt or terms the site asks you to accept.
+Whenever a cookie or tracking consent banner shows, or a privacy notice, consent dialog or survey
+pop-up, dismiss it before you do anything else on the page: in an `explore`, in each sign-in step as
+its `dismiss` (the auth skill), and in the tool's own code, which dismisses it on every run where it
+shows. Use its own control, in this order: its close or dismiss control, then one that rejects or
+declines what is not essential, then accept, only when that is the only way out. A control such as
+"I understand" or "OK" accepts too, so prefer its close or decline control whenever it has one.
+Never click anything else in it, such as its settings or partner lists. A request that says
+otherwise about cookies wins. This is only for such a banner or pop-up, never a marketing prompt or
+terms the site asks you to accept.
 
 ## Safety defaults
 

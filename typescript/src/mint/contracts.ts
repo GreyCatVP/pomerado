@@ -2361,7 +2361,8 @@ export interface DecisionLedger {
 
 /**
  * A question the build's owner left unanswered where the build would otherwise end as
- * `no_response`, offered to `MintDependencies.suspendUnanswered`.
+ * `no_response`, offered to `MintDependencies.suspendUnanswered`, or the minter's own question it
+ * ended the build on, offered to `MintDependencies.suspendHandedBack`.
  */
 export interface UnansweredQuestion {
   /**
@@ -2507,7 +2508,8 @@ export interface MintDependencies {
   /**
    * Lets the host suspend the build, to resume it later, where an unanswered question would
    * otherwise end it as `no_response`. The harness calls it only there: never for a question it
-   * hands back to the minter as no answer, and never for one the owner cancelled.
+   * hands back to the minter as no answer (`suspendHandedBack` covers those), and never for one
+   * the owner cancelled.
    * - `suspended`: the host has made the state it resumes from durable. The run stops at once
    *   with no outcome: the tool call that asked never returns, so the minter's checkpoint keeps
    *   it started; no further model call starts; and the run ends interrupted, as
@@ -2519,6 +2521,20 @@ export interface MintDependencies {
    * Absent, every such build ends as `no_response`.
    */
   readonly suspendUnanswered?: (
+    question: UnansweredQuestion,
+  ) => Effect.Effect<"suspended" | "not_suspended", MintFailure>;
+  /**
+   * Lets the host suspend the build where the minter ends it with `report_blocked` reason
+   * `question_unanswered` after its own question went back to it as no answer. The harness offers
+   * the latest such question (`step` `question`), when no other question was asked since, and
+   * never one that asks whether to end the build (`endsBuild`); the host declines one it no
+   * longer holds open. It answers as `suspendUnanswered` does, except that the
+   * call that stays unreturned is the report: a resumed attempt rejoins it through
+   * `agentRecovery.recoverTool` with the owner's answer as `input`, and the minter reads that
+   * answer as the report's result, with the build going on. Absent, or on any answer but
+   * `suspended`, the build ends blocked as before.
+   */
+  readonly suspendHandedBack?: (
     question: UnansweredQuestion,
   ) => Effect.Effect<"suspended" | "not_suspended", MintFailure>;
   /**

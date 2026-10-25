@@ -13,9 +13,10 @@ export interface PomeradoOptions {
   readonly ask: InputAsker;
   /**
    * The browser the host launches or attaches to. It never attaches over CDP (`cdp`): its runs
-   * close other tabs and reset site data, which would change a browser it doesn't own.
+   * close other tabs and reset site data, which would change a browser it doesn't own. Its browser
+   * calls keep the executor's 1 MiB result limit (`resultLimitBytes`).
    */
-  readonly browser?: Omit<PlaywrightOptions, "cdp">;
+  readonly browser?: Omit<PlaywrightOptions, "cdp" | "resultLimitBytes">;
   readonly minterProvider?: ModelProvider;
   readonly guardianProvider?: ModelProvider;
   /** The outcome reviewer's model provider, which judges whether each write took effect. */

@@ -142,9 +142,9 @@ export const noOpScriptCode = String.raw`(address) => {
 /**
  * Page code: what a step call reads of one control it found (`readControls`): every form action
  * and method it could submit with, its form's own action first, whether that action is a script
- * that does nothing (`scriptAction`, `noOpScriptCode`), its link destination, whether it is
- * disabled, inert or editable, whether it is empty, its shape and the words that label it, never
- * its value.
+ * that does nothing (`scriptAction`, `noOpScriptCode`), its link destination and whether that is a
+ * script that does nothing (`scriptHref`), whether it is disabled, inert or editable, whether it is
+ * empty, its shape and the words that label it, never its value.
  */
 const controlReadCode = `(element) => {
   const associated =
@@ -164,7 +164,15 @@ const controlReadCode = `(element) => {
   // A link-style sign-in action may navigate instead of submitting its containing form.
   const href = element instanceof HTMLAnchorElement ? element.getAttribute("href") : null;
   if (href !== null) actions.push(new URL(href, document.baseURI).href);
-  for (const control of associated ? Array.from(formProperty("elements")) : [element]) {
+  // Whether the link's own address is a script that does nothing, which sends nothing by itself.
+  const scriptHref = href !== null && (${noOpScriptCode})(actions[actions.length - 1]);
+  // A form's elements leave out its image submits, so they are read beside them.
+  const images = associated
+    ? Array.from(associated.getRootNode().querySelectorAll("input[type=image]")).filter(
+        (input) => input.form === associated,
+      )
+    : [];
+  for (const control of associated ? [...formProperty("elements"), ...images] : [element]) {
     const action = control.getAttribute("formaction");
     if (action !== null) actions.push(new URL(action, document.baseURI).href);
     const method = control.getAttribute("formmethod");
@@ -200,7 +208,7 @@ const controlReadCode = `(element) => {
     disabled,
     inert,
     shape: (${controlShapeCode})(element),
-    target: { documentOrigin: self.origin, actions, scriptAction, methods, explicitGet, submitMethod, editable, empty },
+    target: { documentOrigin: self.origin, actions, scriptAction, scriptHref, methods, explicitGet, submitMethod, editable, empty },
     described: {
       role: element.getAttribute("role"),
       formMethod: methods.join(",") || null,
@@ -252,15 +260,22 @@ const locate = async (selector, questionSelector) => {
   const matches = [];
   for (const frame of frames) {
     const located = frame.locator(selector);
-    const count = await located.count();
-    const match = { frameUrl: where(frame.url(), false), count, visible: 0 };
+    let count;
+    const shown = [];
+    try {
+      count = await located.count();
+      if (count <= 100)
+        for (let index = 0; index < count; index++)
+          if (await located.nth(index).isVisible()) shown.push(located.nth(index));
+    } catch (error) {
+      // A frame the page took away mid-search, such as an ad slot, is skipped with what it read.
+      if (frame.isDetached()) continue;
+      throw error;
+    }
+    const match = { frameUrl: where(frame.url(), false), count, visible: shown.length };
     if (count > 0) matches.push(match);
     if (count > 100) return { error: "ambiguous_match", searched: { frames: frames.length, matches } };
-    for (let index = 0; index < count; index++)
-      if (await located.nth(index).isVisible()) {
-        match.visible++;
-        visible.push({ frame, locator: located.nth(index) });
-      }
+    for (const locator of shown) visible.push({ frame, locator });
   }
   if (visible.length !== 1)
     return { error: visible.length === 0 ? "not_found" : "ambiguous_match", searched: { frames: frames.length, matches } };

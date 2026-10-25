@@ -111,7 +111,11 @@ page's echo of the query, such as a results heading, matches it as the core skil
 compares, except a query the site says it corrected or
 rewrote (below). A search
 that applied every input and got the site's no-results message returns an empty list, never an
-error.
+error. The site's own error page or error banner, or an error status or error body from the data
+request the page depends on, is a failure: throw `OperationFailure` naming what the site showed,
+never an empty list or a success built from it. When the page answers such a reply with its
+no-results message, as some store finders do for a 404, or with a refusal of the caller's value
+(caller-input skill), that answer stands.
 
 Retail and grocery grids often interleave sponsored copies of their organic results and put
 promoted carousels above or inside the grid (core skill, "Results, related records and

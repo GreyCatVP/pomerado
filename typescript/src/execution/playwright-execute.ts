@@ -40,6 +40,12 @@ export interface PlaywrightOptions {
   readonly headless?: boolean;
   readonly startupTimeoutMs?: number;
   readonly cleanupTimeoutMs?: number;
+  /**
+   * The most bytes a script's result may take as JSON, for a caller whose scripts read large page
+   * state. A positive integer of at most 64 MiB; 1 MiB when absent. A larger result fails the call
+   * and names the limit. Console output keeps its own 1 MiB limit.
+   */
+  readonly resultLimitBytes?: number;
 }
 /**
  * An answered script and which watched values its typing calls delivered, by index, each with the
@@ -90,6 +96,11 @@ const loadChromium = (library: PlaywrightLibrary) =>
 const duration = (value: number, name: string) => {
   if (!Number.isFinite(value) || value <= 0 || value > 300_000)
     throw new Error(`${name} must be positive and at most 300000 ms`);
+  return value;
+};
+const resultLimit = (value: number) => {
+  if (!Number.isInteger(value) || value <= 0 || value > 67_108_864)
+    throw new Error("resultLimitBytes must be a positive integer and at most 67108864 bytes");
   return value;
 };
 
@@ -324,6 +335,12 @@ export const makePlaywrightExecutor = (
       try: () => duration(options.cleanupTimeoutMs ?? 5_000, "cleanupTimeoutMs"),
       catch: asError,
     });
+    // Absent, the worker keeps its 1 MiB default.
+    const resultLimitBytes = yield* Effect.try({
+      try: () =>
+        options.resultLimitBytes === undefined ? undefined : resultLimit(options.resultLimitBytes),
+      catch: asError,
+    });
     if (options.endpoint !== undefined && options.cdp !== undefined)
       return yield* Effect.fail(new Error("endpoint and cdp cannot both be set"));
     const library = yield* Schema.decodeUnknown(PlaywrightLibrary)(
@@ -374,6 +391,7 @@ export const makePlaywrightExecutor = (
               endpoint,
               startupTimeoutMs,
               library,
+              ...(resultLimitBytes === undefined ? {} : { resultLimitBytes }),
               ...(options.cdp === undefined
                 ? {}
                 : {

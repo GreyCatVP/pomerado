@@ -43,6 +43,8 @@ export const NativeWorkerOptions = Schema.Struct({
   endpoint: Schema.String,
   startupTimeoutMs: Schema.Number,
   library: PlaywrightLibrary,
+  /** The most bytes of JSON a script's result may take; 1 MiB when absent. Output keeps 1 MiB. */
+  resultLimitBytes: Schema.optional(Schema.Number),
   /** Attach over CDP and drive the browser's own context, at this page (its first when absent). */
   cdp: Schema.optional(Schema.Struct({ targetId: Schema.optional(Schema.String) })),
 });

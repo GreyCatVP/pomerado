@@ -131,6 +131,7 @@ const properties = [
   "control",
   "actions",
   "scriptAction",
+  "scriptHref",
   "methods",
   "explicitGet",
   "submitMethod",

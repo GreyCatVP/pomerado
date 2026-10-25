@@ -1670,10 +1670,15 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
             ),
           ),
         );
+      /**
+       * `reported`: the answer came to a question the minter had ended the build on with
+       * report_blocked, which a resumed attempt rejoins with it, so the build goes on.
+       */
       const inputResult = (
         submitted: AgentInputRequest,
         answers: ValidAnswers,
         endsBuild: ReadonlySet<string>,
+        reported = false,
       ) =>
         Effect.gen(function* () {
           const askAgain = yield* recordInputAnswer(submitted, answers);
@@ -1701,16 +1706,19 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
           const card = secretIds.some(cardQuestion);
           // A card answer never goes into source, so the source handle rule is only for the rest.
           const handles = secretIds.some((id) => !cardQuestion(id));
+          const withdrawn = reported
+            ? "The caller answered the question you reported unanswered, so the build has not ended. "
+            : "";
           if (askAgain !== undefined)
             return JSON.stringify({
               status: "answered",
               answers: visibleAnswers,
-              instruction: askAgain,
+              instruction: `${withdrawn}${askAgain}`,
             });
           return JSON.stringify({
             status: "answered",
             answers: visibleAnswers,
-            instruction: `The caller answered. Continue in this attempt with these answers; verify the current page before acting on them, and before any further write.${handles ? " A secret answer is a handle such as {{secret.s1}}, never the value, which you never see. Write the handle exactly as given, as the whole string literal passed as the value to fill, type or pressSequentially, or as a field of a request to this site, in the Playwright code of a kernel.browsers.playwright.execute call in explore, test or act source; the host fills in the value when it runs that source live, and masks it in what comes back. It refuses a handle anywhere else, such as in a variable, a concatenation, a transform, a return value or a navigation. Offline targets get the handle text unchanged. An example and published source never hold a handle: a value the finished tool needs at run time is a declared secret question it asks with ask." : ""}${card ? " A card answer (card_number, card_expiry, card_cvc, billing_postal_code) is never written in source: run an execution with purpose card_fill, target liveBrowser, entrypoint operation/card-fill-step.json and cardFillStep naming each card field's own selector, on the page or inside the payment provider's frame, with the card handle for it; the host types the values and clicks nothing." : ""}`,
+            instruction: `${withdrawn}The caller answered. Continue in this attempt with these answers; verify the current page before acting on them, and before any further write.${handles ? " A secret answer is a handle such as {{secret.s1}}, never the value, which you never see. Write the handle exactly as given, as the whole string literal passed as the value to fill, type or pressSequentially, or as a field of a request to this site, in the Playwright code of a kernel.browsers.playwright.execute call in explore, test or act source; the host fills in the value when it runs that source live, and masks it in what comes back. It refuses a handle anywhere else, such as in a variable, a concatenation, a transform, a return value or a navigation. Offline targets get the handle text unchanged. An example and published source never hold a handle: a value the finished tool needs at run time is a declared secret question it asks with ask." : ""}${card ? " A card answer (card_number, card_expiry, card_cvc, billing_postal_code) is never written in source: run an execution with purpose card_fill, target liveBrowser, entrypoint operation/card-fill-step.json and cardFillStep naming each card field's own selector, on the page or inside the payment provider's frame, with the card handle for it; the host types the values and clicks nothing." : ""}`,
           });
         });
       /**
@@ -1891,7 +1899,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         Effect.gen(function* () {
           record(evidence, purpose);
           const handedBack = evidence.noResponse !== undefined && handsBackNoAnswer();
-          if (handedBack) yield* questionHandedBack;
+          if (handedBack) yield* questionHandedBack();
           const receipt = yield* visible(evidence, purpose, handedBack);
           if (evidence.terminalFailure === "ChallengeFailure" && !stopUnavailableHost())
             terminal ??= {
@@ -2289,28 +2297,39 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         !(request.mode === "maintenance" && buildEffect === "write") &&
         !signedInOrHoldsLogin() &&
         noAnswerHandBacks < noAnswerHandBackLimit;
-      /** Counts a question handed back and records it. */
-      const questionHandedBack = Effect.sync(() => {
-        noAnswerHandBacks += 1;
-      }).pipe(
-        Effect.zipRight(
-          reportBestEffort(
-            dependencies.diagnostics?.emit("mint.question_handed_back", {}) ?? Effect.void,
-            {
-              component: "mint",
-              operation: "diagnostics.emit",
-              phase: "mint.question_handed_back",
-              correlation: dependencies.reportCorrelation ?? "process",
-            },
+      /**
+       * The minter's latest question handed back as no answer, while no other question was asked
+       * or handed back since: a report that ends the build on it may be suspended instead
+       * (`suspendHandedBack`).
+       */
+      let handedBackQuestion: string | undefined;
+      /**
+       * Counts a question handed back and records it, with the id of the minter's own question;
+       * a script's question has none.
+       */
+      const questionHandedBack = (requestId?: string) =>
+        Effect.sync(() => {
+          noAnswerHandBacks += 1;
+          handedBackQuestion = requestId;
+        }).pipe(
+          Effect.zipRight(
+            reportBestEffort(
+              dependencies.diagnostics?.emit("mint.question_handed_back", {}) ?? Effect.void,
+              {
+                component: "mint",
+                operation: "diagnostics.emit",
+                phase: "mint.question_handed_back",
+                correlation: dependencies.reportCorrelation ?? "process",
+              },
+            ),
           ),
-        ),
-      );
+        );
       /**
        * The minter's question went unanswered and the build goes on. It stays unanswered: no
        * `mint_update` can cite it, and no review reads an answer from it.
        */
-      const noAnswer = () =>
-        questionHandedBack.pipe(
+      const noAnswer = (requestId: string | undefined) =>
+        questionHandedBack(requestId).pipe(
           Effect.as(
             JSON.stringify({
               status: "no_answer",
@@ -2325,12 +2344,17 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
       let modelRunEnded = false;
       /**
        * Offers the host to suspend the build on a question its owner left unanswered, where the
-       * build would otherwise end as no_response. Once the host suspended it, this never returns:
-       * the run stops, and the call that asked stays unreturned for a resumed attempt to rejoin.
+       * build would otherwise end as no_response, or, through `suspendHandedBack`, where the
+       * minter ends it on a question handed back. Once the host suspended it, this never returns:
+       * the run stops, and the call that asked, or the report, stays unreturned for a resumed
+       * attempt to rejoin.
        */
-      const suspendUnanswered = (question: UnansweredQuestion) =>
+      const suspendUnanswered = (
+        question: UnansweredQuestion,
+        hook: "suspendUnanswered" | "suspendHandedBack" = "suspendUnanswered",
+      ) =>
         Effect.gen(function* () {
-          const suspend = dependencies.suspendUnanswered;
+          const suspend = dependencies[hook];
           if (suspend === undefined || terminal !== undefined || modelRunEnded) return;
           const decision = yield* suspend(question).pipe(
             Effect.catchAllDefect((error) =>
@@ -2338,19 +2362,19 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                 new MintFailure({
                   code: "Unavailable",
                   failureDetail: failureDetail("mint_host_dependency_failed", {
-                    operation: "suspendUnanswered",
+                    operation: hook,
                     error,
                   }),
                 }),
               ),
             ),
-            // The build ends as no_response, as it would without the hook.
+            // The build ends as it would without the hook.
             Effect.catchAll((error) =>
               diagnose({ phase: "suspend_unanswered", code: failureCode(error) }).pipe(
                 Effect.zipRight(
                   reportFailure(error, {
                     component: "mint",
-                    operation: "suspendUnanswered",
+                    operation: hook,
                     phase: "suspend_unanswered",
                     subCause: "mint_host_dependency_failed",
                     correlation: dependencies.reportCorrelation ?? "process",
@@ -2371,6 +2395,12 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
         });
       /** The id of the question the minter is asking, while it waits for the answer. */
       let askingId: string | undefined;
+      /**
+       * Whether that question asks whether to end the build (`endsBuild`). Its later answer could
+       * not keep that mark through a rejoined report, so such a question is never offered to
+       * `suspendHandedBack`.
+       */
+      let askingEndsBuild = false;
       /**
        * The build's owner left a question that decides what it may do unanswered: it ends, unless
        * the host suspends it to resume later.
@@ -6293,6 +6323,8 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                   });
               }
               askingId = requestId;
+              askingEndsBuild = endsBuild.size > 0;
+              handedBackQuestion = undefined;
               const answers = yield* dependencies.askInput(submitted, {
                 requestId,
                 ...(reviewId === undefined ? {} : { reviewId }),
@@ -6304,7 +6336,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                 // An owner's cancel is a choice to stop, never a question to decide without.
                 (error) =>
                   error.ownerCancelled !== true && handsBackNoAnswer()
-                    ? noAnswer()
+                    ? noAnswer(askingEndsBuild ? undefined : askingId)
                     : unanswered(error, "asking a question", {
                         step: "question",
                         ...(askingId === undefined ? {} : { requestId: askingId }),
@@ -6313,6 +6345,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
               Effect.ensuring(
                 Effect.sync(() => {
                   askingId = undefined;
+                  askingEndsBuild = false;
                 }),
               ),
               // error-reporting-allow: typed-recovery an invalid request is the model's to correct, told as its result
@@ -6480,6 +6513,20 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                           "Guardian did not allow this explanation to reach the caller, so the build has not ended. Revise the explanation using the rationale and call report_blocked again, which is reviewed again, or withdraw it and continue the build.",
                       });
                     }
+                    // The owner may still answer the question the minter gave up on: the host
+                    // may suspend the build to resume with it, and the report never returns.
+                    if (
+                      submitted.reason === "question_unanswered" &&
+                      handedBackQuestion !== undefined
+                    )
+                      yield* suspendUnanswered(
+                        {
+                          step: "question",
+                          requestId: handedBackQuestion,
+                          possibleCommit: possibleCommit(),
+                        },
+                        "suspendHandedBack",
+                      );
                     const shown = review.outcome === "allow_business";
                     const blocked = {
                       reason: submitted.reason,
@@ -7137,6 +7184,7 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                                 asked,
                                 answers,
                                 started._tag === "Right" ? endsBuildIds(started.right) : new Set(),
+                                call.name === "report_blocked",
                               );
                               return { result: recoveredTool.result ?? result };
                             }

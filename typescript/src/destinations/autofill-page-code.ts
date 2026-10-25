@@ -91,13 +91,21 @@ const inspectCode = `await keep(observed, {
 const buttons = [];
 for (const frame of primary.frames()) {
   const candidates = frame.locator('button, input[type="submit"], input[type="button"], input[type="image"], a, [role~="button"], [role~="link"], [role~="menuitem"], [role~="radio"]');
-  const count = Math.min(await candidates.count(), 50);
-  for (let index = 0; index < count && buttons.length < 20; index++) {
-    const candidate = candidates.nth(index);
-    if (!(await candidate.isVisible())) continue;
-    const words = clip(await candidate.evaluate((element) => element.getAttribute("aria-label") ?? (element instanceof HTMLInputElement ? (element.type === "image" ? element.alt : element.value) : element.textContent), undefined, { timeout: ${elementReadMs} }));
-    buttons.push(words ?? "(unlabelled button)");
+  const read = [];
+  try {
+    const count = Math.min(await candidates.count(), 50);
+    for (let index = 0; index < count && buttons.length + read.length < 20; index++) {
+      const candidate = candidates.nth(index);
+      if (!(await candidate.isVisible())) continue;
+      const words = clip(await candidate.evaluate((element) => element.getAttribute("aria-label") ?? (element instanceof HTMLInputElement ? (element.type === "image" ? element.alt : element.value) : element.textContent), undefined, { timeout: ${elementReadMs} }));
+      read.push(words ?? "(unlabelled button)");
+    }
+  } catch (error) {
+    // A frame the page took away mid-read is skipped with its buttons.
+    if (frame.isDetached()) continue;
+    throw error;
   }
+  buttons.push(...read);
 }
 ${codeBoxesCode}
 return {
@@ -235,6 +243,7 @@ const same = (found, expected, editable = true) =>
       JSON.stringify(found.ancestors ?? []) === JSON.stringify(expected.ancestors ?? []) &&
       (found.explicitGet ?? false) === (expected.explicitGet ?? false) &&
       (found.scriptAction ?? false) === (expected.scriptAction ?? false) &&
+      (found.scriptHref ?? false) === (expected.scriptHref ?? false) &&
       found.documentOrigin === expected.documentOrigin &&
       (!editable || found.editable === expected.editable) &&
       found.control === expected.control &&

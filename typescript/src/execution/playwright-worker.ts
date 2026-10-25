@@ -37,6 +37,9 @@ const asError = (cause: unknown): Error =>
   cause instanceof Error ? cause : new Error("Native browser worker failed", { cause });
 const promise = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: asError });
 const outputLimit = 1_048_576;
+/** A byte limit as errors name it: in MiB when it is a whole number of them, else in bytes. */
+const limitLabel = (bytes: number) =>
+  bytes % 1_048_576 === 0 ? `${bytes / 1_048_576} MiB` : `${bytes} bytes`;
 const Target = Schema.Struct({
   targetInfo: Schema.Struct({ targetId: Schema.String, browserContextId: Schema.String }),
 });
@@ -222,6 +225,7 @@ const script = (
   page: Page,
   context: BrowserContext,
   browser: Browser,
+  resultLimit: number,
   watch?: readonly string[],
 ) =>
   Effect.gen(function* () {
@@ -274,8 +278,8 @@ const script = (
           return item;
         });
         if (json === undefined) throw new Error("Native script result is not JSON serializable");
-        if (Buffer.byteLength(json) > outputLimit)
-          throw new Error("Native script result exceeds 1 MiB");
+        if (Buffer.byteLength(json) > resultLimit)
+          throw new Error(`Native script result exceeds ${limitLabel(resultLimit)}`);
         return JSON.parse(json) as unknown;
       },
       catch: asError,
@@ -396,6 +400,7 @@ await Effect.runPromise(
     const options = yield* Schema.decodeUnknown(NativeWorkerOptions)(workerData).pipe(
       Effect.mapError(asError),
     );
+    const resultLimit = options.resultLimitBytes ?? outputLimit;
     const chromium = yield* promise(
       async () => ((await import(options.library)) as typeof import("playwright")).chromium,
     );
@@ -430,7 +435,14 @@ await Effect.runPromise(
         );
         const response = yield* Effect.gen(function* () {
           if (request.kind === "execute")
-            return yield* script(request.code, page, context, browser, request.watch);
+            return yield* script(
+              request.code,
+              page,
+              context,
+              browser,
+              resultLimit,
+              request.watch,
+            );
           return yield* credential(request, context, target.targetId);
         }).pipe(Effect.either);
         port.postMessage(
