@@ -638,6 +638,31 @@ describe("a refusal a write declares in its output", () => {
       schema: schemaOf(Schema.Union(Placed, nestedRefusals(8))),
       reasons: Array.from({ length: 9 }, (_, level) => `level_${level}`),
     },
+    // A `type` list that leaves out `object` admits no object, as a single other type does not.
+    {
+      case: "another branch whose type list leaves out object",
+      schema: schemaOf(
+        Schema.Union(
+          Schema.NullOr(Schema.String).annotations({ jsonSchema: { type: ["string", "null"] } }),
+          notEligible,
+        ),
+      ),
+      reasons: ["not_eligible"],
+    },
+    {
+      case: "another branch whose type list holds object and a status listing other strings",
+      schema: {
+        anyOf: [
+          {
+            type: ["object", "null"],
+            required: ["status"],
+            properties: { status: { enum: ["placed"] } },
+          },
+          schemaOf(notEligible),
+        ],
+      },
+      reasons: ["not_eligible"],
+    },
   ])("reads the reasons of $case", ({ schema, reasons }) => {
     expect([...declaredRefusalReasons(schema)].sort()).toEqual(reasons);
   });
@@ -670,6 +695,25 @@ describe("a refusal a write declares in its output", () => {
         anyOf: [schemaOf(Placed), { type: "object", anyOf: [schemaOf(notEligible)] }],
       },
     },
+    {
+      case: "another branch whose type list holds object and a free-text status",
+      schema: {
+        anyOf: [
+          { type: ["object", "null"], properties: { status: { type: "string" } } },
+          schemaOf(notEligible),
+        ],
+      },
+    },
+    // A `type` list that is empty or holds a value that is not a type name is no valid list, so
+    // it shows nothing about what the branch admits.
+    {
+      case: "another branch whose type list is empty",
+      schema: { anyOf: [{ type: [] }, schemaOf(notEligible)] },
+    },
+    {
+      case: "another branch whose type list holds a value that is not a type name",
+      schema: { anyOf: [{ type: ["string", 1] }, schemaOf(notEligible)] },
+    },
   ])("declares none with $case", ({ schema }) => {
     expect(declaredRefusalReasons(schema).size).toBe(0);
   });
@@ -700,6 +744,11 @@ describe("a refusal a write declares in its output", () => {
     {
       case: "a refusal beside a status pattern that cannot match refused",
       schema: schemaOf(Schema.Union(rated(patterned(/^(?!refused$).+$/)), notEligible)),
+      unreadable: false,
+    },
+    {
+      case: "a refusal beside a type list that leaves out object",
+      schema: { anyOf: [{ type: ["string", "null"] }, schemaOf(notEligible)] },
       unreadable: false,
     },
     // A schema that never lists a refused status means no refusal, whatever else it admits.
