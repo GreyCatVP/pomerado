@@ -630,6 +630,60 @@ describe("advisory checks of the declared schemas", () => {
     expect(schemaChecks(undefined, output)).toEqual(["either loose_text"]);
   });
 
+  it("treats properties required in only some union branches as optional overall", () => {
+    const anyOfDiff = {
+      anyOf: [
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        { type: "object", properties: { b: { type: "string" } }, required: ["b"] },
+      ],
+    };
+    expect(schemaChecks(undefined, anyOfDiff)).toEqual([]);
+
+    const oneOfDiff = {
+      oneOf: [
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        { type: "object", properties: { b: { type: "string" } }, required: ["b"] },
+      ],
+    };
+    expect(schemaChecks(undefined, oneOfDiff)).toEqual([]);
+
+    const primitiveUnion = {
+      anyOf: [
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        { type: "string" },
+      ],
+    };
+    expect(schemaChecks(undefined, primitiveUnion)).toEqual([]);
+
+    const requiredInBoth = {
+      anyOf: [
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+      ],
+    };
+    expect(schemaChecks(undefined, requiredInBoth)).toEqual(["a loose_text"]);
+
+    const optionalInSingle = {
+      type: "object",
+      properties: { a: { type: "string" } },
+    };
+    expect(schemaChecks(undefined, optionalInSingle)).toEqual([]);
+
+    const nestedUnion = {
+      type: "object",
+      required: ["nested"],
+      properties: {
+        nested: {
+          anyOf: [
+            { type: "object", properties: { x: { type: "string" } }, required: ["x"] },
+            { type: "object", properties: { y: { type: "string" } }, required: ["y"] },
+          ],
+        },
+      },
+    };
+    expect(schemaChecks(undefined, nestedUnion)).toEqual([]);
+  });
+
   it("flags an output field looser than the input field of the same name", () => {
     const input = contractJsonSchema(
       Schema.Struct({
