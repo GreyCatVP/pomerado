@@ -17,7 +17,7 @@ import { canonicalSchema } from "../registry/schema-references.js";
 import { InputAnswers } from "../runtime/input-request.js";
 import { fileFormat } from "../runtime/files.js";
 import { createPomerado } from "./pomerado.js";
-import { type MintArtifact, type PomeradoOptions, type PomeradoRequest } from "./contracts.js";
+import { type LocalMintOutcome, type MintArtifact, type PomeradoOptions, type PomeradoRequest } from "./contracts.js";
 import { Deployment, validateArtifact } from "./artifact-files.js";
 import {
   makeMcpJobs,
@@ -75,6 +75,32 @@ const completedResult = (output: unknown): CallToolResult => ({
       : { result: output },
 });
 const jobResult = (view: McpJobView) => completedResult(view);
+/** Finite outcome metadata only: execution observations and diagnostic prose stay private. */
+const incompleteResult = (result: LocalMintOutcome) => ({
+  build: result.build,
+  summary: result.summary,
+  ...(result.stopReason === undefined ? {} : { stopReason: result.stopReason }),
+  ...(result.hostFailure === undefined ? {} : { hostFailure: result.hostFailure }),
+  ...(result.recoveryReason === undefined ? {} : { recoveryReason: result.recoveryReason }),
+  ...(result.possibleCommit === undefined ? {} : { possibleCommit: result.possibleCommit }),
+  ...(result.noResponse === undefined ? {} : { noResponse: { possibleCommit: result.noResponse.possibleCommit } }),
+  ...(result.publicationDenial === undefined ? {} : { publicationDenial: {
+    ...(result.publicationDenial.reason === undefined ? {} : { reason: result.publicationDenial.reason }),
+    ...(result.publicationDenial.category === undefined ? {} : { category: result.publicationDenial.category }),
+  } }),
+  executionSummary: {
+    total: result.executions.length,
+    completed: result.executions.filter((entry) => entry.status === "completed").length,
+    failed: result.executions.filter((entry) => entry.status === "failed").length,
+    unsupported: result.executions.filter((entry) => entry.status === "unsupported").length,
+    needsInput: result.executions.filter((entry) => entry.status === "needs_input").length,
+    authentication: {
+      authenticated: result.executions.filter((entry) => entry.authentication?.state === "authenticated").length,
+      failed: result.executions.filter((entry) => entry.authentication?.state === "failed").length,
+    },
+  },
+  ...(result.untrustedSignInOrigins === undefined ? {} : { untrustedSignInOrigins: result.untrustedSignInOrigins }),
+});
 const toolResponse = (
   effect: Effect.Effect<CallToolResult, Error>,
   signal: AbortSignal,
@@ -200,13 +226,7 @@ export const makePomeradoMcp = (options: PomeradoMcpOptions) =>
                 const pomerado = yield* createPomerado({ ...options.pomerado, ask });
                 const result = yield* pomerado.mint(request);
                 if (result.artifact === undefined)
-                  return {
-                    build: result.build,
-                    summary: result.summary,
-                    ...(result.untrustedSignInOrigins === undefined
-                      ? {}
-                      : { untrustedSignInOrigins: result.untrustedSignInOrigins }),
-                  };
+                  return incompleteResult(result);
                 const integration = yield* publish(result.artifact);
                 return { build: result.build, integration };
               }),

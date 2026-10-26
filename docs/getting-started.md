@@ -182,6 +182,7 @@ Your agent then calls `get_job`. Each call waits up to 30 seconds and returns th
 
 - `"build": "published"` means Pomerado ran the task, Guardian approved the source, and the integration is saved.
 - `"build": "incomplete"` comes with a `summary` and saves nothing. The folder is removed, so you can retry with the same name.
+- An incomplete build also returns the core's `stopReason`, `hostFailure`, `recoveryReason` and publication-denial codes when supplied, along with execution and authentication counts in `executionSummary`. Raw execution observations, diagnostic text and review rationales stay private. An absent stop reason means the core did not name one; execution counts alone do not establish a task's outcome.
 - A `"status": "failed"` job carries an `error`. See [Troubleshooting](#troubleshooting).
 
 To use the integration, follow the steps in the README's [Use your integration](../README.md#use-your-integration).
