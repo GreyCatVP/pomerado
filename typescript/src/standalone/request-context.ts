@@ -1,4 +1,5 @@
 import type { WriteOutcome } from "../mint/outcome-review-contracts.js";
+import { tracedEffect } from "./job-trace.js";
 import { randomUUID } from "node:crypto";
 import { DateTime, Effect, Option, Schema } from "effect";
 import {
@@ -391,7 +392,7 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
         const { turn, readSource } = yield* pending(step);
         const result = yield* guardian
           .review(turn, readSource)
-          .pipe(Effect.mapError((failure) => reviewFailureOf(failure, dispatch)));
+          .pipe((effect) => tracedEffect(session.trace, "guardian.decision", effect), Effect.mapError((failure) => reviewFailureOf(failure, dispatch)));
         const { outcome, rationale, refusal } = result.decision;
         if (outcome !== "allow")
           return yield* reviewDenied(result.reviewId, {
@@ -447,7 +448,7 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
         );
         const result = yield* guardian
           .review(reviewed, readSource)
-          .pipe(Effect.mapError((failure) => reviewFailureOf(failure)));
+          .pipe((effect) => tracedEffect(session.trace, "guardian.decision", effect), Effect.mapError((failure) => reviewFailureOf(failure)));
         const { outcome } = result.decision;
         if (outcome !== "allow")
           return yield* reviewDenied(result.reviewId, { ...result.decision, outcome });
@@ -462,7 +463,7 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
         const { turn, readSource } = yield* pending(step);
         return yield* guardian
           .reviewQuestion(turn, question, readSource)
-          .pipe(Effect.mapError((failure) => reviewFailureOf(failure)));
+          .pipe((effect) => tracedEffect(session.trace, "guardian.decision", effect), Effect.mapError((failure) => reviewFailureOf(failure)));
       });
     type HistoryStep = {
       readonly purpose: string;
@@ -602,7 +603,7 @@ export const requestContext = (session: StandaloneSession, request: PomeradoRequ
         });
         return yield* guardian
           .reviewTaskUpdate(turn, candidate.update, readSource)
-          .pipe(Effect.mapError((failure) => reviewFailureOf(failure)));
+          .pipe((effect) => tracedEffect(session.trace, "guardian.decision", effect), Effect.mapError((failure) => reviewFailureOf(failure)));
       });
     /**
      * Applies an update Guardian allowed, all or nothing. The local host has no intake screen,

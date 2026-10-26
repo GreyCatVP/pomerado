@@ -46,6 +46,7 @@ import {
   BuildBlocked,
   CaptureRequest,
   defaultLiveTestCaseMs,
+  ExecutionFailure,
   ExecutionRefusal,
   ExecutionRequest,
   type HostRefusalBasis,
@@ -53,6 +54,7 @@ import {
   isReadOrWriteChoice,
   LiveTestsRequest,
   MintFailure,
+  MintFailureCode,
   MintRequest,
   MintServices,
   PublicationRequest,
@@ -769,6 +771,10 @@ const safeExecutionEvidence = (evidence: ExecutionEvidence): ExecutionEvidence =
     ...Option.match(Schema.decodeUnknownOption(ExecutionRefusal)(evidence.refusal), {
       onNone: () => ({}),
       onSome: (refusal) => ({ refusal }),
+    }),
+    ...Option.match(Schema.decodeUnknownOption(ExecutionFailure)(evidence.failure), {
+      onNone: () => ({}),
+      onSome: (failure) => ({ failure }),
     }),
   };
 };
@@ -5312,6 +5318,15 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
                     const lost: ExecutionEvidence = {
                       executionId: `unresolved_${randomUUID()}`,
                       status: "failed",
+                      failure: {
+                        purpose: submitted.purpose,
+                        source: "host",
+                        code: Cause.isFailType(result.cause)
+                          ? Schema.is(MintFailureCode)(result.cause.error.code)
+                            ? result.cause.error.code
+                            : "unclassified"
+                          : "unknown",
+                      },
                       effect:
                         submitted.purpose === "example" || submitted.purpose === "act"
                           ? ran
@@ -7063,14 +7078,17 @@ export const runMint = (input: unknown): Effect.Effect<MintOutcome, MintFailure,
             // A file the workspace does not hold is a record the reviewer cannot read, not a failure.
             Effect.catchAll(() => Effect.succeed(undefined)),
           );
-      const executionRecord = (entry: ExecutionEvidence) => ({
-        ...entry,
-        purpose: purposes.get(entry.executionId),
-        ...(entrypoints.has(entry.executionId)
-          ? { entrypoint: entrypoints.get(entry.executionId) }
-          : {}),
-        note: "The screened result the minter received is in its history: search_history for this executionId.",
-      });
+      const executionRecord = (entry: ExecutionEvidence) => {
+        const { failure: _failure, ...record } = entry;
+        return {
+          ...record,
+          purpose: purposes.get(entry.executionId),
+          ...(entrypoints.has(entry.executionId)
+            ? { entrypoint: entrypoints.get(entry.executionId) }
+            : {}),
+          note: "The screened result the minter received is in its history: search_history for this executionId.",
+        };
+      };
       const baseEvidence: OutcomeEvidence = {
         list: (kind) =>
           Effect.gen(function* () {

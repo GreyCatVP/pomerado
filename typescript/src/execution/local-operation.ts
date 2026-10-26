@@ -40,6 +40,7 @@ import { HttpFailure, type HttpTransport } from "../runtime/site-http.js";
 import type { ListHost } from "../runtime/list-page.js";
 
 export interface LocalOperationOptions {
+  readonly diagnostic?: (kind: string, data: unknown) => void;
   readonly workspace: LocalWorkspace;
   readonly entrypoint: string;
   readonly sources: readonly (readonly [string, string])[];
@@ -396,6 +397,11 @@ const receiveOperation = (
       if (message.kind === "journal") return;
       if (message.kind === "result" || message.kind === "error" || message.kind === "cancel") {
         if (message.kind !== "cancel") finished = true;
+        if (message.kind === "result") options.diagnostic?.("operation.result", message);
+        if (message.kind === "error") options.diagnostic?.("operation.child.error", {
+          error: message.privateDetail ?? { traceCapture: "exceeds_ipc_limit" },
+          frame: message.frame,
+        });
         handleTerminalMessage(message, completed, pending);
         return;
       }
@@ -543,6 +549,7 @@ export const runLocalOperation = (
       const response = yield* receiveOperation(process, options, deadline);
       yield* sendToChild(process, {
         kind: "start",
+        ...(options.diagnostic === undefined ? {} : { privateDiagnostic: true }),
         entrypoint: staged.entrypoint,
         input: options.input,
         ...(options.retainedOutput === undefined ? {} : { retainedOutput: options.retainedOutput }),
@@ -585,6 +592,7 @@ export const runLocalOperation = (
             ),
           ),
         ),
+        Effect.tapErrorCause((cause) => Effect.sync(() => options.diagnostic?.("operation.host.error", cause))),
         Effect.catchAll((error) =>
           Effect.gen(function* () {
             const failure =
@@ -600,6 +608,7 @@ export const runLocalOperation = (
                   );
             yield* process.close;
             const channels = yield* process.result.pipe(Effect.either);
+            options.diagnostic?.("operation.process", channels);
             return yield* Effect.fail(
               Object.assign(
                 failure,
@@ -613,9 +622,18 @@ export const runLocalOperation = (
       );
       // Only a file this run collected may stand in its output; a script cannot name another.
       yield* checkOutputFiles(options.files, result).pipe(
-        Effect.tapError(() => process.close),
+        Effect.tapError(() => Effect.gen(function* () {
+          yield* process.close;
+          if (options.diagnostic !== undefined) {
+            const channels = yield* process.result.pipe(Effect.either);
+            options.diagnostic("operation.process", channels);
+          }
+        })),
+        Effect.tapErrorCause((cause) => Effect.sync(() => options.diagnostic?.("operation.host.error", cause))),
       );
-      yield* process.close;
+      yield* process.close.pipe(
+        Effect.tapErrorCause((cause) => Effect.sync(() => options.diagnostic?.("operation.host.error", cause))),
+      );
       const output = yield* process.result.pipe(
         Effect.raceFirst(
           deadline.awaitExpiry.pipe(
@@ -624,7 +642,9 @@ export const runLocalOperation = (
             ),
           ),
         ),
+        Effect.tapErrorCause((cause) => Effect.sync(() => options.diagnostic?.("operation.host.error", cause))),
       );
+      options.diagnostic?.("operation.process", output);
       return operationOutput(result, output);
     }),
   );

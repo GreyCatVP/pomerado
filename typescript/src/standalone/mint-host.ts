@@ -1,3 +1,5 @@
+import { tracedEffect } from "./job-trace.js";
+import { traceObserverFactory } from "./trace-model.js";
 import { randomUUID } from "node:crypto";
 import { Effect } from "effect";
 import { questionForReview } from "../guardian/question.js";
@@ -65,7 +67,7 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
     instructions: authoring.instructions,
     skills: authoring.skills,
     projection,
-    model: makeOpenAIMinter(options.minterProvider),
+    model: makeOpenAIMinter(options.minterProvider, undefined, {}, state.session.trace === undefined ? {} : { observerFactory: traceObserverFactory(state.session.trace) }),
     deadline,
     autofillSignIn: true,
     requestLogin: () => Effect.succeed("inspect"),
@@ -202,7 +204,26 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
     },
     publicationDecisions,
   };
-  return dependencies;
+  const trace = state.session.trace;
+  if (trace === undefined) return dependencies;
+  const emit: NonNullable<MintDependencies["diagnostics"]>["emit"] = (name, details, correlation) => Effect.sync(() => trace.event("harness.event", { name, details, correlation }, correlation?.executionId ?? correlation?.reviewId));
+  const liveTests = dependencies.liveTests;
+  return { ...dependencies, diagnostics: { emit, retainModelTranscript: emit },
+    reviewAndExecute: (...args: Parameters<MintDependencies["reviewAndExecute"]>) => Effect.gen(function* () {
+      trace.event("step.request", args[0]);
+      trace.event("step.sources", yield* workspace.snapshot.pipe(Effect.either));
+      return yield* tracedEffect(trace, "step", dependencies.reviewAndExecute(...args));
+    }),
+    ...(liveTests === undefined ? {} : { liveTests: { ...liveTests,
+      schemas: (entrypoint: string) => tracedEffect(trace, "tests.schemas", liveTests.schemas(entrypoint)),
+      run: (batch: Parameters<typeof liveTests.run>[0]) => tracedEffect(trace, "tests", liveTests.run(batch)),
+    } }),
+    publish: (...args: Parameters<MintDependencies["publish"]>) => Effect.gen(function* () {
+      trace.event("publication.request", args[0]);
+      trace.event("publication.sources", yield* workspace.snapshot.pipe(Effect.either));
+      return yield* tracedEffect(trace, "publication.build", dependencies.publish(...args));
+    }),
+  } satisfies MintDependencies;
 };
 export const mintRequest = (
   session: StandaloneSession,
@@ -211,7 +232,8 @@ export const mintRequest = (
   fileHandles: FileHandles,
 ) =>
   Effect.gen(function* () {
-    const state = yield* mintState(session, context, request, fileHandles);
+    session.trace?.event("build.start", {});
+    const state = yield* mintState(session, context, request, fileHandles).pipe(Effect.tapErrorCause((cause) => Effect.sync(() => session.trace?.event("build.error", cause))));
     // The request's runs share its publication decisions.
     const publicationDecisions = memoryPublicationDecisions();
     const mintRequest = {

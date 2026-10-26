@@ -5,7 +5,8 @@ import {
 } from "@modelcontextprotocol/server";
 import { join } from "node:path";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
-import { Effect, Schema, type Scope } from "effect";
+import { Effect, Option, Schema, type Scope } from "effect";
+import { ExecutionFailure } from "../mint/contracts.js";
 import {
   localRequestFingerprint,
   localRetryKey,
@@ -16,8 +17,9 @@ import { nestedInput, readHints, standard, writeHints } from "../mcp/schema.js";
 import { canonicalSchema } from "../registry/schema-references.js";
 import { InputAnswers } from "../runtime/input-request.js";
 import { fileFormat } from "../runtime/files.js";
+import { validateTraceDirectory, withJobTrace, tracedEffect, type JobTrace } from "./job-trace.js";
 import { createPomerado } from "./pomerado.js";
-import { type MintArtifact, type PomeradoOptions, type PomeradoRequest } from "./contracts.js";
+import { type LocalMintOutcome, type MintArtifact, type PomeradoOptions, type PomeradoRequest } from "./contracts.js";
 import { Deployment, validateArtifact } from "./artifact-files.js";
 import {
   makeMcpJobs,
@@ -33,6 +35,7 @@ interface ServerOptions {
   readonly waitMs?: number;
 }
 export interface PomeradoMcpOptions extends ServerOptions {
+  readonly traceDirectory?: string;
   readonly prepare: (
     request: PomeradoRequest,
     name: string,
@@ -75,6 +78,45 @@ const completedResult = (output: unknown): CallToolResult => ({
       : { result: output },
 });
 const jobResult = (view: McpJobView) => completedResult(view);
+const HostExecutionId = Schema.String.pipe(Schema.pattern(
+  /^(?:unresolved_)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+));
+const failedExecutionsOf = (executions: LocalMintOutcome["executions"]) =>
+  executions.filter((entry) => entry.status === "failed").slice(-20).map((entry) => ({
+    executionId: Schema.is(HostExecutionId)(entry.executionId) ? entry.executionId : "unknown",
+    effect: entry.effect,
+    ...Option.match(Schema.decodeUnknownOption(ExecutionFailure)(entry.failure), {
+      onNone: () => ({ purpose: "unknown", source: "unknown" }),
+      onSome: (failure) => failure,
+    }),
+  }));
+/** Finite outcome metadata only: execution observations and diagnostic prose stay private. */
+const incompleteResult = (result: LocalMintOutcome) => ({
+  build: result.build,
+  summary: result.summary,
+  ...(result.stopReason === undefined ? {} : { stopReason: result.stopReason }),
+  ...(result.hostFailure === undefined ? {} : { hostFailure: result.hostFailure }),
+  ...(result.recoveryReason === undefined ? {} : { recoveryReason: result.recoveryReason }),
+  ...(result.possibleCommit === undefined ? {} : { possibleCommit: result.possibleCommit }),
+  ...(result.noResponse === undefined ? {} : { noResponse: { possibleCommit: result.noResponse.possibleCommit } }),
+  ...(result.publicationDenial === undefined ? {} : { publicationDenial: {
+    ...(result.publicationDenial.reason === undefined ? {} : { reason: result.publicationDenial.reason }),
+    ...(result.publicationDenial.category === undefined ? {} : { category: result.publicationDenial.category }),
+  } }),
+  failedExecutions: failedExecutionsOf(result.executions),
+  executionSummary: {
+    total: result.executions.length,
+    completed: result.executions.filter((entry) => entry.status === "completed").length,
+    failed: result.executions.filter((entry) => entry.status === "failed").length,
+    unsupported: result.executions.filter((entry) => entry.status === "unsupported").length,
+    needsInput: result.executions.filter((entry) => entry.status === "needs_input").length,
+    authentication: {
+      authenticated: result.executions.filter((entry) => entry.authentication?.state === "authenticated").length,
+      failed: result.executions.filter((entry) => entry.authentication?.state === "failed").length,
+    },
+  },
+  ...(result.untrustedSignInOrigins === undefined ? {} : { untrustedSignInOrigins: result.untrustedSignInOrigins }),
+});
 const toolResponse = (
   effect: Effect.Effect<CallToolResult, Error>,
   signal: AbortSignal,
@@ -181,6 +223,8 @@ const makeServer = (
 /** Discovery registers tools without creating Chromium or invoking a model. */
 export const makePomeradoMcp = (options: PomeradoMcpOptions) =>
   Effect.gen(function* () {
+    const traceDirectory = options.traceDirectory ?? process.env["POMERADO_TRACE_DIR"];
+    if (traceDirectory !== undefined) yield* Effect.try({ try: () => validateTraceDirectory(traceDirectory), catch: (cause) => new Error("Invalid private trace directory.", { cause }) });
     const { server, jobs } = yield* makeServer("pomerado", options, "mint");
     server.registerTool(
       "mint",
@@ -193,23 +237,20 @@ export const makePomeradoMcp = (options: PomeradoMcpOptions) =>
       (input, context) =>
         toolResponse(
           jobs
-            .start((ask) =>
-              Effect.gen(function* () {
+            .start((ask, jobId) => {
+              const work = (trace?: JobTrace) => Effect.gen(function* () {
                 const { name, ...request } = input;
-                const publish = yield* options.prepare(request, name);
-                const pomerado = yield* createPomerado({ ...options.pomerado, ask });
+                trace?.event("job.request", { name, ...request });
+                const publish = yield* tracedEffect(trace, "prepare", options.prepare(request, name));
+                const pomerado = yield* createPomerado({ ...options.pomerado, ask }, trace);
                 const result = yield* pomerado.mint(request);
                 if (result.artifact === undefined)
-                  return {
-                    build: result.build,
-                    summary: result.summary,
-                    ...(result.untrustedSignInOrigins === undefined
-                      ? {}
-                      : { untrustedSignInOrigins: result.untrustedSignInOrigins }),
-                  };
-                const integration = yield* publish(result.artifact);
+                  return incompleteResult(result);
+                const integration = yield* tracedEffect(trace, "publication", publish(result.artifact));
                 return { build: result.build, integration };
-              }),
+              });
+              return traceDirectory === undefined ? work() : withJobTrace(traceDirectory, jobId, work);
+            },
             )
             .pipe(Effect.map(jobResult)),
           context.mcpReq.signal,

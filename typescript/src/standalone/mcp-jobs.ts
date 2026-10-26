@@ -326,7 +326,7 @@ export const makeMcpJobs = (maxJobs = 1, kind: McpJobKind = "mint", store?: Loca
     };
     const launch = (
       id: string,
-      work: (ask: InputAsker) => Effect.Effect<unknown, Error, Scope.Scope>,
+      work: (ask: InputAsker, jobId: string) => Effect.Effect<unknown, Error, Scope.Scope>,
       recorded: boolean,
     ) =>
       Effect.gen(function* () {
@@ -342,7 +342,7 @@ export const makeMcpJobs = (maxJobs = 1, kind: McpJobKind = "mint", store?: Loca
           settle(
             job,
             kind,
-            Effect.suspend(() => work(jobAsker(job))),
+            Effect.suspend(() => work(jobAsker(job), job.id)),
             recordOutcome,
           ).pipe(Effect.interruptible),
           scope,
@@ -367,7 +367,7 @@ export const makeMcpJobs = (maxJobs = 1, kind: McpJobKind = "mint", store?: Loca
      * fingerprint rejoins it and starts nothing; the same key with another fingerprint is refused.
      */
     const start = (
-      work: (ask: InputAsker) => Effect.Effect<unknown, Error, Scope.Scope>,
+      work: (ask: InputAsker, jobId: string) => Effect.Effect<unknown, Error, Scope.Scope>,
       submission?: RetrySubmission,
     ) =>
       submitPermit

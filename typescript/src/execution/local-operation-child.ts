@@ -33,6 +33,7 @@ if (import.meta.url.endsWith(".ts"))
   });
 const { LocalHttpAnswer, LocalOperationStart, LocalOperationReply } =
   await import("./local-operation-protocol.js");
+const { traceValue } = await import("../privacy/trace-value.js");
 const { localError, localOutputLimit } = await import("./local-path.js");
 const { isKernelOperation } = await import("../runtime/kernel-operation.js");
 const { executeKernelOperation } = await import("../runtime/kernel-operation-run.js");
@@ -103,6 +104,19 @@ const send = (message: unknown) =>
     },
     catch: localError,
   });
+const privateErrorMessage = (message: object, error: unknown, enabled: boolean) => {
+  if (!enabled) return message;
+  let privateDetail: unknown;
+  try {
+    privateDetail = traceValue(error, (text) => text);
+    if (serialize({ ...message, privateDetail }).byteLength > localOutputLimit)
+      privateDetail = { traceCapture: "exceeds_ipc_limit" };
+  } catch {
+    privateDetail = { traceCapture: "failed" };
+  }
+  const detailed = { ...message, privateDetail };
+  return serialize(detailed).byteLength <= localOutputLimit ? detailed : message;
+};
 const call = (payload: object) =>
   Effect.async<unknown, Error>((resume) => {
     const id = randomUUID();
@@ -512,7 +526,7 @@ await Effect.runPromise(
       journalState.pipe(
         Effect.flatMap((metadata) => {
           const frame = authoredFrame(error);
-          return send({
+          const message = {
             kind: "error",
             error: error.message || error.name,
             ...metadata,
@@ -539,7 +553,8 @@ await Effect.runPromise(
               : "_tag" in error && typeof error._tag === "string"
                 ? { code: error._tag }
                 : {}),
-          });
+          };
+          return send(privateErrorMessage(message, error, start.privateDiagnostic === true));
         }),
       ),
     ),

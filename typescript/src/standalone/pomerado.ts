@@ -1,5 +1,7 @@
 import { Effect, type Scope } from "effect";
 import type { Pomerado, PomeradoOptions } from "./contracts.js";
+import { tracedEffect, type JobTrace } from "./job-trace.js";
+import { tracedProvider } from "./trace-model.js";
 import { makeSession } from "./session.js";
 import { requestContext } from "./request-context.js";
 import { mintRequest } from "./mint-host.js";
@@ -18,9 +20,15 @@ export type {
 /** A scoped session owns its browser, so a minted operation can run in the same signed-in session. */
 export const createPomerado = (
   options: PomeradoOptions,
+  trace?: JobTrace,
 ): Effect.Effect<Pomerado, Error, Scope.Scope> =>
   Effect.gen(function* () {
-    const session = yield* makeSession(options);
+    const configured = trace === undefined ? options : { ...options,
+      minterProvider: tracedProvider(trace, "minter", options.minterProvider),
+      guardianProvider: tracedProvider(trace, "guardian", options.guardianProvider),
+      outcomeReviewerProvider: tracedProvider(trace, "outcome", options.outcomeReviewerProvider),
+    };
+    const session = yield* makeSession(configured, trace).pipe(Effect.tapErrorCause((cause) => Effect.sync(() => trace?.event("session.error", cause))));
     const mint: Pomerado["mint"] = (request) =>
       session.mutex.withPermits(1)(
         Effect.scoped(
@@ -33,7 +41,7 @@ export const createPomerado = (
             );
             const handled = { ...request, input: issued.input };
             const context = yield* requestContext(session, handled);
-            return yield* mintRequest(session, context, handled, issued.handles);
+            return yield* tracedEffect(trace, "mint", mintRequest(session, context, handled, issued.handles));
           }),
         ),
       );
