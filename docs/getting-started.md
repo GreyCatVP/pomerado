@@ -221,6 +221,7 @@ When a job needs something from you, `get_job` returns `"status": "input_require
 ## Server options
 
 - Add `--headed` to the `mint` arguments to watch Chromium work.
+- Add `--function-file-tools` when a model endpoint accepts function tools but rejects the native `apply_patch` tool. This uses the Agents SDK's existing function editor with the same workspace restrictions, edit ordering and Guardian reviews. Native file editing remains the default. Embedded hosts can set `PomeradoOptions.functionFileTools` or pass `functionFileTools: true` in `makeOpenAIMinter`'s fourth argument.
 - Add `--endpoint` and a native Playwright WebSocket URL to attach to a browser server you run. The server must support `chromium.connect()` at the same Playwright version. A Chromium remote debugging URL for `connectOverCDP()` won't work.
 - To test an attached browser, start a local Playwright browser server from a clone of this repository. Use the endpoint it prints.
 

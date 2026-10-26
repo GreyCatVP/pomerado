@@ -22,6 +22,7 @@ import {
   mintIdleCompactionTokens,
 } from "./idle-compaction.js";
 import { solModel } from "../models/models.js";
+import { functionFileTool } from "./function-file-tool.js";
 import { providerQuotaExhausted } from "../models/provider-quota.js";
 import { transientTransportFailure } from "../models/transport-failure.js";
 import { MaxTurnsExceededError, RunContext, RunState, Runner, Usage, tool } from "@openai/agents";
@@ -569,6 +570,7 @@ const openAIMinter = (
     readonly modelRetry?: ModelCallRetry;
   } = {},
   ports: {
+    readonly functionFileTools?: boolean;
     readonly observerFactory?: ModelObserverFactory;
     readonly recoveryFactory?: MintRecoveryFactory;
     readonly failureMetadata?: (error: unknown) => ModelFailureMetadata;
@@ -739,7 +741,8 @@ const openAIMinter = (
               const needsApproval = async (context: unknown, input: unknown, callId?: string) =>
                 (callId !== undefined && heldForEdit.has(callId)) ||
                 (await own(context, input, callId));
-              const step = stepTools.has(entry.name);
+              const fileEdit = ports.functionFileTools === true && entry.name === "apply_patch";
+              const step = stepTools.has(entry.name) || fileEdit;
               /** Runs the call unless an earlier step failed; a step's own failure holds the rest. */
               const inOrder =
                 (run: FunctionTool["invoke"]): FunctionTool["invoke"] =>
@@ -747,6 +750,15 @@ const openAIMinter = (
                   const callId = details?.toolCall?.callId ?? "";
                   if (afterFailure(callId)) return notRunAfterFailure;
                   const call = placed.get(callId);
+                  // Function edits run in order, but a call between two edits must wait for a
+                  // new response, just as a call held behind native edits does.
+                  if (!fileEdit && ports.functionFileTools === true && call !== undefined) {
+                    const edits = call.response.output.flatMap((item, index) =>
+                      item.type === "function_call" && item.name === "apply_patch" ? [index] : [],
+                    );
+                    if (edits.some((index) => index < call.index) && edits.some((index) => index > call.index))
+                      return notRun;
+                  }
                   // Calls run in the model's order, so the first step that fails holds the rest.
                   const failed = () => {
                     if (call !== undefined) call.response.failedAt ??= call.index;
@@ -891,6 +903,9 @@ const openAIMinter = (
             };
             const protectTools: ConfigureCapabilityTools = (tools) =>
               tools
+                .map((entry) => ports.functionFileTools === true && entry.type === "apply_patch"
+                  ? functionFileTool(entry.editor, turn.session)
+                  : entry)
                 .filter((entry) => !(entry.type === "function" && entry.name === "view_image"))
                 .map((entry) =>
                   entry.type === "apply_patch"
@@ -915,7 +930,7 @@ const openAIMinter = (
                                 return await dispatch(entry.name, args[1], args[2], undefined, () =>
                                   turn.runTool(
                                     Effect.tryPromise({
-                                      try: () => entry.invoke(...args),
+                                      try: () => entry.invoke(args[0], args[1], args[2]),
                                       catch: (error) =>
                                         mintFailure(error) ??
                                         new MintFailure({ code: "Unavailable" }),
@@ -1522,6 +1537,15 @@ const openAIMinter = (
                         if (item.type !== "function_call" && item.type !== "apply_patch_call")
                           return;
                         placed.set(item.callId, { response: calls, index });
+                        // The SDK rejects malformed arguments before invoking the wrapper, so
+                        // record the failed edit here to hold every later action as well.
+                        if (
+                          ports.functionFileTools === true &&
+                          item.type === "function_call" &&
+                          item.name === "apply_patch" &&
+                          unreadableArguments(item.arguments)
+                        )
+                          calls.failedAt ??= index;
                         if (
                           item.type === "function_call" &&
                           calls.edits.some((edit) => edit.index < index)
@@ -1868,6 +1892,8 @@ export const makeOpenAIMinter = (
     readonly modelRetry?: ModelCallRetry;
   } = {},
   ports: {
+    /** Use the SDK function editor for model endpoints without native patch support. */
+    readonly functionFileTools?: boolean;
     readonly observerFactory?: ModelObserverFactory;
     readonly recoveryFactory?: MintRecoveryFactory;
     readonly failureMetadata?: (error: unknown) => ModelFailureMetadata;

@@ -65,7 +65,9 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
     instructions: authoring.instructions,
     skills: authoring.skills,
     projection,
-    model: makeOpenAIMinter(options.minterProvider),
+    model: makeOpenAIMinter(options.minterProvider, "medium", {}, {
+      ...(options.functionFileTools === undefined ? {} : { functionFileTools: options.functionFileTools }),
+    }),
     deadline,
     autofillSignIn: true,
     requestLogin: () => Effect.succeed("inspect"),

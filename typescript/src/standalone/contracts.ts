@@ -18,6 +18,8 @@ export interface PomeradoOptions {
    */
   readonly browser?: Omit<PlaywrightOptions, "cdp" | "resultLimitBytes">;
   readonly minterProvider?: ModelProvider;
+  /** Use the SDK function file editor when the model endpoint rejects native apply_patch. */
+  readonly functionFileTools?: boolean;
   readonly guardianProvider?: ModelProvider;
   /** The outcome reviewer's model provider, which judges whether each write took effect. */
   readonly outcomeReviewerProvider?: ModelProvider;

@@ -19,6 +19,7 @@ const usage = `Pomerado
 Options
   --endpoint URL          Attach to a native Playwright websocket endpoint
   --headed                Show locally launched Chromium
+  --function-file-tools   Use SDK function file tools instead of native apply_patch
   --effect read|write|ask  Mint authority (default ask)
   --timeout-seconds N      Session budget (default 1200)
 
@@ -53,6 +54,7 @@ const readOptions = (args: readonly string[]) =>
           input: { type: "string" },
           endpoint: { type: "string" },
           headed: { type: "boolean" },
+          "function-file-tools": { type: "boolean" },
           effect: { type: "string" },
           "timeout-seconds": { type: "string" },
         },
@@ -106,6 +108,7 @@ const runCli = (
       const { values, command, timeoutMs, request } = options;
       const pomerado = yield* createPomerado({
         ...overrides,
+        ...(values["function-file-tools"] === undefined ? {} : { functionFileTools: values["function-file-tools"] }),
         ask: makeTerminalAsker(),
         timeoutMs,
         browser: {
