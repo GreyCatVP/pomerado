@@ -19,6 +19,7 @@ import {
   type AllowedExecution,
   type MintDependencies,
   type ExecutionEvidence,
+  type ExecutionFailure,
   type ExecutionRequest,
   type ScriptQuestionOutcome,
 } from "../mint/contracts.js";
@@ -63,6 +64,7 @@ import {
 import { error, mintError } from "./errors.js";
 import { mintSessionSignInFailure, type SessionSignInFailed } from "./session-sign-in.js";
 import { sessionCardFill } from "./card-fill.js";
+import { finiteRunnerErrorCode } from "../runtime/runner-codes.js";
 type Execution = Parameters<MintDependencies["reviewAndExecute"]>[0];
 type BeforeDispatch = Parameters<MintDependencies["reviewAndExecute"]>[1];
 /**
@@ -125,6 +127,18 @@ const executeCommand = (
           executionId: id,
           status: result.exitCode === 0 ? ("completed" as const) : ("failed" as const),
           effect: "not_sent" as const,
+          ...(result.exitCode === 0
+            ? {}
+            : { failure: {
+                purpose: "command",
+                source: "command",
+                exitCode:
+                  typeof result.exitCode === "number" &&
+                  Number.isInteger(result.exitCode) &&
+                  result.exitCode >= 0 && result.exitCode <= 255
+                    ? result.exitCode
+                    : "unknown",
+              } satisfies ExecutionFailure }),
           observations: yield* projection.json(result),
         };
       }),
@@ -362,6 +376,13 @@ const failedReceipt = (
       executionId: id,
       status: "failed",
       effect: failureJournal.effect,
+      failure: {
+        purpose: execution.purpose,
+        source: "script",
+        code: failure instanceof LocalOperationFailure && failure.code !== undefined
+          ? finiteRunnerErrorCode(failure.code)
+          : "unknown",
+      },
       ...(failureJournal.confirmation === undefined
         ? {}
         : { confirmation: failureJournal.confirmation }),

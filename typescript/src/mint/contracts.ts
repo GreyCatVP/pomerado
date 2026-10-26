@@ -7,6 +7,7 @@ import type { CapabilityReview } from "../capabilities/review-contracts.js";
 import { IntakeReasonCode } from "../capabilities/intake-contracts.js";
 import type { FailureDetail } from "../runtime/failure-detail.js";
 import type { InputIssue } from "../runtime/errors.js";
+import { RunnerErrorCode } from "../runtime/runner-codes.js";
 import { outputChecks, type FieldFill, type OutputFinding } from "../runtime/output-lint.js";
 import type { DestinationPrivateCandidateReason } from "../destinations/private-candidate.js";
 import type { SignedInMarkerCheck } from "../destinations/signed-in-marker.js";
@@ -227,6 +228,19 @@ export type HostRefusalBasis =
         | "unrecorded";
     };
 
+export const MintFailureCode = Schema.Literal(
+  "InvalidRequest",
+  "Unavailable",
+  "ScopeDenied",
+  "ReviewDenied",
+  "ReviewUnavailable",
+  "AlreadyExecuted",
+  "ReconciliationRequired",
+  "PublicationUnavailable",
+  "CaptureUnavailable",
+  "CredentialsRejected",
+);
+
 export class MintFailure extends Data.TaggedError("MintFailure")<{
   readonly rejectedCredential?: typeof CredentialRejectedField.Type;
   /** Sub-cause, operation, underlying error, stack and context; see ERROR-LOGGING-STANDARD.md. */
@@ -353,17 +367,7 @@ export class MintFailure extends Data.TaggedError("MintFailure")<{
    * caller's own words: context for the agent, never an approval to redo a write.
    */
   readonly callerGuidance?: string;
-  readonly code:
-    | "InvalidRequest"
-    | "Unavailable"
-    | "ScopeDenied"
-    | "ReviewDenied"
-    | "ReviewUnavailable"
-    | "AlreadyExecuted"
-    | "ReconciliationRequired"
-    | "PublicationUnavailable"
-    | "CaptureUnavailable"
-    | "CredentialsRejected";
+  readonly code: typeof MintFailureCode.Type;
   /** Finite host metadata only; never provider messages, bodies, paths or credentials. */
   readonly execution?: Pick<
     ExecutionBoundaryError,
@@ -1030,6 +1034,29 @@ export const ExecutionRefusal: Schema.Schema<NonNullable<ExecutionEvidence["refu
     available: Schema.Array(Schema.String),
   });
 
+const ExecutionPurpose = Schema.Union(ExecutionRequest.fields.purpose, Schema.Literal("command"));
+export const ExecutionFailure = Schema.Union(
+  Schema.Struct({
+    purpose: ExecutionRequest.fields.purpose,
+    source: Schema.Literal("script"),
+    code: Schema.Union(RunnerErrorCode, Schema.Literal("unknown")),
+  }),
+  Schema.Struct({
+    purpose: Schema.Literal("command"),
+    source: Schema.Literal("command"),
+    exitCode: Schema.Union(
+      Schema.Number.pipe(Schema.int(), Schema.between(0, 255)),
+      Schema.Literal("unknown"),
+    ),
+  }),
+  Schema.Struct({
+    purpose: ExecutionPurpose,
+    source: Schema.Literal("host"),
+    code: Schema.Union(MintFailureCode, Schema.Literal("unclassified", "unknown")),
+  }),
+);
+export type ExecutionFailure = typeof ExecutionFailure.Type;
+
 export interface ExecutionEvidence {
   readonly review?: MintReviewFeedback;
   readonly authentication?: {
@@ -1039,6 +1066,7 @@ export interface ExecutionEvidence {
   readonly executionId: string;
   readonly status: "completed" | "failed" | "unsupported" | "needs_input";
   readonly effect: "not_sent" | "possible" | "verified";
+  readonly failure?: ExecutionFailure;
   /**
    * The confirmation a write session step recorded; it closes the session, unless
    * `writePathRemaining` names marks of the recorded write path not yet settled.
@@ -1114,6 +1142,7 @@ export const ExecutionEvidence: Schema.Schema<ExecutionEvidence> = Schema.Struct
   executionId: Schema.String,
   status: Schema.Literal("completed", "failed", "unsupported", "needs_input"),
   effect: Schema.Literal("not_sent", "possible", "verified"),
+  failure: Schema.optionalWith(ExecutionFailure, { exact: true }),
   confirmation: Schema.optionalWith(Schema.Literal("message", "readback"), { exact: true }),
   withheldConfirmation: Schema.optionalWith(Schema.Literal("message", "readback"), {
     exact: true,

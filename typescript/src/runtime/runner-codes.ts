@@ -40,6 +40,7 @@ const runnerErrorCodes = [
 /** A reported runner code, or `unclassified` for anything else, which may be authored text. */
 export const finiteRunnerErrorCode = (value: string | undefined) =>
   runnerErrorCodes.find((candidate) => candidate === value) ?? "unclassified";
+export const RunnerErrorCode = Schema.Literal(...runnerErrorCodes, "unclassified");
 /** An identity check's code: the runner's, the host's reading of an unreadable receipt, or unclassified. */
 export const IdentityErrorCode = Schema.Literal(
   ...runnerErrorCodes,

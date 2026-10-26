@@ -5,7 +5,8 @@ import {
 } from "@modelcontextprotocol/server";
 import { join } from "node:path";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
-import { Effect, Schema, type Scope } from "effect";
+import { Effect, Option, Schema, type Scope } from "effect";
+import { ExecutionFailure } from "../mint/contracts.js";
 import {
   localRequestFingerprint,
   localRetryKey,
@@ -75,6 +76,18 @@ const completedResult = (output: unknown): CallToolResult => ({
       : { result: output },
 });
 const jobResult = (view: McpJobView) => completedResult(view);
+const HostExecutionId = Schema.String.pipe(Schema.pattern(
+  /^(?:unresolved_)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+));
+const failedExecutionsOf = (executions: LocalMintOutcome["executions"]) =>
+  executions.filter((entry) => entry.status === "failed").slice(-20).map((entry) => ({
+    executionId: Schema.is(HostExecutionId)(entry.executionId) ? entry.executionId : "unknown",
+    effect: entry.effect,
+    ...Option.match(Schema.decodeUnknownOption(ExecutionFailure)(entry.failure), {
+      onNone: () => ({ purpose: "unknown", source: "unknown" }),
+      onSome: (failure) => failure,
+    }),
+  }));
 /** Finite outcome metadata only: execution observations and diagnostic prose stay private. */
 const incompleteResult = (result: LocalMintOutcome) => ({
   build: result.build,
@@ -88,6 +101,7 @@ const incompleteResult = (result: LocalMintOutcome) => ({
     ...(result.publicationDenial.reason === undefined ? {} : { reason: result.publicationDenial.reason }),
     ...(result.publicationDenial.category === undefined ? {} : { category: result.publicationDenial.category }),
   } }),
+  failedExecutions: failedExecutionsOf(result.executions),
   executionSummary: {
     total: result.executions.length,
     completed: result.executions.filter((entry) => entry.status === "completed").length,
