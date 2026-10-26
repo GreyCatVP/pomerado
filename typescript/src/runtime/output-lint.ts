@@ -985,23 +985,19 @@ const declaredFields = (root: unknown): DeclaredField[] => {
     fields.push({ path, key, required, nullable, shapes });
     if (repeats) return;
     const inner = new Set([...references, ...own]);
-    const children = new Map<string, { nodes: unknown[]; required: boolean }>();
+    const children = new Map<string, unknown[]>();
     for (const shape of shapes)
       for (const [name, childNodes] of shape.properties) {
         const child = children.get(name);
-        if (child === undefined)
-          children.set(name, { nodes: [...childNodes], required: shape.required.has(name) });
-        else {
-          child.nodes.push(...childNodes);
-          child.required &&= shape.required.has(name);
-        }
+        if (child === undefined) children.set(name, [...childNodes]);
+        else child.push(...childNodes);
       }
-    for (const [name, child] of children)
+    for (const [name, childNodes] of children)
       visit(
-        child.nodes,
+        childNodes,
         path === "$" ? name : `${path}.${name}`,
         name,
-        child.required,
+        shapes.every((shape) => shape.required.has(name)),
         depth + 1,
         inner,
       );
