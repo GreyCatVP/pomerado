@@ -2877,3 +2877,29 @@ it("preserves Guardian refusal after a function edit and holds later calls", asy
   expect(resultOf(f.requests[1], "held_publication")).toContain("not_run");
   expect(review.ran).toEqual(["explore", "example"]);
 });
+
+it("holds calls after an earlier execution fails even when a later function edit is malformed", async () => {
+  const review = exploreFails("review_denied");
+  const malformed = call("apply_patch", {}, "late_malformed_edit");
+  const item = malformed.output[0];
+  if (item?.type !== "function_call") throw new Error("Expected a function call");
+  item.arguments = "{";
+  const f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        call("execute", { ...execution, purpose: "explore" }, "first_denied"),
+        call("execute", execution, "held_before_malformed"),
+        malformed,
+        call("finish_build", publication, "held_after_malformed"),
+      ),
+      functionStep("valid_edit"),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "held_before_malformed")).toContain("not_run");
+  expect(resultOf(f.requests[1], "held_after_malformed")).toContain("not_run");
+  expect(review.ran).toEqual(["explore", "example"]);
+});

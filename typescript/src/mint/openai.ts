@@ -761,7 +761,8 @@ const openAIMinter = (
                   }
                   // Calls run in the model's order, so the first step that fails holds the rest.
                   const failed = () => {
-                    if (call !== undefined) call.response.failedAt ??= call.index;
+                    if (call !== undefined)
+                      call.response.failedAt = Math.min(call.response.failedAt ?? call.index, call.index);
                   };
                   try {
                     const result: unknown = await run(context, input, details);
