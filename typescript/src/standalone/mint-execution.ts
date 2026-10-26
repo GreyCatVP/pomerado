@@ -113,6 +113,7 @@ const executeCommand = (
     yield* allowedOf(reviewed).pipe(
       Effect.flatMap((allowed) => beforeDispatch?.(allowed) ?? Effect.void),
     );
+    state.session.trace?.event("step.command", { executionId: id, command: execution.command, sources }, id);
     const exec = workspace.session.exec?.bind(workspace.session);
     if (exec === undefined)
       return yield* Effect.fail(new Error("Workspace command execution unavailable"));
@@ -123,6 +124,7 @@ const executeCommand = (
           try: () => exec({ cmd: execution.command }),
           catch: error,
         });
+        state.session.trace?.event("step.raw", { executionId: id, command: execution.command, ...result }, id);
         return {
           executionId: id,
           status: result.exitCode === 0 ? ("completed" as const) : ("failed" as const),
@@ -492,6 +494,7 @@ const authoredExecution = (
     const sources = (yield* workspace.snapshot).filter(([path]) =>
       /^(src|explore|test|scratch)\//u.test(path),
     );
+    state.session.trace?.event("step.sources", { executionId: id, entrypoint: execution.entrypoint, sources }, id);
     const files = new Map(sources);
     const live = execution.target === "liveBrowser";
     // The step asks only what its entrypoint declares as a plain literal, read from its source,
@@ -600,6 +603,7 @@ const authoredExecution = (
           !admission.ok
             ? Effect.fail(refusedCursor(admission))
             : runLocalOperation({
+                ...(state.session.trace === undefined ? {} : { diagnostic: (kind: string, data: unknown) => state.session.trace?.event(kind, { executionId: id, entrypoint: execution.entrypoint, detail: data }, id) }),
                 workspace,
                 entrypoint: execution.entrypoint,
                 // Only a live step receives a value; offline steps run the handle text as written.
@@ -645,6 +649,7 @@ const authoredExecution = (
                 })),
               ),
         );
+        state.session.trace?.event("step.raw", { executionId: id, entrypoint: execution.entrypoint, executed }, id);
         if (watch !== undefined && watch.typed().size > 0) {
           start.typedCode();
           state.recorder.codeTyped();

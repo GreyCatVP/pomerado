@@ -69,6 +69,7 @@ export const localLiveTests = (state: MintState): LiveTestHost => {
     schemas: (entrypoint) =>
       Effect.gen(function* () {
         const result = yield* runLocalOperation({
+          ...(state.session.trace === undefined ? {} : { diagnostic: state.session.trace.event }),
           workspace,
           entrypoint,
           sources: yield* sourcesNow,
@@ -124,6 +125,7 @@ export const localLiveTests = (state: MintState): LiveTestHost => {
             if (Either.isLeft(reset)) return { status: "inconclusive", reason: "host" } as const;
             const executed = yield* Effect.either(
               runLocalOperation({
+          ...(state.session.trace === undefined ? {} : { diagnostic: state.session.trace.event }),
                 workspace,
                 entrypoint: batch.entrypoint,
                 sources,

@@ -163,7 +163,11 @@ export const mintState = (
 ) =>
   Effect.gen(function* () {
     const { options, ask, browser, secrets } = session;
+    let workspaceRoot: string | undefined;
+    if (session.trace !== undefined) yield* Effect.addFinalizer(() => Effect.sync(() => session.trace?.event("workspace.cleanup", { root: workspaceRoot })));
     const workspace = yield* createLocalWorkspace();
+    workspaceRoot = workspace.root;
+    session.trace?.event("workspace.start", { root: workspace.root });
     yield* seedLocalRuntime(workspace);
     const authoring = yield* loadStandaloneAuthoring(
       fileURLToPath(new URL("../../authoring/", import.meta.url)),

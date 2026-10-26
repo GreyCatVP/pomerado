@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The standalone mint MCP host can retain a private per-job JSONL trace through `POMERADO_TRACE_DIR` or `makePomeradoMcp({ traceDirectory })`. Traces capture model and tool I/O, raw execution failures and output, authored sources, and lifecycle events through cleanup. Files use mode `0600` in an owned `0700` directory. Registered secrets and transport credentials are excluded. Tracing is disabled by default and preserves existing execution limits and finite MCP outcomes.
+
 ### Breaking changes
 
 - `guardianRefusalGrounds` and `GuardianRefusalGround` add `write_authority`: Guardian refused an execution because the step's own `trusted_authority.allowedEffects` grant no write. When the host's record gives the step write authority (`PendingExecution.writeAuthority`), the host sends the refusal back once in the same review, as it does a settled `retry_permission` or `committed_write` refusal, and a refusal that keeps resting on it counts as `correctable`, so it never lets the build end as a policy block. A step without write authority keeps the refusal as Guardian gave it. Before, an act step reviewed right after a read-only explore in the same conversation could be refused as final for lacking a write its own authority granted, and the build ended blocked. The execution refusal policy names the ground, and the output format's `refusalGround` enum lists it. An older reviewer never names it, so its refusals stand as before.

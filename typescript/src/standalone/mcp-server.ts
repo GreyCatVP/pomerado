@@ -17,6 +17,7 @@ import { nestedInput, readHints, standard, writeHints } from "../mcp/schema.js";
 import { canonicalSchema } from "../registry/schema-references.js";
 import { InputAnswers } from "../runtime/input-request.js";
 import { fileFormat } from "../runtime/files.js";
+import { validateTraceDirectory, withJobTrace, tracedEffect, type JobTrace } from "./job-trace.js";
 import { createPomerado } from "./pomerado.js";
 import { type LocalMintOutcome, type MintArtifact, type PomeradoOptions, type PomeradoRequest } from "./contracts.js";
 import { Deployment, validateArtifact } from "./artifact-files.js";
@@ -34,6 +35,7 @@ interface ServerOptions {
   readonly waitMs?: number;
 }
 export interface PomeradoMcpOptions extends ServerOptions {
+  readonly traceDirectory?: string;
   readonly prepare: (
     request: PomeradoRequest,
     name: string,
@@ -221,6 +223,8 @@ const makeServer = (
 /** Discovery registers tools without creating Chromium or invoking a model. */
 export const makePomeradoMcp = (options: PomeradoMcpOptions) =>
   Effect.gen(function* () {
+    const traceDirectory = options.traceDirectory ?? process.env["POMERADO_TRACE_DIR"];
+    if (traceDirectory !== undefined) yield* Effect.try({ try: () => validateTraceDirectory(traceDirectory), catch: (cause) => new Error("Invalid private trace directory.", { cause }) });
     const { server, jobs } = yield* makeServer("pomerado", options, "mint");
     server.registerTool(
       "mint",
@@ -233,17 +237,20 @@ export const makePomeradoMcp = (options: PomeradoMcpOptions) =>
       (input, context) =>
         toolResponse(
           jobs
-            .start((ask) =>
-              Effect.gen(function* () {
+            .start((ask, jobId) => {
+              const work = (trace?: JobTrace) => Effect.gen(function* () {
                 const { name, ...request } = input;
-                const publish = yield* options.prepare(request, name);
-                const pomerado = yield* createPomerado({ ...options.pomerado, ask });
+                trace?.event("job.request", { name, ...request });
+                const publish = yield* tracedEffect(trace, "prepare", options.prepare(request, name));
+                const pomerado = yield* createPomerado({ ...options.pomerado, ask }, trace);
                 const result = yield* pomerado.mint(request);
                 if (result.artifact === undefined)
                   return incompleteResult(result);
-                const integration = yield* publish(result.artifact);
+                const integration = yield* tracedEffect(trace, "publication", publish(result.artifact));
                 return { build: result.build, integration };
-              }),
+              });
+              return traceDirectory === undefined ? work() : withJobTrace(traceDirectory, jobId, work);
+            },
             )
             .pipe(Effect.map(jobResult)),
           context.mcpReq.signal,

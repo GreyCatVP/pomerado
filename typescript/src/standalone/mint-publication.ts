@@ -305,6 +305,7 @@ export const mintPublication =
           note: contractExtractionNote,
         });
         const result = yield* runLocalOperation({
+          ...(state.session.trace === undefined ? {} : { diagnostic: state.session.trace.event }),
           workspace,
           entrypoint: publication.entrypoint,
           sources,
