@@ -17,7 +17,7 @@ class StorageFailure extends Data.TaggedError("StorageFailure")<{
 }> {}
 
 describe("failure detail", () => {
-  it.each(["file:///C:/Users/test/repo/", "C:\\Users\\test\\repo\\", "/home/test/repo/"])(
+  it.each(["file:///C:/Users/test/repo/", "C:\\Users\\test\\repo\\", "C:\\Users\\Test User\\repo\\", "/home/test/repo/", "/home/test user/repo/"])(
     "keeps stack locations relative across platforms: %s", (prefix) => {
       const error = new Error("synthetic failure");
       error.stack = `Error: synthetic failure\n    at example (${prefix}typescript/src/example.ts:12:3)`;

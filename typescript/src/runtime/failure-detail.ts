@@ -615,7 +615,7 @@ export const FailureDetailSchema = Schema.Struct({
 });
 
 const absolutePath =
-  /(?:file:\/{2,3})?(?:[A-Za-z]:)?(?:\/[^\s():/]+)*?\/((?:typescript\/src|typescript\/tests|dist|node_modules)\/[^\s():]+)/g;
+  /(?:file:\/{2,3})?(?:[A-Za-z]:)?(?:\/[^():/]+)*?\/((?:typescript\/src|typescript\/tests|dist|node_modules)\/[^\s():]+)/g;
 
 /**
  * The lines after a stack's leading `Name: message` block. That block can quote input over
