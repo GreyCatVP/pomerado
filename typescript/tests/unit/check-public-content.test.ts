@@ -341,7 +341,8 @@ describe("public content scan command", () => {
   });
 });
 
-describe("GitHub pull request check", () => {
+// The GitHub CI adapter below uses executable POSIX shell stubs and jq.
+describe.skipIf(process.platform === "win32")("GitHub pull request check", () => {
   const repository = "Pomerado/pomerado";
   const directories: string[] = [];
   afterEach(() => {

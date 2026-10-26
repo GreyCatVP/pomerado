@@ -12,13 +12,19 @@ Follow these rules throughout.
 
 ## 1. Check the platform and Node
 
+On Windows, use the [native Windows source-build guide](windows.md) and PowerShell. Check
+`node --version` and the actual Node executable with `node -p process.execPath`. Use the
+built `mcp-cli.js` with that executable when configuring the client; older published releases
+do not include Windows support. Keep the permission and key-handling rules above. The
+commands below describe the published macOS/Linux installation route.
+
 ```sh
 uname -s
 node --version
 ```
 
 - Continue on macOS, where `uname -s` prints `Darwin`, or on Linux.
-- Stop on any other platform. Tell the user Pomerado supports macOS and Linux.
+- On Windows, follow the source-build guide linked above. Stop on any other platform.
 - Continue if Node prints `v24.21.0` or a later `v24` release.
 - Otherwise stop and ask. Tell the user Pomerado needs Node 24.21 or a later Node 24 release, and ask how they want to install it. Don't install or switch Node without their answer.
 

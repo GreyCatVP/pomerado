@@ -153,6 +153,7 @@ const refuseFencedSections = (text: string) => {
 };
 
 const standaloneText: AuthoringRender = (text, sectionKey) => {
+  text = text.replaceAll("\r\n", "\n");
   refuseFencedSections(text);
   const seen = new Set<string>();
   const rendered = text.replace(section, (_match: string, id: string, content?: string) => {
@@ -315,7 +316,9 @@ export const loadAuthoringSkills = (
           const references: Record<string, ReturnType<typeof file>> = {};
           for (const name of entry.references)
             references[name] = file({
-              content: await readScopedFile(directory, `examples/${name}`),
+              content: new TextEncoder().encode(new TextDecoder("utf-8", { fatal: true }).decode(
+                await readScopedFile(directory, `examples/${name}`),
+              ).replaceAll("\r\n", "\n")),
             });
           return {
             name: entry.name,

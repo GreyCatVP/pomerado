@@ -17,6 +17,14 @@ class StorageFailure extends Data.TaggedError("StorageFailure")<{
 }> {}
 
 describe("failure detail", () => {
+  it.each(["file:///C:/Users/test/repo/", "C:\\Users\\test\\repo\\", "/home/test/repo/"])(
+    "keeps stack locations relative across platforms: %s", (prefix) => {
+      const error = new Error("synthetic failure");
+      error.stack = `Error: synthetic failure\n    at example (${prefix}typescript/src/example.ts:12:3)`;
+      const detail = describeError(error);
+      expect(detail.stack).toEqual(["example (typescript/src/example.ts:12:3)"]);
+    },
+  );
   // Members of the shared credential policy's name lists that no canary row carries.
   it.each([
     ["JSON passphrase", '{"passphrase":"json-phrase"}', "json-phrase"],

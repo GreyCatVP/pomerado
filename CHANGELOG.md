@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add native Windows execution with Job Object process-tree cleanup, handle-based confined source
+  reads, unprivileged runtime staging, Windows shell commands, portable builds and Windows CI.
+  Normalize authoring and policy line endings and diagnostic stack paths across platforms.
+  Windows currently requires a source build; see `docs/windows.md` for setup and limitations.
+
 ### Breaking changes
 
 - `guardianRefusalGrounds` and `GuardianRefusalGround` add `write_authority`: Guardian refused an execution because the step's own `trusted_authority.allowedEffects` grant no write. When the host's record gives the step write authority (`PendingExecution.writeAuthority`), the host sends the refusal back once in the same review, as it does a settled `retry_permission` or `committed_write` refusal, and a refusal that keeps resting on it counts as `correctable`, so it never lets the build end as a policy block. A step without write authority keeps the refusal as Guardian gave it. Before, an act step reviewed right after a read-only explore in the same conversation could be refused as final for lacking a write its own authority granted, and the build ended blocked. The execution refusal policy names the ground, and the output format's `refusalGround` enum lists it. An older reviewer never names it, so its refusals stand as before.

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
+import { tmpdir } from "node:os";
 import type { Browser, BrowserServer } from "playwright";
 import { Cause, Effect, Exit, Fiber, Schema, type Scope } from "effect";
 import {
@@ -332,7 +333,7 @@ export const makePlaywrightExecutor = (
       catch: asError,
     });
     const cleanupTimeoutMs = yield* Effect.try({
-      try: () => duration(options.cleanupTimeoutMs ?? 5_000, "cleanupTimeoutMs"),
+      try: () => duration(options.cleanupTimeoutMs ?? (process.platform === "win32" ? 15_000 : 5_000), "cleanupTimeoutMs"),
       catch: asError,
     });
     // Absent, the worker keeps its 1 MiB default.
@@ -384,7 +385,7 @@ export const makePlaywrightExecutor = (
           ),
           {
             // Generated browser code must not inherit host model or provider credentials.
-            env: {},
+            env: process.platform === "win32" ? { TEMP: tmpdir() } : {},
             // Parent entrypoint flags such as --input-type do not apply to this file entrypoint.
             execArgv: [],
             workerData: {

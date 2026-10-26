@@ -192,12 +192,30 @@ jobs:
       - run: corepack pnpm exec playwright install --with-deps chromium
       # One worker per vCPU. Both runners this job uses have 4 vCPUs.
       - run: corepack pnpm test:browser --shard=${{ matrix.shard }}/${{ strategy.job-total }} --workers=4
+  windows:
+    name: Native Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - run: corepack enable
+      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm typecheck
+      - run: corepack pnpm build
+      - run: corepack pnpm test
+      - run: corepack pnpm exec playwright install chromium
+      - run: corepack pnpm test:browser --workers=2
+      - run: npm pack --dry-run
   # `CI` is one status for the whole run. It fails unless every job it needs succeeded, so a
   # skipped or cancelled job never passes for a green one. Add every new job to `needs`.
   ci:
     name: CI
     if: always()
-    needs: [check, browser, secret-scan, content-scan]
+    needs: [check, browser, windows, secret-scan, content-scan]
     runs-on: >-
       ${{ github.repository == 'Pomerado/pomerado'
       && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)

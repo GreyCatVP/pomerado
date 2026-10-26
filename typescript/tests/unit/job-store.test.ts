@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { readOnlyDirectory } from "../support/read-only-directory.js";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { Effect, Either } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
 import { fingerprint } from "../../src/runtime/fingerprint.js";
@@ -334,7 +336,7 @@ describe("the local file store", () => {
 
   it("opens in a folder it can't write, and fails a keyed submission there before storing anything", async () => {
     const folder = await newFolder();
-    await chmod(folder, 0o500);
+    const restore = await readOnlyDirectory(folder);
     try {
       const result = await Effect.runPromise(
         Effect.scoped(
@@ -351,7 +353,7 @@ describe("the local file store", () => {
       expect(Either.isLeft(result.keyed)).toBe(true);
       expect(await readdir(folder)).toEqual([]);
     } finally {
-      await chmod(folder, 0o700);
+      await restore();
     }
   });
 
@@ -387,7 +389,7 @@ lines.close();
 `;
     const children = [0, 1].map(() => {
       const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
-        cwd: new URL("../../../", import.meta.url).pathname,
+        cwd: fileURLToPath(new URL("../../../", import.meta.url)),
         stdio: ["pipe", "pipe", "inherit"],
       });
       const lines = createInterface({ input: child.stdout });

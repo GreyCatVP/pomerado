@@ -104,7 +104,7 @@ it("names only skills that load and workspace sections that install, or hosted-o
 });
 
 const sectionMarker =
-  /<!-- pomerado:section ([a-z0-9.-]+)(?: -->|:start\n[\s\S]*?\npomerado:section \1:end -->)/g;
+  /<!-- pomerado:section ([a-z0-9.-]+)(?: -->|:start\r?\n[\s\S]*?\r?\npomerado:section \1:end -->)/g;
 
 const authoringCopy = async (edit: (path: string, text: string) => string) => {
   const root = await mkdtemp(join(tmpdir(), "pomerado-authoring-"));
@@ -112,7 +112,7 @@ const authoringCopy = async (edit: (path: string, text: string) => string) => {
   for (const entry of await readdir(root, { recursive: true, withFileTypes: true }))
     if (entry.isFile() && entry.name.endsWith(".md")) {
       const path = join(entry.parentPath, entry.name);
-      await writeFile(path, edit(path, await readFile(path, "utf8")));
+      await writeFile(path, edit(path, (await readFile(path, "utf8")).replaceAll("\r\n", "\n")));
     }
   return root;
 };
@@ -560,7 +560,7 @@ it("names the local host's own status for a run's uncertain write", async () => 
   expect(local).toContain("An `unverifiable` write reports `may_have_applied` too");
   expect(local).not.toContain("possibly_completed");
   const root = await authoringCopy((path, text) =>
-    path.endsWith("/writes/SKILL.md")
+    path.endsWith(join("writes", "SKILL.md"))
       ? text.replace(sectionMarker, (marker: string, id: string) =>
           id.endsWith("-status") ? "`OTHER-STATUS`" : marker,
         )

@@ -25,7 +25,8 @@ interface Event {
   readonly PATH?: string;
 }
 
-describe("CI scan steps", () => {
+// These exercise the Linux CI's Bash scripts and executable shell stubs.
+describe.skipIf(process.platform === "win32")("CI scan steps", () => {
   const directories: string[] = [];
   afterEach(() => {
     for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });

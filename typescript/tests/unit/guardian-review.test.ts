@@ -74,14 +74,24 @@ describe("Guardian modeled reviewer contract", () => {
     try {
       for (let index = 0; index < 100; index++) {
         const reading = Effect.runPromise(Effect.either(read("nested/operation.ts", 0)));
-        await rename(nested, parked);
-        await symlink(outside, nested, "dir");
+        const moved = await rename(nested, parked).then(() => true, (error: unknown) => {
+          if (process.platform === "win32" && error instanceof Error && "code" in error && error.code === "EPERM") return false;
+          throw error;
+        });
+        if (!moved) {
+          const observed = await reading;
+          expect(observed._tag).toBe("Right");
+          if (observed._tag === "Right") expect(observed.right).toContain("inside-source");
+          continue;
+        }
+        await symlink(outside, nested, process.platform === "win32" ? "junction" : "dir");
         const observed = await reading;
         if (observed._tag === "Right") {
           expect(observed.right).toContain("inside-source");
           expect(observed.right).not.toContain("outside-synthetic-secret");
         }
-        await unlink(nested);
+        if (process.platform === "win32") await rm(nested, { recursive: true });
+        else await unlink(nested);
         await rename(parked, nested);
       }
     } finally {
@@ -458,7 +468,8 @@ describe("scoped Guardian source reader", () => {
       `${source}\nconst password = "synthetic-private-password";`,
     );
     await writeFile(join(directory, "outside.ts"), "outside-scope-content");
-    await symlink(join(directory, "outside.ts"), join(root, "escape.ts"));
+    if (process.platform === "win32") await symlink(directory, join(root, "escape"), "junction");
+    else await symlink(join(directory, "outside.ts"), join(root, "escape.ts"));
   });
   afterAll(async () => {
     if (directory) await rm(directory, { recursive: true, force: true });
@@ -469,7 +480,7 @@ describe("scoped Guardian source reader", () => {
     for (const path of [
       "../outside.ts",
       join(directory, "outside.ts"),
-      "escape.ts",
+      process.platform === "win32" ? "escape/outside.ts" : "escape.ts",
       ".",
       "missing.ts",
     ]) {

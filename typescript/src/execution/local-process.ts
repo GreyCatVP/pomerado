@@ -38,15 +38,26 @@ export const createLocalProcess = (options: {
   readonly outputLimit?: number;
 }): Effect.Effect<LocalProcess, Error, Scope.Scope> =>
   Effect.gen(function* () {
-    if (process.platform === "win32")
-      return yield* Effect.fail(new Error("Local process-group execution requires macOS or Linux"));
+    const job = process.platform === "win32"
+      ? yield* Effect.acquireRelease(
+          Effect.tryPromise({ try: async () => (await import("./windows-native.js")).createWindowsJob(), catch: localError }),
+          (job) => Effect.sync(() => job.close()),
+        )
+      : undefined;
+    const nodeCommand = options.command === process.execPath;
+    const preloader = new URL(import.meta.url.endsWith(".ts") ? "./windows-process.ts" : "./windows-process.js", import.meta.url).href;
     const ended = yield* Deferred.make<LocalProcessResult, Error>();
     const child = yield* Effect.try({
       try: () =>
-        spawn(options.command, [...options.args], {
+        spawn(job === undefined ? options.command : process.execPath,
+          job === undefined ? [...options.args] : ["--import", preloader, ...(nodeCommand ? options.args : ["-e", ""])], {
           cwd: options.cwd,
-          env: { ...options.environment },
-          detached: true,
+          env: { ...options.environment, ...(job === undefined ? {} : {
+            POMERADO_WINDOWS_JOB: job.name,
+            ...(nodeCommand ? {} : { POMERADO_WINDOWS_COMMAND: JSON.stringify({ executable: options.command, args: options.args }) }),
+          }) },
+          detached: job === undefined,
+          windowsHide: true,
           serialization: "advanced",
           stdio: options.ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
         }),
@@ -58,10 +69,15 @@ export const createLocalProcess = (options: {
     let stderr = "";
     let failure: Error | undefined;
     let closeFiber: Fiber.RuntimeFiber<void, Error> | undefined;
+    const waitForTree: Effect.Effect<void, Error> = job === undefined ? Effect.void : Effect.suspend(() =>
+      Effect.try({ try: () => job.empty(), catch: localError }).pipe(
+        Effect.flatMap((empty) => empty ? Effect.void : Effect.sleep(10).pipe(Effect.zipRight(waitForTree))),
+      ));
     const close = Effect.suspend(() => {
       closeFiber ??= Effect.runFork(
-        signalGroup(child).pipe(
+        (job === undefined ? signalGroup(child) : Effect.try({ try: () => { job.stop(); child.kill(); }, catch: localError })).pipe(
           Effect.zipRight(Deferred.await(ended).pipe(Effect.either, Effect.asVoid)),
+          Effect.zipRight(waitForTree),
           Effect.timeoutFail({
             duration: 5_000,
             onTimeout: () => new Error("Local process stop is unconfirmed"),
@@ -91,6 +107,10 @@ export const createLocalProcess = (options: {
     child.stderr?.on("data", (bytes: Buffer) => capture("stderr", bytes));
     child.on("error", (cause) => {
       failure = localError(cause);
+    });
+    if (job !== undefined) child.once("exit", () => {
+      // Descendants may keep inherited output pipes open after their parent has exited.
+      try { job.stop(); } catch (cause) { failure ??= localError(cause); }
     });
     child.once("close", (exitCode, signal) => {
       stdout += decoders.stdout.end();

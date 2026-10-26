@@ -1,13 +1,14 @@
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Effect } from "effect";
 import {
   localError,
   localFilePath,
   localPromise,
+  localPathKey,
   localRelativePath,
   localSourceBundleLimit,
   localSourceFileLimit,
@@ -49,9 +50,11 @@ const stageDependencies = (directory: string) =>
     const dependencies = yield* installedDependencies;
     const modules = join(directory, "node_modules");
     yield* localPromise(() => mkdir(modules));
-    for (const name of yield* localPromise(() => readdir(dependencies)))
-      if (name !== "pomerado")
-        yield* localPromise(() => symlink(join(dependencies, name), join(modules, name), "dir"));
+    for (const entry of yield* localPromise(() => readdir(dependencies, { withFileTypes: true })))
+      if (entry.name !== "pomerado")
+        yield* localPromise(() => process.platform === "win32" && !entry.isDirectory() && !entry.isSymbolicLink()
+          ? copyFile(join(dependencies, entry.name), join(modules, entry.name))
+          : symlink(join(dependencies, entry.name), join(modules, entry.name), process.platform === "win32" ? "junction" : "dir"));
     const pomerado = join(modules, "pomerado");
     yield* localPromise(() => mkdir(pomerado));
     const manifest = { name: "pomerado", type: "module", exports: { "./runtime": "./runtime.js" } };
@@ -91,10 +94,10 @@ export const stageSources = (options: LocalOperationOptions) =>
     const authored: Array<readonly [string, string]> = [];
     for (const [supplied, text] of options.sources) {
       const path = yield* Effect.try({ try: () => localRelativePath(supplied), catch: localError });
-      if (seen.has(path))
+      if (seen.has(localPathKey(path)))
         return yield* Effect.fail(new Error(`Duplicate reviewed source: ${path}`));
-      seen.add(path);
-      if (reserved.has(path.split("/")[0] ?? path))
+      seen.add(localPathKey(path));
+      if (reserved.has(localPathKey(path.split("/")[0] ?? path)))
         return yield* Effect.fail(new Error(`Reviewed source cannot replace trusted SDK: ${path}`));
       total += Buffer.byteLength(text);
       if (Buffer.byteLength(text) > localSourceFileLimit || total > localSourceBundleLimit)
@@ -105,7 +108,7 @@ export const stageSources = (options: LocalOperationOptions) =>
       try: () => localRelativePath(options.entrypoint),
       catch: localError,
     });
-    if (!seen.has(entrypoint))
+    if (!seen.has(localPathKey(entrypoint)))
       return yield* Effect.fail(new Error("Entrypoint is absent from reviewed source snapshot"));
     // Authored source sits a level below the SDK, so src/ reaches it at ../../runtime/index.js.
     const operation = join(directory, "operation");
@@ -123,7 +126,9 @@ export const stageSources = (options: LocalOperationOptions) =>
         // Realpaths keep authored error classes identical to the child runner's installed SDK.
         const installed = import.meta.url.endsWith(".ts") ? path.replace(/\.js$/, ".ts") : path;
         const trusted = fileURLToPath(new URL(`../${installed}`, import.meta.url));
-        yield* localPromise(() => symlink(trusted, destination, "file"));
+        yield* localPromise(() => process.platform === "win32"
+          ? writeFile(destination, `export * from ${JSON.stringify(pathToFileURL(trusted).href)};\n`, { flag: "wx", mode: 0o400 })
+          : symlink(trusted, destination, "file"));
       }
     }
     yield* localPromise(() =>
@@ -139,10 +144,12 @@ export const stageSources = (options: LocalOperationOptions) =>
     // operation/, so those paths load the same modules and read the same file.
     const sdk = assets.map(([path]) => path.split("/")[0] ?? path);
     for (const shared of new Set([...sdk, "node_modules"]))
-      yield* localPromise(() => symlink(join("..", shared), join(operation, shared), "dir"));
+      yield* localPromise(() => symlink(join(directory, shared), join(operation, shared), process.platform === "win32" ? "junction" : "dir"));
     if (!seen.has("package.json"))
       yield* localPromise(() =>
-        symlink(join("..", "package.json"), join(operation, "package.json"), "file"),
+        process.platform === "win32"
+          ? copyFile(join(directory, "package.json"), join(operation, "package.json"))
+          : symlink(join("..", "package.json"), join(operation, "package.json"), "file"),
       );
     // The child runs from the authored root, so relative file paths resolve as they did before.
     return { directory: operation, entrypoint: join(operation, entrypoint) };

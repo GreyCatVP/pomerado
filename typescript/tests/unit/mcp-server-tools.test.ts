@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { readOnlyDirectory } from "../support/read-only-directory.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -199,7 +200,7 @@ it("serves a read tool from a folder without keeping its jobs there or naming an
 
 it("serves a write tool from a folder it can't write, and refuses a keyed call there before it acts", async () => {
   const folder = await mkdtemp(join(tmpdir(), "pomerado-read-only-tool-"));
-  await chmod(folder, 0o500);
+  const restore = await readOnlyDirectory(folder);
   try {
     const { names, result } = await Effect.runPromise(
       Effect.scoped(
@@ -221,7 +222,7 @@ it("serves a write tool from a folder it can't write, and refuses a keyed call t
     expect(JSON.stringify(result.content)).toContain("do not repeat a possible website write");
     expect(await readdir(folder)).toEqual([]);
   } finally {
-    await chmod(folder, 0o700);
+    await restore();
     await rm(folder, { recursive: true, force: true });
   }
 });

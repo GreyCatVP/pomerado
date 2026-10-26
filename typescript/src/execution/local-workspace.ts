@@ -22,6 +22,7 @@ import {
   localFilePath,
   localMissing,
   localPromise,
+  localPathKey,
   localRelativePath,
   localSourceBundleLimit,
   localSourceFileLimit,
@@ -117,7 +118,7 @@ const writeLocalFile = (
       return yield* Effect.fail(fileCountRefusal());
     let total = bytes;
     for (const file of files) {
-      if (file === relative || installed.has(file)) continue;
+      if (localPathKey(file) === localPathKey(relative) || installed.has(localPathKey(file))) continue;
       total += (yield* localPromise(() => lstat(join(root, file)))).size;
       if (total > localSourceBundleLimit)
         return yield* Effect.fail(
@@ -254,8 +255,10 @@ const workspaceCommand =
             ? root
             : yield* localFilePath(root, args.workdir);
         const process = yield* createLocalProcess({
-          command: args.shell ?? "/bin/sh",
-          args: [args.login ? "-lc" : "-c", args.cmd],
+          command: args.shell ?? (globalThis.process.platform === "win32"
+            ? `${globalThis.process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\cmd.exe` : "/bin/sh"),
+          args: args.shell === undefined && globalThis.process.platform === "win32"
+            ? ["/d", "/s", "/c", args.cmd] : [args.login ? "-lc" : "-c", args.cmd],
           cwd,
           environment,
         });
@@ -346,7 +349,11 @@ export const createLocalWorkspace = (
 ): Effect.Effect<LocalWorkspace, Error, Scope.Scope> =>
   Effect.gen(function* () {
     const { root, temporary } = yield* prepareWorkspaceRoot(options.root);
-    const environment = { ...(options.environment ?? {}) };
+    const windows = process.env["SystemRoot"] ?? "C:\\Windows";
+    const environment = { ...(process.platform === "win32" ? {
+      SystemRoot: windows,
+      PATH: [dirname(process.execPath), join(windows, "System32"), windows].join(";"),
+    } : {}), ...(options.environment ?? {}) };
     let closed = false;
     const active = new Set<LocalProcess>();
     const register = (process: LocalProcess) =>
@@ -372,7 +379,7 @@ export const createLocalWorkspace = (
     const writable = (path: string) =>
       Effect.try({
         try: () => {
-          if (installed.has(localRelativePath(path)))
+          if (installed.has(localPathKey(localRelativePath(path))))
             throw new Error("Trusted runtime files are readonly");
         },
         catch: localError,
@@ -387,7 +394,7 @@ export const createLocalWorkspace = (
         Effect.zipRight(writeLocalFile(root, path, text, installed)),
         Effect.tap(() =>
           Effect.sync(() => {
-            installed.add(localRelativePath(path));
+            installed.add(localPathKey(localRelativePath(path)));
           }),
         ),
       );
@@ -395,7 +402,7 @@ export const createLocalWorkspace = (
     const snapshot = list.pipe(
       Effect.flatMap((files) =>
         Effect.forEach(
-          files.filter((path) => !installed.has(path)),
+          files.filter((path) => !installed.has(localPathKey(path))),
           (path) => read(path).pipe(Effect.map((text) => [path, text] as const)),
         ),
       ),

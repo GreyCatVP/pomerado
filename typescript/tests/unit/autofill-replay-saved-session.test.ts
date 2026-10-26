@@ -105,7 +105,7 @@ const replay = async (
       );
       for (let polls = 0; polls < 1_000; polls++) {
         if (Option.isSome(yield* Fiber.poll(running))) break;
-        yield* TestClock.adjust(Duration.millis(pollMs));
+        yield* TestClock.adjust(Duration.millis(pollMs * 10));
       }
       return yield* Fiber.join(running);
     }).pipe(Effect.provide(TestContext.TestContext)),

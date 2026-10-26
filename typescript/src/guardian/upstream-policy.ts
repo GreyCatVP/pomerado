@@ -24,7 +24,7 @@ const leadingNotice = /^\uFEFF?\s*<!--[\s\S]*?-->\s*/;
  * neither sent to the model nor counted as a slot.
  */
 export const withTenantPolicy = (upstreamPolicy: string, tenantPolicy: string): string => {
-  const policy = upstreamPolicy.replace(leadingNotice, "");
+  const policy = upstreamPolicy.replaceAll("\r\n", "\n").replace(leadingNotice, "");
   const slots = policy.split(tenantPolicySlot).length - 1;
   if (slots !== 1) throw new UpstreamPolicySlotInvalid({ slots });
   return policy.replace(tenantPolicySlot, tenantPolicy);

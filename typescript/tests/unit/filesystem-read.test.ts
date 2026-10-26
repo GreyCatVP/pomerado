@@ -42,6 +42,11 @@ it("preserves complete bounded reads and rejects oversized files, traversal and 
   expect(await readScopedFile(root, "source.bin", 4)).toEqual(new Uint8Array([1, 2, 3, 4]));
   await expect(readScopedFile(root, "source.bin", 3)).rejects.toThrow("type_or_size");
   await expect(readScopedFile(root, "../source.bin")).rejects.toThrow("scope");
+});
+
+it.skipIf(process.platform === "win32")("rejects a file symlink", async () => {
+  const root = await directory();
+  await writeFile(join(root, "source.bin"), new Uint8Array([1]));
   await symlink(join(root, "source.bin"), join(root, "linked.bin"));
   await expect(readScopedFile(root, "linked.bin")).rejects.toThrow("ELOOP");
 });
@@ -53,12 +58,20 @@ it("reads nested files but rejects a symlinked directory anywhere in the path", 
   await writeFile(join(root, "a", "b", "source.bin"), new Uint8Array([7]));
   await writeFile(join(outside, "source.bin"), new Uint8Array([9]));
   expect(await readScopedFile(root, "a/b/source.bin")).toEqual(new Uint8Array([7]));
-  await symlink(outside, join(root, "escape"));
-  await symlink(join(root, "a"), join(root, "inner"));
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await symlink(outside, join(root, "escape"), linkType);
+  await symlink(join(root, "a"), join(root, "inner"), linkType);
   await expect(readScopedFile(root, "escape/source.bin")).rejects.toThrow(/ELOOP|ENOTDIR/);
   await expect(readScopedFile(root, "inner/b/source.bin")).rejects.toThrow(/ELOOP|ENOTDIR/);
   await expect(readScopedFile(root, "a/b")).rejects.toThrow("type_or_size");
 });
+
+it.runIf(process.platform === "win32").each(["source.bin:stream", "NUL", "con.txt", "nested./source.bin", "source.bin "])(
+  "refuses Windows alternate streams, device names and path aliases: %s", async (path) => {
+    const root = await directory();
+    await expect(readScopedFile(root, path)).rejects.toThrow("scope");
+  },
+);
 
 // procfs reports size 0, so the read must grow past the stat size and still enforce the limit.
 it.skipIf(process.platform !== "linux")(

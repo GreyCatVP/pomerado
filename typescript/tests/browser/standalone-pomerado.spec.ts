@@ -1099,8 +1099,11 @@ test("MCP stdio discovers tools before browser or model activity", async () => {
 
 test("pomerado-mcp starts through a linked bin, as npm and npx install it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pomerado-mcp-bin-"));
-  const bin = join(directory, "pomerado-mcp");
-  await symlink(resolve("dist/typescript/src/standalone/mcp-cli.js"), bin);
+  const bin = process.platform === "win32"
+    ? join(directory, "package", "typescript", "src", "standalone", "mcp-cli.js")
+    : join(directory, "pomerado-mcp");
+  if (process.platform === "win32") await symlink(resolve("dist"), join(directory, "package"), "junction");
+  else await symlink(resolve("dist/typescript/src/standalone/mcp-cli.js"), bin);
   const connection = await stdioMcp([bin, "mint", "--root", join(directory, "integrations")]);
   try {
     const listed = await connection.client.listTools();

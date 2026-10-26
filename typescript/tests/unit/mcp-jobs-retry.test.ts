@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { readOnlyDirectory } from "../support/read-only-directory.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cause, Deferred, Effect, Ref } from "effect";
@@ -324,7 +325,7 @@ it("keeps a keyed run's outcome and commit marks, and answers them after a resta
 
 it("runs calls without a key from a folder it can't write, and refuses a keyed call there before running it", async () => {
   const folder = await mkdtemp(join(tmpdir(), "pomerado-mcp-jobs-"));
-  await chmod(folder, 0o500);
+  const restore = await readOnlyDirectory(folder);
   try {
     const result = await Effect.runPromise(
       Effect.scoped(
@@ -343,7 +344,7 @@ it("runs calls without a key from a folder it can't write, and refuses a keyed c
     expect(result.runs).toBe(1);
     expect(await readdir(folder)).toEqual([]);
   } finally {
-    await chmod(folder, 0o700);
+    await restore();
     await rm(folder, { recursive: true, force: true });
   }
 });

@@ -63,6 +63,9 @@ const mintDependencies = (state: MintState, publicationDecisions: PublicationDec
     // Read-only, like the host's other captures, and never staged as source.
     saveResult: (path, text) => workspace.install(path, text).pipe(Effect.mapError(mintError)),
     instructions: authoring.instructions,
+    ...(process.platform === "win32" ? {
+      staticContext: ["This local host runs on Windows. exec_command defaults to cmd.exe (/d /s /c), with no Unix shell utilities. Use Node.js for portable offline commands. The login option does not apply to cmd.exe."],
+    } : {}),
     skills: authoring.skills,
     projection,
     model: makeOpenAIMinter(options.minterProvider),

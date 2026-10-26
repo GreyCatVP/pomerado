@@ -43,7 +43,7 @@ For more details, see [How it works](docs/how-it-works.md).
 
 Prerequisites
 
-- macOS or Linux
+- Windows, macOS or Linux. Windows requires a source build containing these changes; see [Native Windows](docs/windows.md).
 - Node 24.21 or a later Node 24 release, which you can check with `node --version`
 - An OpenAI API key, since Pomerado uses OpenAI models to build and review integrations. Your agent can run on any model
 - An MCP client that runs local servers, such as Claude Code, Codex, Cursor, VS Code, Claude Desktop or Gemini CLI

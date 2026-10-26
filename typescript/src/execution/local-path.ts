@@ -17,10 +17,14 @@ export const localRelativePath = (path: string): string => {
     !/^[A-Za-z0-9_./-]+$/.test(relative) ||
     relative.startsWith("/") ||
     relative.split("/").some((part) => part === "" || part === "." || part === "..")
+    || (process.platform === "win32" && relative.split("/").some((part) =>
+      /[.]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)))
   )
     throw new Error("Path must be a plain relative workspace path");
   return relative;
 };
+
+export const localPathKey = (path: string): string => process.platform === "win32" ? path.toLowerCase() : path;
 
 export const localMissing = (error: unknown): boolean =>
   error instanceof Error && "code" in error && error.code === "ENOENT";

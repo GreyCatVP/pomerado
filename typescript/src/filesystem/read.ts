@@ -71,7 +71,12 @@ export async function readScopedFile(
   const parts = path.split("/");
   if (parts.some((part) => part === "" || part === "." || part === ".." || part.includes("\\")))
     throw new Error("scope");
+  if (process.platform === "win32" && parts.some((part) =>
+    /[<>:"|?*\x00-\x1f]|[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)))
+    throw new Error("scope");
   const directory = await realpath(root);
+  if (process.platform === "win32")
+    return (await import("../execution/windows-native.js")).readWindowsScopedFile(directory, parts, maximumBytes);
   const handles: FileHandle[] = [];
   try {
     handles.push(

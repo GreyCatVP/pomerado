@@ -17,7 +17,7 @@ if (!runtime) throw new Error('Start this integration with the command and argum
 const { startMcpCli } = await import(runtime);
 startMcpCli(['serve', '--artifact', fileURLToPath(new URL('.', import.meta.url))]);
 `;
-const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+const shellQuote = (value: string) => `'${value.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
 /**
  * Top-level names authored source may not use, compared in lower case. They cover the packaging
  * files, the sign-in recipe, the TOML that 0.1.2 wrote and its docs told users to copy into Codex,

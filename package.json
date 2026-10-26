@@ -1018,7 +1018,7 @@
     "third-party/playwright/NOTICE"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json && node tools/copy-assets.ts",
+    "build": "node tools/clean.ts && tsc -p tsconfig.json && node tools/copy-assets.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/typescript/src/standalone/cli.js",
     "mcp": "node dist/typescript/src/standalone/mcp-cli.js",
@@ -1032,6 +1032,7 @@
     "domhandler": "6.0.1",
     "domutils": "4.0.2",
     "htmlparser2": "12.0.0",
+    "koffi": "3.3.4",
     "openai": "7.23.0",
     "oxc-parser": "0.152.0",
     "playwright": "1.63.0",
