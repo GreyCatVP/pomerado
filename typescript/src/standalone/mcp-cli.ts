@@ -19,6 +19,7 @@ const usage = `Pomerado MCP
 Options
   --endpoint URL     Attach to native Playwright
   --headed           Show local Chromium
+  --function-file-tools  Use SDK function file tools instead of native apply_patch
 
 The mint root defaults to ./integrations. Supply model credentials in the environment to
 mint. Serving makes no model request and needs no model credentials.
@@ -59,6 +60,7 @@ export const runMcpCli = (
               artifact: { type: "string" },
               endpoint: { type: "string" },
               headed: { type: "boolean" },
+              "function-file-tools": { type: "boolean" },
             },
           }),
         catch: localError,
@@ -72,6 +74,7 @@ export const runMcpCli = (
         return yield* Effect.fail(new Error("Choose mint or serve. See --help."));
       const pomerado = {
         ...options,
+        ...(values["function-file-tools"] === undefined ? {} : { functionFileTools: values["function-file-tools"] }),
         browser: {
           ...options.browser,
           ...(values.headed === undefined ? {} : { headless: !values.headed }),

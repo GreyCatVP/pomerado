@@ -2361,7 +2361,7 @@ it("runs a step after its edits when an earlier call of the response did not par
   ]);
 });
 
-it("gives a host's recovery and observer each call of a response with a write once, in order", async () => {
+it.each([false, true])("gives a host's recovery and observer each call once, in order (function files: %s)", async (functionFileTools) => {
   let f: Awaited<ReturnType<typeof fixture>> | undefined;
   const review = reviewingSource(() => f!.workspace.readFile!({ path: "src/tool.ts" }));
   const recorded: string[] = [];
@@ -2409,7 +2409,7 @@ it("gives a host's recovery and observer each call of a response with a write on
         ),
     });
   const responses = [
-    together(stepPatch("write_step"), call("execute", execution, "run_step")),
+    together(functionFileTools ? functionStep("write_step") : stepPatch("write_step"), call("execute", execution, "run_step")),
     call("finish_build", publication, "publish"),
   ];
   const requests: ModelRequest[] = [];
@@ -2428,7 +2428,7 @@ it("gives a host's recovery and observer each call of a response with a write on
       },
       "medium",
       {},
-      { observerFactory, recoveryFactory },
+      { observerFactory, recoveryFactory, functionFileTools },
     ),
     reviewAndExecute: review.reviewAndExecute,
     agentRecovery: { save: () => Effect.void },
@@ -2721,4 +2721,185 @@ it("holds a response's later calls after a step whose failed result a takeover r
   expect(await f.run()).toMatchObject({ build: "published" });
   expect(resultOf(requests[1], "explore_page")).toContain("not_run");
   expect(ran).toEqual(["example"]);
+});
+
+const functionFileMinter: typeof makeOpenAIMinter = (provider, reasoning, limits, ports) =>
+  makeOpenAIMinter(provider, reasoning, limits, { ...ports, functionFileTools: true });
+const functionFileFixture = makeMintContinuationFixture(
+  cleanups,
+  portableJobSession,
+  functionFileMinter,
+);
+const functionPatch = (diff: string, id: string) =>
+  call("apply_patch", { operation: { type: "update_file", path: "src/tool.ts", diff } }, id);
+const functionStep = (id: string) =>
+  functionPatch("@@\n-export default {};\n+export default { step: 2 };", id);
+
+it("uses the SDK function editor and reviews the changed source before a same-response execution", async () => {
+  let f: Awaited<ReturnType<typeof functionFileFixture>> | undefined;
+  const review = reviewingSource(() => f!.workspace.readFile!({ path: "src/tool.ts" }));
+  f = await functionFileFixture(
+    (_request, index) => [
+      together(functionStep("function_edit"), call("execute", execution, "after_edit")),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(f.requests).toHaveLength(2);
+  expect(review.reviewed).toEqual([{ purpose: "example", source: expect.stringContaining("step: 2") }]);
+  expect(resultOf(f.requests[1], "function_edit")).toContain('completed');
+  const tools = JSON.stringify(f.requests[0]?.tools);
+  expect(tools).toContain('"name":"apply_patch"');
+  expect(tools).not.toContain('"type":"apply_patch"');
+});
+
+it("runs nothing after a function edit that failed to apply", async () => {
+  let f: Awaited<ReturnType<typeof functionFileFixture>> | undefined;
+  const review = reviewingSource(() => f!.workspace.readFile!({ path: "src/tool.ts" }));
+  f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        functionPatch("@@\n-missing source\n+replacement", "bad_edit"),
+        call("execute", execution, "held_execution"),
+        call("finish_build", publication, "held_publication"),
+      ),
+      functionStep("corrected_edit"),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "bad_edit")).toContain('failed');
+  expect(resultOf(f.requests[1], "held_execution")).toContain('not_run');
+  expect(resultOf(f.requests[1], "held_publication")).toContain('not_run');
+  expect(review.reviewed).toEqual([{ purpose: "example", source: expect.stringContaining("step: 2") }]);
+});
+
+it("holds an execution between function edits until the next response", async () => {
+  let f: Awaited<ReturnType<typeof functionFileFixture>> | undefined;
+  const review = reviewingSource(() => f!.workspace.readFile!({ path: "src/tool.ts" }));
+  f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        functionStep("first_edit"),
+        call("execute", execution, "between_edits"),
+        functionPatch("@@\n-export default { step: 2 };\n+export default { step: 3 };", "last_edit"),
+      ),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "between_edits")).toContain('not_run');
+  expect(review.reviewed).toEqual([{ purpose: "example", source: expect.stringContaining("step: 3") }]);
+});
+
+it("keeps function edits inside the workspace's read-only path boundary", async () => {
+  const f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        call("apply_patch", { operation: { type: "create_file", path: "../outside.ts", diff: "+outside" } }, "outside_edit"),
+        call("execute", execution, "outside_execution"),
+      ),
+      functionStep("valid_edit"),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "outside_edit")).toContain('failed');
+  expect(resultOf(f.requests[1], "outside_execution")).toContain('not_run');
+  expect(f.counts().executed).toBe(1);
+});
+
+it("holds execution after malformed function edit arguments", async () => {
+  const malformed = call("apply_patch", {}, "malformed_edit");
+  const item = malformed.output[0];
+  if (item?.type !== "function_call") throw new Error("Expected a function call");
+  item.arguments = "{";
+  const f = await functionFileFixture(
+    (_request, index) => [
+      together(malformed, call("execute", execution, "held_after_malformed")),
+      functionStep("fixed_edit"),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "held_after_malformed")).toContain("not_run");
+  expect(f.counts().executed).toBe(1);
+});
+
+it("stops a multi-operation function edit after its first failed operation", async () => {
+  let f: Awaited<ReturnType<typeof functionFileFixture>> | undefined;
+  const review = reviewingSource(() => f!.workspace.readFile!({ path: "src/tool.ts" }));
+  f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        call("apply_patch", { operations: [
+          { type: "update_file", path: "src/tool.ts", diff: "@@\n-missing source\n+replacement" },
+          { type: "update_file", path: "src/tool.ts", diff: "@@\n-export default {};\n+export default { unwanted: true };" },
+        ] }, "multi_edit"),
+        call("execute", execution, "held_after_multi"),
+      ),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "multi_edit")).toContain("failed");
+  expect(resultOf(f.requests[1], "held_after_multi")).toContain("not_run");
+  expect(review.reviewed).toEqual([{ purpose: "example", source: "export default {};" }]);
+});
+
+it("preserves Guardian refusal after a function edit and holds later calls", async () => {
+  const review = exploreFails("review_denied");
+  const f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        functionStep("edit_before_denial"),
+        call("execute", { ...execution, purpose: "explore" }, "denied_step"),
+        call("execute", execution, "held_after_denial"),
+        call("finish_build", publication, "held_publication"),
+      ),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "denied_step")).toContain("review_denied");
+  expect(resultOf(f.requests[1], "held_after_denial")).toContain("not_run");
+  expect(resultOf(f.requests[1], "held_publication")).toContain("not_run");
+  expect(review.ran).toEqual(["explore", "example"]);
+});
+
+it("holds calls after an earlier execution fails even when a later function edit is malformed", async () => {
+  const review = exploreFails("review_denied");
+  const malformed = call("apply_patch", {}, "late_malformed_edit");
+  const item = malformed.output[0];
+  if (item?.type !== "function_call") throw new Error("Expected a function call");
+  item.arguments = "{";
+  const f = await functionFileFixture(
+    (_request, index) => [
+      together(
+        call("execute", { ...execution, purpose: "explore" }, "first_denied"),
+        call("execute", execution, "held_before_malformed"),
+        malformed,
+        call("finish_build", publication, "held_after_malformed"),
+      ),
+      functionStep("valid_edit"),
+      call("execute", execution),
+      call("finish_build", publication),
+    ][index] ?? prose(),
+    { reviewAndExecute: review.reviewAndExecute },
+  );
+  expect(await f.run()).toMatchObject({ build: "published" });
+  expect(resultOf(f.requests[1], "held_before_malformed")).toContain("not_run");
+  expect(resultOf(f.requests[1], "held_after_malformed")).toContain("not_run");
+  expect(review.ran).toEqual(["explore", "example"]);
 });
