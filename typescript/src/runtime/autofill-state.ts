@@ -172,6 +172,8 @@ interface AutofillRecordedStep {
   /** The key the host pressed in the last field to submit its form, on a form with no submit. */
   readonly submitKey?: AutofillRecipeStep["submitKey"];
   readonly submittedBy?: "host" | "minter";
+  /** `keyboard` once the host pressed the screen's covered submit from the keyboard. */
+  readonly submitVia?: AutofillRecipeStep["submitVia"];
   /** A two-factor method choice's recorded methods. */
   readonly methods?: AutofillRecipeStep["methods"];
   /** The password an earlier screen took that this one asked for again beside a second factor. */
@@ -183,15 +185,16 @@ interface AutofillRecordedStep {
 }
 
 /**
- * A screen's popup, how it submits and the covering notice's control it dismisses, which a step
- * rebuilt for that screen keeps.
+ * A screen's popup, how it submits, from the keyboard included, and the covering notice's control
+ * it dismisses, which a step rebuilt for that screen keeps.
  */
 export const screenSubmit = (
-  screen: Pick<AutofillStep, "popup" | "submit" | "submitKey" | "dismiss">,
+  screen: Pick<AutofillStep, "popup" | "submit" | "submitKey" | "submitVia" | "dismiss">,
 ) => ({
   ...(screen.popup === undefined ? {} : { popup: screen.popup }),
   ...(screen.submit === undefined ? {} : { submit: screen.submit }),
   ...(screen.submitKey === undefined ? {} : { submitKey: screen.submitKey }),
+  ...(screen.submitVia === undefined ? {} : { submitVia: screen.submitVia }),
   ...(screen.dismiss === undefined ? {} : { dismiss: screen.dismiss }),
 });
 
@@ -485,8 +488,9 @@ export const noteRefill = (state: AutofillSignInState) => {
 /**
  * Records what a fill did once it returns: a field it did not fill is not held as filled, nor a
  * saved security answer typed, a step that reached nothing leaves the recipe, a step the host
- * clicked records it, and one whose click another element caught is the open sign-in's `blocked`
- * screen. Returns whether anything reached the page.
+ * clicked records it, with `submitVia` when it pressed the submit from the keyboard, and one whose
+ * click another element caught is the open sign-in's `blocked` screen. Returns whether anything
+ * reached the page.
  */
 export const recordStep = (
   state: AutofillSignInState,
@@ -508,7 +512,13 @@ export const recordStep = (
   const last = state.steps.at(-1);
   if (!reached && submit !== "clicked" && submit !== "uncertain") state.steps.pop();
   else if (submit === "clicked" && last)
-    state.steps[state.steps.length - 1] = { ...last, submittedBy: "host" };
+    state.steps[state.steps.length - 1] = {
+      ...last,
+      submittedBy: "host",
+      ...(stepReport.outcome === "filled" && stepReport.via !== undefined
+        ? { submitVia: stepReport.via }
+        : {}),
+    };
   return reached || submit === "clicked" || submit === "uncertain";
 };
 

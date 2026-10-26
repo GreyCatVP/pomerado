@@ -209,7 +209,9 @@ const sessionRefusal = (
  * step recorded, and declares every mark of the recorded path. Then, given the script's
  * `outputSchema`, every refusal it lists is one the host reads as declared. Last, given
  * `confirms`, the script names each step its session accepted a confirm popup at. The composed
- * script is never run.
+ * script is never run. Its result names, as `commitsUnproven` in the order `commits` declares
+ * them, the commit steps the contract declares unproven, after the last one the session entered,
+ * which no run has shown yet; it leaves the key out when there are none.
  */
 export const checkWriteSession = <
   Extracted extends {
@@ -281,5 +283,18 @@ export const checkWriteSession = <
       const composed = entrypointImportClosure(files, check.confirms.entrypoint);
       yield* confirmActionUnmatched(check.confirms.steps, [...composed.values()]);
     }
-    return { extracted, declared };
+    // The contract check accepted these only as marks of `commits` the session never entered.
+    const declaredUnproven = new Set(extracted.contract.write?.commitsUnproven ?? []);
+    const unproven = (extracted.contract.write?.commits ?? [])
+      .filter((name) => declaredUnproven.has(name))
+      .map(String);
+    const checked: {
+      readonly extracted: Extracted;
+      readonly declared: NonNullable<typeof declared>;
+      readonly commitsUnproven?: readonly string[];
+    } =
+      unproven.length === 0
+        ? { extracted, declared }
+        : { extracted, declared, commitsUnproven: unproven };
+    return checked;
   });

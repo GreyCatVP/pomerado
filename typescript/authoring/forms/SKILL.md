@@ -204,6 +204,12 @@ sets a file input from base64 input with `setInputFiles` uses a deprecated patte
 still allows while the build has no file handle and no `FileInput`: a repair keeps its input
 as it is, and a new tool takes a `FileInput` and uses `files.place`.
 
+Some sites' Download or Share button only prints the page, through `window.print` or a print
+frame in the site's code, and offers no file. Prefer checking the site's code or page before
+clicking such a button live, since its print dialog can stop the page from answering. When the
+site offers no file, prefer returning the details the page shows and saying the site offers no
+downloadable file, over asking the owner to change how it's delivered.
+
 ## Multi-step forms
 
 Filling in or advancing a form that saves data on the site (an application, a profile,

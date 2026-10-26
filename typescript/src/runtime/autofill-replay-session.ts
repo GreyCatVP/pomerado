@@ -240,8 +240,8 @@ export type ReplaySession<
  * A submitted credential screen returning with no recorded error marker is no verdict on the login:
  * the replay ends with the login unmarked (`credential_screen_returned`).
  */
-const returnedCredential = <E extends YieldableError, V extends string, L extends AutofillLogin>(
-  session: ReplaySession<E, V, L>,
+export const returnedCredential = <E extends YieldableError, V extends string, L extends AutofillLogin>(
+  session: Pick<ReplaySession<E, V, L>, "progress" | "sent" | "hooks">,
 ) =>
   Effect.gen(function* () {
     const { progress, sent, hooks } = session;

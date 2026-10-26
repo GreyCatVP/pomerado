@@ -778,6 +778,18 @@ it.each([
   expect(prompts.at(-1)).toBe(prompt);
 });
 
+// A site's approval page holds a code of its own for each sign-in, so the page a new browser shows
+// is never the recorded one: any other page on the recorded page's origin is the approval's screen.
+it("asks once for an approval shown on another page of its recorded origin", async () => {
+  const fake = approvalSite("checkpoint/BBB");
+  const { result } = await signIn(
+    recipe(loginStep, { page: `${origin}/checkpoint/AAA`, fields: [], approval: "device" }),
+    fake,
+  );
+  expect(result).toEqual(Either.right({ alreadySignedIn: false }));
+  expect(steps(fake)).toEqual(["ask:missing_credentials", "fill:login", "ask:approved"]);
+});
+
 it("fails RecipeFailed when the owner declines a recorded approval", async () => {
   const fake = approvalSite("approve");
   const { result } = await signIn(

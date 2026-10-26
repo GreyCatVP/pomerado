@@ -19,6 +19,7 @@ import {
 import { alreadySignedIn, makeReplay, type Replay, workspaceOf } from "./autofill-replay-session.js";
 import { endsAtCodeScreen, lastScreenGone } from "./autofill-replay-code-screen.js";
 import { admitScreen, noteExactSent } from "./autofill-replay-workspace.js";
+import { approvalScreen } from "./autofill-replay-approval.js";
 import { settleCarried } from "./autofill-replay-fill.js";
 import {
   codeScreenOf,
@@ -200,8 +201,16 @@ const runScreen = <E extends YieldableError, V extends string, L extends Autofil
       settleCarried(replay);
       if (![...replay.state.submittedSlots].some(isIdentifier))
         return replay.outcome("identifier_not_submitted");
-      if (!replay.matchesRecorded(inspection.page, recorded))
-        return replay.outcome("screen_changed");
+      // The approval may show on another page of its recorded origin (`approvalScreen`).
+      const approval = yield* approvalScreen(
+        input,
+        replay,
+        recorded,
+        pageOf(replay, recorded).page,
+        inspection.page,
+      );
+      if (approval === "signed_in") return approval;
+      if (approval === "screen_changed") return replay.outcome(approval);
       const answer = yield* askOne(input, {
         id: "approved",
         type: "confirm",

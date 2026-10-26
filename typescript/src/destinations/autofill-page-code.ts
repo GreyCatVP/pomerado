@@ -119,6 +119,7 @@ return {
   ...(submitKey === null || submit === null ? {} : { keySubmit: { submitControls: submit.submitControls } }),
   ...(popupTargetId === undefined ? {} : { popupTargetId }),
   url: primary.url(),
+  document: await documentStart(),
 };`;
 
 /**
@@ -137,8 +138,10 @@ return {
  *   step's inspection found them, which the page kept under `inspection`, the submission's method
  *   as judged, and how each field's secret is found by value, if it is one), reads the page's
  *   alert text when the host counts new alerts (`alertsBefore`), clicks the submit (or, for a step
- *   with a submit key, presses that key in its last field, which stands as the submit),
- *   waits for the page to settle and reads its controls (`pageControlsCode`), with how many of
+ *   with a submit key, presses that key in its last field, which stands as the submit), or presses
+ *   Enter on the submit itself once focus landed on it, when another element caught the click or
+ *   the step says to (`submitVia`), waits for the page to settle and reads its controls
+ *   (`pageControlsCode`), with how many of
  *   their alerts did not show before the click (`newAlerts`) when it read them. A disabled submit it
  *   never clicks: it says so and does nothing, and the host calls again while the page may still
  *   enable it.
@@ -732,9 +735,11 @@ const alertsBefore = ${
 ])`
       : "null"
   };
-const navigated = primary
-  .waitForEvent("framenavigated", { predicate: (frame) => frame === primary.mainFrame(), timeout: ${call.settleMs} })
-  .then(() => true, () => false);
+const nextNavigation = () =>
+  primary
+    .waitForEvent("framenavigated", { predicate: (frame) => frame === primary.mainFrame(), timeout: ${call.settleMs} })
+    .then(() => true, () => false);
+let navigated = nextNavigation();
 // Whether a request for a navigation of the main frame went out from the click on, as a form's
 // submission sends, and whether such a navigation committed since.
 let requested = false;
@@ -747,13 +752,50 @@ const noteRequest = (request) => {
 const noteCommit = (frame) => {
   if (frame === primary.mainFrame()) committed = true;
 };
+// The origin of each navigation of the main frame from the click until the page settled, in order,
+// server redirects included, and the page's address at the click: where the page went on its own
+// from the host's submit, and from where.
+const clickedFrom = primary.url();
+const hops = [];
+const noteHop = (request) => {
+  try {
+    if (request.isNavigationRequest() && request.frame() === primary.mainFrame())
+      hops.push(new URL(request.url()).origin);
+  } catch {}
+};
+// An answer the call returns before the page settled, once it stopped noting navigations.
+const unwatched = (answer) => {
+  primary.off("request", noteHop);
+  return answer;
+};
 primary.on("request", noteRequest);
+primary.on("request", noteHop);
 primary.on("framenavigated", noteCommit);
 let late = false;
+// "keyboard" once the host pressed Enter on the submit itself, which activates it as a click does
+// and which no element over it can catch.
+let via = null;
+// Presses the submit from the keyboard only once focus landed on that same element; false, having
+// pressed nothing, when focus went anywhere else.
+const pressSubmit = async () => {
+  const focused = await submitHandle
+    .evaluate((element) => {
+      element.focus({ preventScroll: true });
+      let active = element.ownerDocument.activeElement;
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+      return active === element;
+    })
+    .catch(() => false);
+  if (!focused) return false;
+  via = "keyboard";
+  navigated = nextNavigation();
+  await submitHandle.press("Enter", { timeout: 5000 });
+  return true;
+};
 try {
   // A submit key goes to the last field, which stands as the submit and submits its own form.
-  if (submitKey === null) await submit.locator.click({ timeout: 5000 });
-  else await submit.locator.press(submitKey, { timeout: 5000 });
+  if (submitKey !== null) await submit.locator.press(submitKey, { timeout: 5000 });
+  else if (!(submitVia === "keyboard" && (await pressSubmit()))) await submit.locator.click({ timeout: 5000 });
 } catch (error) {
   // Playwright's click waits, inside its own timeout, for the navigation it started to commit, which
   // a slow chain of redirects can outlast. One whose request for the main frame went out reached
@@ -763,11 +805,18 @@ try {
     // Playwright names an element that intercepts pointer events when another sits over the
     // submit, and never dispatches the click then: blocked, by the element at the submit's centre.
     const intercepted =
-      submitKey === null && error instanceof Error && error.message.includes("intercepts pointer events");
+      submitKey === null && via === null && error instanceof Error && error.message.includes("intercepts pointer events");
     const blockedBy = intercepted
       ? await submit.locator.evaluate(${coveringCode}, undefined, { timeout: ${elementReadMs} }).catch(() => null)
       : null;
-    return blockedBy === null ? { submit: "failed", url: primary.url() } : { submit: "blocked", blockedBy, url: primary.url() };
+    if (blockedBy === null) return unwatched({ submit: "failed", url: primary.url() });
+    // The covered submit is pressed from the keyboard instead; the element over it is never clicked.
+    try {
+      if (!(await pressSubmit())) return unwatched({ submit: "blocked", blockedBy, url: primary.url() });
+    } catch {
+      if (!requested) return unwatched({ submit: "failed", url: primary.url() });
+      late = true;
+    }
   }
 } finally {
   primary.off("request", noteRequest);
@@ -783,15 +832,25 @@ const lateCommit = !late
 let submission = await refusedSubmission();
 if (submission === null && ((await navigated) || (await lateCommit)))
   await primary.waitForLoadState("domcontentloaded", { timeout: ${call.settleMs} }).catch(() => undefined);
+primary.off("request", noteHop);
 submission ??= await refusedSubmission();
 if (submission !== null) return { submission, url: primary.url() };
+const settled = await documentStart();
+const settledTitle = await primary.title().catch(() => undefined);
 // What the page shows once the submit settled, never a value, for the minter's next step.
 const controls = await pageControls().catch(() => null);
 const newAlerts =
   controls === null || alertsBefore === null ? null : controls.alerts.filter((text) => !alertsBefore.includes(text)).length;
 return {
   submit: "clicked",
+  ...(via === null ? {} : { via }),
   url: primary.url(),
+  navigated: {
+    clicked: clickedFrom,
+    origins: hops,
+    ...(settled === undefined ? {} : { document: settled }),
+    ...(typeof settledTitle === "string" ? { title: settledTitle } : {}),
+  },
   ...(controls === null ? {} : { controls: newAlerts === null ? controls : { ...controls, newAlerts } }),
 };`;
 };
@@ -901,6 +960,7 @@ export const autofillStepCode = (
     }[];
     readonly submit?: string | undefined;
     readonly submitKey?: string | undefined;
+    readonly submitVia?: string | undefined;
     readonly popup?: AutofillPopup | undefined;
   },
   observed: string,
@@ -925,13 +985,14 @@ ${fill === undefined ? "" : `if (popupTargetId !== ${JSON.stringify(fill.popupTa
 }
 ${formControlsCode}
 ${locateCode}
-${fill === undefined ? "" : documentStartCode}
+${documentStartCode}
 const observed = ${JSON.stringify(observed)};
 const selectors = ${JSON.stringify(step.fields.map((field) => field.selector))};
 const questionSelectors = ${JSON.stringify(step.fields.map((field) => questionRead(field, fill === undefined)))};
 const codeSlots = ${JSON.stringify(step.fields.map((field) => field.slot === "code"))};
 const submitSelector = ${JSON.stringify(step.submit ?? null)};
 const submitKey = ${JSON.stringify(step.submitKey ?? null)};
+const submitVia = ${JSON.stringify(step.submitVia ?? null)};
 // Every control is found first, then read in one pass (readControls). A control that is not found
 // ends the call at once, after the no-wait read of the ones found before it (checkReads).
 const foundFields = [];

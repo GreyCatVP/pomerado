@@ -41,6 +41,7 @@ import {
   type InsertionRefusal,
 } from "./credential-keyboard.js";
 import { PageControls } from "./page-controls.js";
+import { PageNavigation, reportedNavigation } from "./sign-in-redirect.js";
 
 /** One fill call's answer: a control that moved, an empty field the host typed, or its own. */
 const FillAnswer = Schema.Union(
@@ -78,7 +79,10 @@ const FillAnswer = Schema.Union(
   Schema.Struct({
     /** `disabled`: the submit was disabled, so the call clicked nothing. */
     submit: Schema.Literal("clicked", "failed", "disabled", "none"),
+    /** A `clicked` submit the call pressed from the keyboard. */
+    via: Schema.optional(Schema.Literal("keyboard")),
     url: Schema.String,
+    navigated: Schema.optional(PageNavigation),
     controls: Schema.optional(PageControls),
   }),
   /** Another element sat over the submit and caught the click, which never reached it. */
@@ -359,6 +363,12 @@ interface CallInput {
 
 interface FillInput extends CallInput {
   readonly values: readonly string[];
+  /**
+   * Every value the host typed earlier in this sign-in on this browser, in any step: a clicked
+   * submit reports where the page went (`navigated`) only when it is set and nothing the page
+   * chose holds one of these or `values` (`reportedNavigation`). A first screen's is empty.
+   */
+  readonly typedBefore?: readonly string[];
   readonly keyboard: CredentialKeyboard;
   /** How each value is typed; `paste` by default. */
   readonly typing?: CredentialTypingMode;
@@ -751,7 +761,10 @@ const afterFieldCall = (
  * submits refuses the submit as before.
  * A step that names `dismiss` clicks that covering notice's own control first, when the page shows
  * it, and refuses the step with nothing typed when it is no such control (`dismissNotice`). A
- * click another element caught, which never reached the submit, is `blocked`, with that element
+ * click another element caught, which never reached the submit, is pressed from the keyboard
+ * instead: the host focuses that same submit and presses Enter on it, only once focus landed on
+ * it, under the same guard, and reports it `clicked` with `via: "keyboard"`; the element over it is
+ * never clicked. When focus goes anywhere else it is `blocked`, with that element
  * (`blockedBy`): nothing was sent and the fields still hold what was typed. On a step that names
  * `dismiss`, a notice drawn only once the fields were typed is dismissed then, and the submit
  * clicked once more, with nothing typed again. A click that ran out of time while the next page
@@ -784,7 +797,9 @@ export const fillAutofillStep = (input: FillInput): Effect.Effect<AutofillStepRe
       if (ended !== undefined) return ended;
     }
     const boxes = codeBoxes(step, input.values);
-    const report = yield* submitStep(input, progress, boxes);
+    const typed =
+      input.typedBefore === undefined ? undefined : [...input.typedBefore, ...input.values];
+    const report = yield* submitStep(input, progress, boxes, typed);
     if (!isBlocked(report) || step.dismiss === undefined) return report;
     const again = yield* dismissNotice(input, progress);
     if (again.emptied) {
@@ -795,11 +810,11 @@ export const fillAutofillStep = (input: FillInput): Effect.Effect<AutofillStepRe
         const ended = yield* fillField(input, progress, index);
         if (ended !== undefined) return ended;
       }
-      return yield* submitStep(input, progress, boxes);
+      return yield* submitStep(input, progress, boxes, typed);
     }
     if (!again.dismissed) return report;
     progress.check = typedFields(step, progress);
-    return yield* submitStep(input, progress, boxes);
+    return yield* submitStep(input, progress, boxes, typed);
   });
 
 /**
@@ -833,7 +848,7 @@ export const resubmitAutofillStep = (input: CallInput): Effect.Effect<AutofillSt
     if (notice.refusal !== undefined) return notice.refusal;
     progress.check = typedFields(step, progress);
     const codeFields = step.fields.flatMap((field, index) => (field.slot === "code" ? [index] : []));
-    return yield* submitStep(input, progress, codeFields.length > 1 ? codeFields : []);
+    return yield* submitStep(input, progress, codeFields.length > 1 ? codeFields : [], undefined);
   });
 
 /** The first of the step's selectors that reaches into another frame, its `dismiss` included. */
@@ -898,9 +913,17 @@ const dismissNotice = (
 /**
  * The step's submit, judged again, guarded and clicked once every field was typed
  * (`submitWhenEnabled`), and what became of it. `boxes` are the step's code boxes, each of which
- * must hold exactly one character before the click.
+ * must hold exactly one character before the click. A clicked submit reports where the page went
+ * (`navigated`, `reportedNavigation`) only when `typed`, every value the sign-in typed on this
+ * browser, is known: a click again, or a fill whose host did not say what it typed before
+ * (`typedBefore`), never reports it.
  */
-const submitStep = (input: CallInput, progress: FillProgress, boxes: readonly number[]) =>
+const submitStep = (
+  input: CallInput,
+  progress: FillProgress,
+  boxes: readonly number[],
+  typed: readonly string[] | undefined,
+) =>
   Effect.gen(function* () {
     const { step } = input;
     // A re-judge never changes a method, so the submission's method is the one judged now.
@@ -952,6 +975,19 @@ const submitStep = (input: CallInput, progress: FillProgress, boxes: readonly nu
           ...foundEvidence(answer.url, undefined, evidenceOrigins(input, progress)),
         }),
       );
-    const report = filledReport(step, progress, answer.submit, answer.url);
-    return answer.controls === undefined ? report : { ...report, controls: answer.controls };
+    const navigated =
+      answer.submit !== "clicked" || answer.navigated === undefined || typed === undefined
+        ? undefined
+        : reportedNavigation({
+            page: answer.navigated,
+            url: answer.url,
+            typed,
+            trusted: [input.inspection.siteOrigin, ...input.inspection.authenticationOrigins],
+          });
+    return {
+      ...filledReport(step, progress, answer.submit, answer.url),
+      ...(answer.via === undefined ? {} : { via: answer.via }),
+      ...(navigated === undefined ? {} : { navigated }),
+      ...(answer.controls === undefined ? {} : { controls: answer.controls }),
+    };
   });

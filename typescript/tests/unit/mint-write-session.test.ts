@@ -132,6 +132,7 @@ describe("a write session's publication check", () => {
   const contract = (write?: {
     readonly confirmation: "message" | "readback" | "unverifiable";
     readonly commits?: readonly unknown[];
+    readonly commitsUnproven?: readonly unknown[];
   }) => ({ contract: write === undefined ? {} : { write }, inputDecodes: true });
   const check = (
     steps: readonly WriteSessionMarks[],
@@ -197,6 +198,34 @@ describe("a write session's publication check", () => {
         }).result,
       ),
     ).toBe("contract_input_mismatch");
+  });
+
+  describe("with save steps the session stopped before, declared unproven", () => {
+    // The session saved the product, the one save the caller's facts allowed, and confirmed it.
+    const saved: WriteSessionMarks = { enteredMarks: ["save_product"], confirmation: "readback" };
+    const unproven = (
+      commitsUnproven: readonly unknown[],
+      commits = ["save_product", "save_insured"],
+    ) => contract({ confirmation: "readback", commits, commitsUnproven });
+
+    it("publishes later marks the session never entered, and reports them", () => {
+      const extracted = unproven(["save_insured"]);
+      expect(check([saved], extracted).result).toEqual(
+        Exit.succeed({ extracted, declared: "readback", commitsUnproven: ["save_insured"] }),
+      );
+      // Every mark after the last entered one may be unproven, in the order commits declares.
+      const longer = unproven(
+        ["rate_quote", "save_insured"],
+        ["save_product", "save_insured", "rate_quote"],
+      );
+      expect(check([saved], longer).result).toEqual(
+        Exit.succeed({
+          extracted: longer,
+          declared: "readback",
+          commitsUnproven: ["save_insured", "rate_quote"],
+        }),
+      );
+    });
   });
 
   it("accepts any short identifier as a mark name, and still refuses one with a space", () => {

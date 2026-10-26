@@ -145,7 +145,8 @@ export const makeSignInBrowser = (options: {
           }),
         ),
       ),
-    typed: typing.typed,
+    // Read live: a card fill on the same browser marks the shared record too.
+    typed: () => typing.typed,
   });
   return {
     inspect: calls.inspect,
