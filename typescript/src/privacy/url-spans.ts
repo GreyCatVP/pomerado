@@ -228,7 +228,7 @@ export const urlSpans = (text: string): UrlSpan[] => {
  */
 export const urlSpanAt = (text: string, start: number): UrlSpan => ({
   start,
-  end: Math.max(start, urlEnd(text, start, start + 1).end),
+  end: Math.max(start, urlEnd(text, start, start).end),
 });
 
 // The same starts, each read to the next space, quote or angle bracket.

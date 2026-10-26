@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { urlReaches, urlSpans } from "../../src/privacy/url-spans.js";
+import { urlReaches, urlSpanAt, urlSpans } from "../../src/privacy/url-spans.js";
 import {
   failureDetail,
   failureDetailBounds,
@@ -290,4 +290,42 @@ describe("URL boundaries", () => {
     // About 3 s here; a scan that rereads the text at each delimiter or URL takes minutes.
     expect(performance.now() - started).toBeLessThan(10_000);
   }, 20_000);
+});
+
+describe("urlSpanAt", () => {
+  it("returns an empty span when start is at or beyond the end of text", () => {
+    expect(urlSpanAt("", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt("hello", 5)).toEqual({ start: 5, end: 5 });
+    expect(urlSpanAt("hello", 10)).toEqual({ start: 10, end: 10 });
+  });
+
+  it("returns an empty span when start holds a terminator", () => {
+    expect(urlSpanAt(" ", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt("\t/path", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt("\n/path", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt(" /path", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt('"/path"', 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt("'/path'", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt("`/path`", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt("<https://example.com>", 0)).toEqual({ start: 0, end: 0 });
+    expect(urlSpanAt(">https://example.com", 0)).toEqual({ start: 0, end: 0 });
+  });
+
+  it("returns an empty span when start points to a terminator inside text", () => {
+    expect(urlSpanAt("see https://example.com", 3)).toEqual({ start: 3, end: 3 });
+    expect(urlSpanAt("route: /api/v1", 6)).toEqual({ start: 6, end: 6 });
+  });
+
+  it("returns the full span for a valid URL or path starting at start", () => {
+    expect(urlSpanAt("/v1/items?page=1", 0)).toEqual({ start: 0, end: 16 });
+    expect(urlSpanAt("https://example.com/api", 0)).toEqual({ start: 0, end: 23 });
+    expect(urlSpanAt("see https://example.com/api", 4)).toEqual({ start: 4, end: 27 });
+    expect(urlSpanAt("route: /api/v1", 7)).toEqual({ start: 7, end: 14 });
+  });
+
+  it("trims trailing sentence punctuation from the span", () => {
+    expect(urlSpanAt("/v1/items.", 0)).toEqual({ start: 0, end: 9 });
+    expect(urlSpanAt("https://example.com/api,", 0)).toEqual({ start: 0, end: 23 });
+    expect(urlSpanAt("(https://example.com/api)", 1)).toEqual({ start: 1, end: 24 });
+  });
 });

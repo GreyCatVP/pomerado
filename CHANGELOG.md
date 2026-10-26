@@ -796,6 +796,8 @@
 
 ### Fixes
 
+- `urlSpanAt` returns an empty span when `start` points to a terminator or at the end of text. It passed `start + 1` to `urlEnd`, skipping the boundary check for the character at `start`: a span starting on whitespace, a quote or an angle bracket swallowed that delimiter and scanned forward to the next terminator, and an empty input produced an end index beyond the input length. It now starts the scan at `start`, so a terminator or end-of-string ends the span immediately as documented.
+
 - A sign-in or card-fill step's inspection, and each call of its fill, skips a frame the page takes away while the call searches the page's frames for the step's controls, such as an ad slot or a widget that reloads itself, and reads the rest. The search read each frame with no regard for one going away, so Playwright's `Frame was detached` failed the whole call: the inspection came back `page_unavailable` even when the step's fields showed in the page itself, and a fill call failed the same way. Now a frame whose read fails once it is detached counts for nothing, along with any match the search read in it before, so a field only in that frame is `not_found`, as when the page has not drawn it yet, and a field in the page is still its one visible match. The inspection's read of the screen's buttons skips such a frame too. A read that fails in a frame still attached fails the call as before.
   - `pomerado.hostProtocol` stays 1, and no exported type changes.
 
