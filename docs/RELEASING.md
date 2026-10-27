@@ -13,7 +13,7 @@ There are two channels:
 
 ## Canaries
 
-1. A pull request merges into `main` after a green `CI` check, a `review/clear` check from the independent review, and an `Approval` check. Rulesets on `main` require all three. `Approval` passes at once for a maintainer's pull request from a branch of this repository, and for any other once a code owner approves its current head commit. [The approval gate](#the-approval-gate) describes it.
+1. A pull request merges into `main` after a green `CI` check, a `review/clear` check from the independent review, and an `Approval` check. Rulesets on `main` require all three. For a pull request whose author isn't a maintainer, [the review gate](#the-review-gate) posts `review/clear` from CodeRabbit's review. `Approval` passes at once for a maintainer's pull request from a branch of this repository, and for any other once a code owner approves its current head commit. [The approval gate](#the-approval-gate) describes it.
 2. The merge starts the Release workflow. It picks the canary version `X.Y.Z-canary.N`:
    - `X.Y.Z` is the `version` in `package.json` while npm doesn't have it, and the next patch version once it does.
    - `N` is the workflow's run number, so a later canary always sorts higher.
@@ -83,6 +83,36 @@ Known limits:
 
 - A dispatch evaluates many commits in one run, so it isn't serialized with the runs for each commit. If a review lands while a dispatch runs, the dispatch can post a verdict that is seconds old. The next event on that pull request, or another dispatch, corrects it.
 - The gate doesn't handle `merge_group` events, so a merge queue's commits get no `Approval`. Before `main` adopts a merge queue, the gate needs a `merge_group` path, or the ruleset needs to stop requiring `Approval` on queue commits. Every pull request in a queue has already passed the gate at its head commit.
+
+## The review gate
+
+The [review gate workflow](../.github/workflows/review-gate.yml) posts the `review/clear` check on pull requests whose author isn't a maintainer, from [CodeRabbit](https://www.coderabbit.ai)'s review, with the rules in `tools/review-gate.ts` and the policy in [`.github/review-gate.json`](../.github/review-gate.json). A maintainer is a user `.github/CODEOWNERS` lists who also has write permission. A maintainer's own pull request gets `review/clear` from the independent review, and [`.coderabbit.yaml`](../.coderabbit.yaml) has CodeRabbit skip maintainers' pull requests.
+
+For any other pull request into `main`, the gate posts:
+
+- `action_required` when the pull request changes a path the policy lists or more lines than the policy allows, shares its head commit with another outside pull request, CodeRabbit rates its merge risk above what the policy clears or put a blocking finding in a review's summary, or the gate can't read CodeRabbit's verdict with confidence. A maintainer then reviews it and posts `review/clear` through the reviewer App. The gate never replaces a check that another lane posted on the same commit.
+- `in_progress` while the pull request is a draft, or CodeRabbit hasn't reviewed its head commit yet.
+- `failure` while CodeRabbit's review leaves a Critical or Major finding open, or a pre-merge check errors. A finding stops blocking once CodeRabbit marks it addressed in a later commit, or once a maintainer resolves its thread.
+- `success` once CodeRabbit has reviewed the head commit and left nothing blocking.
+
+When CodeRabbit carries a review across a merge of `main` instead of reviewing the merge, the gate counts it only if the pull request changes every file exactly as it did at the reviewed commit, and `main` changed none of those files in between. Otherwise the merge could keep the pull request's version of a file and undo a change on `main` that nobody reviewed. The gate counts only what CodeRabbit's bot account wrote. It never counts CodeRabbit's approval, its commit status, or a thread that CodeRabbit resolved on someone's command, since others can trigger those. Findings CodeRabbit puts in a review's summary, outside the diff or repeated from an earlier review, have no thread to resolve, so they go to a maintainer. `Approval` still needs a code owner's approval of the head commit, so a CLEAR alone never merges an outside contributor's pull request. CodeRabbit reads the repository's rules from `AGENTS.md` and `CONTRIBUTING.md` on `main`, and its `Repository rules` pre-merge check fails a change that clearly breaks one of them.
+
+The gate runs when a pull request opens, reopens, gets a push, moves in or out of draft or is edited, and when CodeRabbit writes or edits a comment. Resolving a thread starts no workflow, so after resolving a finding a maintainer runs the gate again with `gh workflow run review-gate.yml --repo Pomerado/pomerado --ref main -f pull_request=<number>`. Without `-f`, it evaluates every open pull request.
+
+Setting this up takes, once, in this order:
+
+1. CodeRabbit's GitHub App, installed on this repository. Public repositories get its open-source plan, which reviews each developer's pull requests up to an hourly limit.
+2. The reviewer GitHub App that the ruleset requires `review/clear` from, with the repository permissions Checks set to read and write and Pull requests set to read. Give this workflow its own private key, so it can be revoked without touching any other.
+3. A `review-gate` environment that deploys only from `main`, with no required reviewers. Create it with that branch policy before the workflow first runs and before adding its secret. It holds the variable `REVIEW_APP_ID`, the reviewer App's ID, and the secret `REVIEW_APP_PRIVATE_KEY`. Only the review gate workflow uses it.
+
+The workflow checks the variable and secret first and fails with an error naming them when either is missing. Without the check, the pull request can't merge.
+
+Known limits:
+
+- CodeRabbit's walkthrough markers and severity labels aren't a documented API. When the gate can't read them it asks for a maintainer instead of clearing, and a format change needs an update to `tools/review-gate.ts`.
+- The open-source plan's hourly limit can delay a review, and the check waits meanwhile. Once the limit resets, a maintainer can comment `@coderabbitai review`, since CodeRabbit doesn't answer other bots or people outside the organization.
+- The gate reads the standing check, then posts. A maintainer's check that lands in the seconds between can end up older than the gate's verdict. Post it again, and the gate leaves it standing from then on.
+- The reviewer App's key can post `review/clear` wherever the App is installed, so the environment's branch policy, which keeps the key to this workflow on `main`, matters.
 
 ## Changes and versions
 

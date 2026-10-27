@@ -1,0 +1,90 @@
+# Review gate. It posts the `review/clear` check run, which the ruleset on main requires, on pull
+# requests whose author isn't a maintainer, from CodeRabbit's review of the head commit. A
+# maintainer's own pull request gets `review/clear` from the independent review, and the gate leaves
+# it alone. tools/review-gate.ts holds the rules, .github/review-gate.json the policy, and
+# typescript/tests/unit/review-gate.test.ts tests them. docs/RELEASING.md describes the setup.
+#
+# A pull request can't change this gate. pull_request_target, issue_comment and workflow_dispatch
+# all run this file, the script and the policy as they are on the default branch.
+# The job checks out that trusted commit only, never a pull request's code, and reads each fact from
+# GitHub's API.
+#
+# The check comes from the reviewer GitHub App, and the ruleset requires `review/clear` from that
+# App. A workflow a pull request adds runs as GitHub Actions, so a check it names `review/clear`
+# doesn't count. The App's key lives in the review-gate environment, which only this job uses and
+# which deploys only from main.
+#
+# CodeRabbit submits its review and marks findings addressed before it updates the coverage marker
+# in its walkthrough comment, and that update starts issue_comment here. The job runs only for that
+# bot's comments on pull requests. Resolving a thread starts no workflow, so a maintainer dispatches
+# this workflow on main to evaluate one pull request, or every open one, again.
+name: Review gate
+on:
+  pull_request_target:
+    # edited covers a pull request retargeted to the default branch.
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, edited]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number. Leave empty to evaluate every open pull request.
+        required: false
+        default: ""
+permissions: {}
+# Runs for one pull request wait for each other, and each reads the review as it stands when it
+# starts, so the last check posted reflects the latest review. CodeRabbit edits its walkthrough
+# several times per review, and GitHub keeps only the newest pending run per group. Anyone else's
+# comment gets a group of its own, so its skipped run can't displace CodeRabbit's pending one.
+concurrency:
+  group: >-
+    review-gate-${{ (github.event_name == 'issue_comment' && github.event.comment.user.login !=
+    'coderabbitai[bot]') && format('skip-{0}', github.run_id) || github.event.pull_request.number
+    || github.event.issue.number || inputs.pull_request || github.run_id }}
+  cancel-in-progress: false
+jobs:
+  review:
+    name: Evaluate review
+    if: >-
+      github.repository == 'Pomerado/pomerado' && (github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request && github.event.comment.user.login == 'coderabbitai[bot]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: review-gate
+    # The workflow token only checks out the default branch. The App token does the rest.
+    permissions:
+      contents: read
+    steps:
+      - name: Check the reviewer app configuration
+        env:
+          APP_ID: ${{ vars.REVIEW_APP_ID }}
+          HAS_PRIVATE_KEY: ${{ secrets.REVIEW_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$APP_ID" ] || [ "$HAS_PRIVATE_KEY" != true ]; then
+            echo "::error::The review-gate environment needs the REVIEW_APP_ID variable and the REVIEW_APP_PRIVATE_KEY secret of the reviewer GitHub App, which posts the review/clear check. docs/RELEASING.md describes the setup."
+            exit 1
+          fi
+      # Without a ref, checkout takes the commit the event names, the default branch's head for
+      # each event this workflow handles.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Mint the reviewer app token
+        id: review-app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.REVIEW_APP_ID }}
+          private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+          permission-pull-requests: read
+      - name: Post the review/clear check
+        env:
+          REVIEW_APP_TOKEN: ${{ steps.review-app.outputs.token }}
+          REVIEW_APP_ID: ${{ vars.REVIEW_APP_ID }}
+        run: node tools/review-gate.ts

@@ -178,7 +178,7 @@ export interface ClientOptions {
 export const createClient = (token: string, api: string, options: ClientOptions = {}) => {
   const attempts = options.attempts ?? 4;
   const wait = options.wait ?? delay;
-  const request = async (method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> => {
+  const request = async (method: "GET" | "POST" | "PATCH", path: string, body?: unknown): Promise<unknown> => {
     for (let attempt = 1; ; attempt += 1) {
       let problem: string;
       try {
@@ -219,6 +219,7 @@ export const createClient = (token: string, api: string, options: ClientOptions 
       }
     },
     post: (path: string, body: unknown) => request("POST", path, body),
+    patch: (path: string, body: unknown) => request("PATCH", path, body),
   };
 };
 

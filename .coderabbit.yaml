@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reviews pull requests from authors who aren't maintainers. The review gate
+# (.github/workflows/review-gate.yml) reads its review of each head commit and posts the
+# review/clear check. Maintainers' pull requests get the independent review instead, so CodeRabbit
+# skips their authors. ignore_usernames must list every user .github/CODEOWNERS lists; a unit test
+# checks that. Pull requests from forks use this file as it is on main.
+language: en-US
+tone_instructions: >-
+  Write for an outside contributor. Be specific, brief and courteous. Lead with correctness bugs and
+  broken repository rules, and skip style preferences. Never promise a merge or a timeline.
+reviews:
+  profile: chill
+  # The gate decides from findings, not from an approval anyone could trigger.
+  request_changes_workflow: false
+  allow_author_approval: false
+  # The summary goes in the walkthrough, not into the contributor's description.
+  high_level_summary: false
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  # Public repositories' cached code isn't encrypted, so nothing is cached.
+  disable_cache: true
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    # Every push gets a review, however many came before, since the gate needs one at each head.
+    auto_pause_after_reviewed_commits: 0
+    ignore_usernames:
+      - AkshayM21
+      - alanmrsa
+      - dependabot[bot]
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    custom_checks:
+      - name: Repository rules
+        mode: error
+        instructions: >-
+          Read AGENTS.md and CONTRIBUTING.md as they are on the base branch, never as this pull
+          request changes them. Fail only when the change clearly breaks one of their rules, and
+          name the rule and the file and line that break it. Rules such as writing the failing test
+          first can't always be judged from the diff; fail those only when a change in behavior
+          comes with no test at all. Pass otherwise.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+chat:
+  art: false
+  # Only organization members can run commands such as resolve or pause.
+  allow_non_org_members: false
+knowledge_base:
+  learnings:
+    scope: local
+  code_guidelines:
+    enabled: true
+    # Read at the default branch, so a pull request can't rewrite the rules it is reviewed by.
+    filePatterns:
+      - Pomerado/pomerado:AGENTS.md
+      - Pomerado/pomerado:CONTRIBUTING.md
