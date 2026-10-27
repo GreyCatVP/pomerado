@@ -37,6 +37,12 @@ it.each([
   ["a number dialed with 00, as a national number", "0044 7911 123456", "07911 123456"],
   ["a number dialed with 00 and a three-digit calling code", "00353 87 123 4567", "87 123 4567"],
   ["a number dialed with 011, without its calling code", "011 44 7911 123456", "7911 123456"],
+  ["an Indian number dialed with +, without its calling code", "+91 98100 12345", "9810012345"],
+  ["an Indian number dialed with 00, without its calling code", "00 91 98100 12345", "9810012345"],
+  ["an Indian number dialed with 011, without its calling code", "011 91 98100 12345", "9810012345"],
+  ["an Indian number dialed with 0011, without its calling code", "0011 91 98100 12345", "9810012345"],
+  ["a UK number dialed with 0011, without its calling code", "0011 44 7911 123456", "7911 123456"],
+  ["a UK number dialed with 0011, as a national number", "0011 44 7911 123456", "07911 123456"],
 ])("keeps %s", (_name, typed, shown) => {
   expect(readBack(typed, holding(shown))).toBe("kept");
 });
@@ -45,6 +51,8 @@ it.each([
   ["shifted under another country and cut", "+7 912 345-67-89", "(791) 234-5678"],
   ["cut short", "+1 415 555 0134", "(415) 555-013"],
   ["dialed with 00, shifted under another country", "0044 7911 123456", "(004) 479-1112"],
+  ["dialed with 0011 to India, cut short", "0011 91 98100 12345", "981001234"],
+  ["dialed with 0011 to the UK, cut short", "0011 44 7911 123456", "7911 12345"],
   ["with a digit lost inside", "+1 415 555 0134", "(415) 555-034"],
 ])("reads a number %s as changed", (_name, typed, shown) => {
   expect(readBack(typed, holding(shown))).toBe("changed");
@@ -179,6 +187,8 @@ it.each([
   ["+1 (415) 555-0134", "1"],
   ["+44 7911 123456", "44"],
   ["0049 1512 3456789", "49"],
+  ["0011 91 98100 12345", "91"],
+  ["  0011 44 7911 123456  ", "44"],
   ["+380 44 123 4567", "380"],
   ["+86 138 0013 8000", "86"],
   ["+213 555 12 34 56", "213"],
@@ -187,7 +197,7 @@ it.each([
   expect(changedPhoneNotice(number)).toContain(`The number's country calling code is +${code}.`);
 });
 
-it.each(["912 345 6789", "8 912 345-67-89", "+0 123 4567", "+12"])(
+it.each(["912 345 6789", "8 912 345-67-89", "+0 123 4567", "+12", "0011 91", "0011 0 123 4567"])(
   "names no calling code for %s, which does not say it",
   (number) => {
     expect(callingCode(number)).toBeUndefined();

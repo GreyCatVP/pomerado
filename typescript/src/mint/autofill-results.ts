@@ -153,11 +153,11 @@ const shortCallingCodes = new Set([
 
 /**
  * A phone number's country calling code, digits only, when the number is written in international
- * form, after `+` or `00`; undefined for a number written another way, which does not say it.
+ * form, after `+`, `0011` or `00`; undefined for a number written another way, which does not say it.
  */
 export const callingCode = (number: string) => {
   const written = number.trim();
-  const lead = /^(?:\+|00)/u.exec(written)?.[0];
+  const lead = /^(?:\+|0011|00)/u.exec(written)?.[0];
   if (lead === undefined) return undefined;
   const digits = written.slice(lead.length).replaceAll(/[^0-9]/gu, "");
   if (digits.length < 4 || digits.startsWith("0")) return undefined;
